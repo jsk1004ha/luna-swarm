@@ -4,6 +4,7 @@ import { useCompanyStore } from "../store/companyStore";
 import type { RunSummary, Snapshot } from "../types";
 
 const JSON_HEADERS = { Accept: "application/json" };
+const SNAPSHOT_RETRY_DELAYS_MS = [0, 80, 180, 360] as const;
 let disconnectCurrent: (() => void) | null = null;
 
 export type UiControlPayload =
@@ -31,7 +32,13 @@ function apiUrl(path: string): string {
 
 async function getJson(path: string): Promise<unknown> {
   const response = await fetch(apiUrl(path), { headers: JSON_HEADERS });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: unknown } | null;
+    const message = typeof body?.error === "string" ? body.error : response.statusText;
+    const error = new Error(`${response.status} ${message}`) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
+  }
   return response.json();
 }
 
@@ -40,7 +47,22 @@ export async function loadRuns(): Promise<RunSummary[]> {
 }
 
 export async function loadSnapshot(runId: string): Promise<Snapshot> {
-  return snapshotSchema.parse(await getJson(`/api/ui/snapshot?runId=${encodeURIComponent(runId)}`));
+  let lastError: unknown;
+  for (const [attempt, waitMs] of SNAPSHOT_RETRY_DELAYS_MS.entries()) {
+    if (waitMs > 0) await delay(waitMs);
+    try {
+      return snapshotSchema.parse(await getJson(`/api/ui/snapshot?runId=${encodeURIComponent(runId)}`));
+    } catch (error) {
+      lastError = error;
+      const status = (error as { status?: number }).status;
+      if (attempt === SNAPSHOT_RETRY_DELAYS_MS.length - 1 || (status !== undefined && status < 500 && status !== 404)) throw error;
+    }
+  }
+  throw lastError;
+}
+
+export function selectInitialRunId(runs: RunSummary[]): string | null {
+  return runs.find((run) => run.ownership === "owned" && run.readOnly !== true)?.id ?? null;
 }
 
 export async function sendUiControl(payload: UiControlPayload): Promise<UiControlResponse> {
@@ -70,9 +92,13 @@ export async function bootstrapCompany(): Promise<() => void> {
   store.setConnection("connecting");
   try {
     const runs = await loadRuns();
-    if (!runs.length) throw new Error("저장된 실행이 없습니다. 명령석에서 새 실행을 시작하세요.");
     store.setRuns(runs);
-    const runId = runs[0]!.id;
+    const runId = selectInitialRunId(runs);
+    if (!runId) {
+      store.setError(null);
+      store.setConnection("live");
+      return () => undefined;
+    }
     store.setSnapshot(await loadSnapshot(runId), "live");
     connectRun(runId);
   } catch (error) {
@@ -110,6 +136,10 @@ export async function refreshRuns(preferredRunId?: string): Promise<void> {
   useCompanyStore.getState().setRuns(runs);
   const runId = preferredRunId ?? runs[0]?.id;
   if (runId) await switchRun(runId);
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function connectRun(runId: string): void {

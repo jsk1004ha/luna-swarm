@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { isValidRunId } from "../store.js";
 import type {
   AgentRole,
@@ -485,7 +486,20 @@ async function loadSelectedRun(runsDirectory: string, requestedRunId?: string): 
 }
 
 async function readState(path: string): Promise<RunState> {
-  const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return parseState(await readFile(path, "utf8"));
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await delay(20 * 2 ** attempt);
+    }
+  }
+  throw lastError;
+}
+
+function parseState(serialized: string): RunState {
+  const parsed: unknown = JSON.parse(serialized);
   if (!isRecord(parsed) || !isRecord(parsed.state)) throw new Error("Invalid state envelope");
   const state = parsed.state;
   if (
@@ -1188,6 +1202,7 @@ function eventTitle(type: string): string {
     learning_policy_rejected: "개선 후보 보류",
     directive_received: "회장 지시 접수",
     directive_applied: "회장 지시 반영",
+    command_start_accepted: "운영자 실행 승인",
   };
   const localized = titles[type];
   if (localized) return localized;

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { bootstrapCompany } from "./api/client";
+import { CommandRail } from "./components/CommandRail";
 import { DagView } from "./components/DagView";
 import { DirectoryPanel } from "./components/DirectoryPanel";
 import { EventDock } from "./components/EventDock";
@@ -23,6 +24,7 @@ export function App() {
   const selectedAgentId = useCompanyStore((state) => state.selectedAgentId);
   const hasSnapshot = useCompanyStore((state) => state.snapshot !== null);
   const error = useCompanyStore((state) => state.error);
+  const runs = useCompanyStore((state) => state.runs);
 
   useEffect(() => {
     let disconnect: () => void = () => undefined;
@@ -58,11 +60,12 @@ export function App() {
       <ViewNav />
       {view !== "org" && <DirectoryPanel />}
       <main id="main-workspace" className="main-workspace">
-          {error && !hasSnapshot ? <section className="api-error" role="alert"><span className="brand-moon" aria-hidden="true" /><small>CONNECTION REQUIRED</small><h2>운영 서버에 연결할 수 없습니다.</h2><p>{error}</p><p><code>npm start -- ui --workspace .</code> 서버를 확인한 뒤 새로고침하세요. 전체 제어 가능한 데모 서버는 <code>npm start -- ui --mock</code>으로 실행합니다.</p><button onClick={() => window.location.reload()}>다시 연결</button></section> : <>
+          {error && !hasSnapshot ? <section className="api-error" role="alert"><span className="brand-moon" aria-hidden="true" /><small>CONNECTION REQUIRED</small><h2>운영 서버에 연결할 수 없습니다.</h2><p>{error}</p><p>서버 연결을 복구한 뒤 아래 명령석에서 목표를 입력하세요. 연결만으로는 에이전트가 시작되지 않습니다.</p><button onClick={() => window.location.reload()}>다시 연결</button></section> : !hasSnapshot ? <section className="idle-workspace" aria-labelledby="idle-workspace-title"><span className="brand-moon" aria-hidden="true" /><small>OPERATOR CONTROLLED</small><h1 id="idle-workspace-title">명령 대기</h1><p>목표를 입력하기 전에는 모델 호출도, 에이전트 작업도 시작하지 않습니다.</p>{runs.length > 0 && <p className="history-note">저장된 실행 기록 {runs.length}개가 있습니다. 상단 실행 선택기에서 직접 선택해야 열립니다.</p>}</section> : <>
           {view === "hq" && <HQView />}
           {view === "org" && <OrgView />}
           {view === "dag" && <DagView />}
         </>}
+        <CommandRail />
       </main>
       <InspectorPanel />
     </div>

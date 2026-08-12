@@ -84,7 +84,11 @@ export class SwarmOrchestrator {
     this.harness = new AdaptiveHarness(options.workspace, options.config);
   }
 
-  async start(goal: string, signal?: AbortSignal): Promise<RunState> {
+  async start(
+    goal: string,
+    signal?: AbortSignal,
+    onReady?: () => void | Promise<void>,
+  ): Promise<RunState> {
     await this.harness.initialize();
     const now = isoNow();
     this.state = {
@@ -106,6 +110,7 @@ export class SwarmOrchestrator {
     };
     await this.options.store.save(structuredClone(this.state));
     await this.event({ type: "run_started", status: "planning" });
+    await onReady?.();
     return this.runPipeline(signal);
   }
 

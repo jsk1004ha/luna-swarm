@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,6 +27,29 @@ function config() {
     rateLimitCooldownMs: 1,
   };
 }
+
+test("start readiness is signalled only after persisted state and the run-start audit exist", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-ready-"));
+  try {
+    const backend = new MockAgentBackend(demoHandler);
+    const store = new AtomicRunStore(workspace, ".state", "run-ready");
+    const gateway = new AgentGateway({ backend, config: config() });
+    const orchestrator = new SwarmOrchestrator({ gateway, store, config: config(), workspace });
+    await assert.rejects(
+      orchestrator.start("준비 순서 검증", undefined, async () => {
+        const persisted = await store.load();
+        assert.equal(persisted.goal, "준비 순서 검증");
+        const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string });
+        assert.deepEqual(events.map((event) => event.type), ["run_started"]);
+        assert.equal(backend.calls.length, 0);
+        throw new Error("stop-after-ready");
+      }),
+      /stop-after-ready/,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
 
 test("end-to-end DAG, blind quorum, and provenance gates complete", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-orch-"));

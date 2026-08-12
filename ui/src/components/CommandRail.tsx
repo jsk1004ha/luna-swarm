@@ -15,23 +15,20 @@ export function CommandRail() {
   const selectedAgent = snapshot?.agents.find((agent) => agent.id === selectedAgentId);
   const readOnly = snapshot?.observation?.readOnly ?? snapshot?.control?.readOnly ?? true;
   const mode = snapshot?.control?.mode;
-  const effectiveAction: CommandAction = mode === "idle" ? "start" : action;
+  const startOnly = !snapshot || readOnly || mode === "idle";
+  const effectiveAction: CommandAction = startOnly ? "start" : action;
   const needsText = ["start", "instruction", "concurrency", "priority"].includes(effectiveAction);
-  const awaitsStart = mode === "idle" && effectiveAction !== "start";
-  const actionBlocked = (effectiveAction !== "start" && readOnly) || awaitsStart;
+  const actionBlocked = effectiveAction !== "start" && (!snapshot || readOnly);
 
   useEffect(() => {
-    if (snapshot?.run.isStale) {
+    if (startOnly) {
+      setAction("start");
       setExpanded(true);
-      setFeedback("이 실행은 현재 UI 프로세스가 소유하지 않아 관찰 전용입니다. 새 실행은 시작할 수 있습니다.");
+      setFeedback(snapshot
+        ? "이 기록은 관찰 전용입니다. 새 목표를 입력해야 새 실행이 시작됩니다."
+        : "목표를 입력하기 전에는 모든 직원과 모델 호출이 대기합니다.");
     }
-  }, [snapshot?.run.isStale]);
-
-  useEffect(() => {
-    if (mode !== "idle") return;
-    setExpanded(true);
-    setFeedback("목표를 입력하기 전에는 모든 직원이 대기합니다.");
-  }, [mode]);
+  }, [startOnly, snapshot?.run.id]);
 
   const field = useMemo(() => {
     if (effectiveAction === "start") return { label: "새 실행 목표", placeholder: "회사가 달성할 구체적인 목표를 입력하세요", type: "text" };
@@ -43,21 +40,26 @@ export function CommandRail() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!snapshot || busy || actionBlocked || (needsText && !text.trim())) return;
+    if (busy || actionBlocked || (needsText && !text.trim())) return;
     if (effectiveAction === "priority" && !selectedAgent?.taskId) {
       setFeedback("우선순위를 변경할 업무가 있는 직원을 먼저 선택하세요.");
       return;
     }
+    if (effectiveAction !== "start" && !snapshot) return;
+    if (effectiveAction === "start" && snapshot?.mode !== "demo" && !window.confirm(`다음 목표로 실제 에이전트 실행을 시작할까요?\n\n${text.trim()}`)) return;
     if (effectiveAction === "cancel" && !window.confirm("전체 실행을 취소할까요? 진행 중 호출에는 AbortSignal이 전달되고 승인된 결과는 보존됩니다.")) return;
     setBusy(true);
     setFeedback("명령 전달 중");
     try {
       let payload: UiControlPayload;
-      if (effectiveAction === "start") payload = { action: effectiveAction, goal: text.trim(), mock: snapshot.mode === "demo" };
-      else if (effectiveAction === "instruction") payload = { action: effectiveAction, runId: snapshot.run.id, text: text.trim(), trigger: "next_turn" };
-      else if (effectiveAction === "concurrency") payload = { action: effectiveAction, runId: snapshot.run.id, value: Number(text) };
-      else if (effectiveAction === "priority") payload = { action: effectiveAction, runId: snapshot.run.id, taskId: selectedAgent!.taskId!, value: Number(text) };
-      else payload = { action: effectiveAction, runId: snapshot.run.id };
+      if (effectiveAction === "start") payload = { action: effectiveAction, goal: text.trim(), mock: snapshot?.mode === "demo" };
+      else {
+        if (!snapshot) return;
+        if (effectiveAction === "instruction") payload = { action: effectiveAction, runId: snapshot.run.id, text: text.trim(), trigger: "next_turn" };
+        else if (effectiveAction === "concurrency") payload = { action: effectiveAction, runId: snapshot.run.id, value: Number(text) };
+        else if (effectiveAction === "priority") payload = { action: effectiveAction, runId: snapshot.run.id, taskId: selectedAgent!.taskId!, value: Number(text) };
+        else payload = { action: effectiveAction, runId: snapshot.run.id };
+      }
       const result = await sendUiControl(payload);
       setText("");
       setFeedback(result.message);
@@ -83,7 +85,7 @@ export function CommandRail() {
         <option value="priority" disabled={readOnly || mode === "idle" || !selectedAgent?.taskId}>선택 업무 우선순위</option>
       </select></label>
     </div>
-    <button className="command-submit" disabled={busy || actionBlocked || (needsText && !text.trim())}>{busy ? "전달 중" : "명령 실행"}<kbd>↵</kbd></button>
-    <output aria-live="polite">{feedback || (readOnly ? "외부 실행 · 관찰 전용" : "이 UI가 소유한 실행만 제어합니다.")}</output>
+    <button className="command-submit" disabled={busy || actionBlocked || (needsText && !text.trim())}>{busy ? "전달 중" : effectiveAction === "start" ? "새 실행 시작" : "명령 실행"}<kbd>↵</kbd></button>
+    <output aria-live="polite">{feedback || (readOnly ? "기존 기록 · 자동 실행 안 함" : "이 UI가 소유한 실행만 제어합니다.")}</output>
   </form>;
 }

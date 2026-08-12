@@ -118,6 +118,24 @@ test("snapshot exposes bounded task, team, and final outputs with verification s
   }
 });
 
+test("snapshot read retries a transient state replacement instead of returning a false 500", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-state-race-"));
+  const runId = "run-state-race";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  await writeFile(join(runDirectory, "state.json"), "{partial", "utf8");
+  const repair = delay(35).then(() => writeStateEnvelope(runDirectory, realState(workspace, runId)));
+  try {
+    const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
+    await repair;
+    assert.equal(snapshot.run.id, runId);
+    assert.equal(snapshot.mode, "real");
+  } finally {
+    await repair.catch(() => undefined);
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("dashboard server serves health, snapshot, and static assets", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-server-"));
   const assetsDirectory = join(workspace, "assets");

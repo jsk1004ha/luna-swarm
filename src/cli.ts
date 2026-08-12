@@ -117,7 +117,19 @@ async function ui(args: string[]): Promise<void> {
       store,
       mock: command.mock === true,
       releaseExecutionLease,
-      onRuntimeReady: (runtime) => {
+      onRuntimeReady: async (runtime) => {
+        const goalSummary = command.goal.length > 240
+          ? `${command.goal.slice(0, 239)}…`
+          : command.goal;
+        const startEvent = await store.appendEvent({
+          eventId: randomUUID(),
+          at: new Date().toISOString(),
+          runId,
+          type: "command_start_accepted",
+          status: "accepted",
+          message: `운영자가 UI에서 새 실행을 승인했습니다: ${goalSummary}`,
+        });
+        printEvent(startEvent);
         registry.register(runtime);
         runtimeRegistered = true;
         resolveReady();
@@ -518,7 +530,7 @@ async function launch(options: {
   loaded?: RunState;
   releaseExecutionLease?: () => Promise<void>;
   abortController?: AbortController;
-  onRuntimeReady?: (runtime: ManagedRunRuntime) => void;
+  onRuntimeReady?: (runtime: ManagedRunRuntime) => void | Promise<void>;
   onRuntimeDisposed?: (runtime: ManagedRunRuntime) => void;
 }): Promise<void> {
   const releaseExecutionLease = options.releaseExecutionLease
@@ -584,10 +596,13 @@ async function launch(options: {
       store: options.store,
       configuredMaximum: options.config.maxConcurrency,
     };
-    options.onRuntimeReady?.(managedRuntime);
     const state = options.loaded
-      ? await orchestrator.resume(options.loaded, controller.signal)
-      : await orchestrator.start(options.goal, controller.signal);
+      ? (await options.onRuntimeReady?.(managedRuntime), await orchestrator.resume(options.loaded, controller.signal))
+      : await orchestrator.start(
+          options.goal,
+          controller.signal,
+          () => options.onRuntimeReady?.(managedRuntime!),
+        );
     printResult(state, options.store.finalPath, options.store.organizationPath);
     if (state.status === "failed") process.exitCode = 1;
   } finally {

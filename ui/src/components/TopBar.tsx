@@ -48,7 +48,7 @@ export function TopBar() {
     </div>
     <div className="run-selector">
       <label className="sr-only" htmlFor="run-picker">실행 선택</label>
-      <select id="run-picker" value={snapshot?.run.id ?? ""} onChange={(event) => void switchRun(event.target.value)}>{runs.map((run) => <option key={run.id} value={run.id}>{run.id}</option>)}</select>
+      <select id="run-picker" value={snapshot?.run.id ?? ""} onChange={(event) => event.target.value && void switchRun(event.target.value)}><option value="">실행 기록 선택</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.id}</option>)}</select>
     </div>
     <div className="top-actions">
       <button className="pause-control" disabled={!canPause || busy} onClick={() => void togglePause()} title={controlMessage || (mode === "paused" ? "실행 재개" : "신규 호출 일시 정지")}><span aria-hidden="true">{mode === "paused" ? "▶" : "Ⅱ"}</span>{busy ? "처리 중" : mode === "paused" ? "재개" : "일시정지"}</button>
