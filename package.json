@@ -1,0 +1,46 @@
+{
+  "name": "luna-swarm",
+  "version": "0.1.0",
+  "description": "Adaptive vertical organizations of ChatGPT-authenticated Codex Luna agents",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "luna-swarm": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && npm run build:ui",
+    "build:server": "tsc -p tsconfig.json",
+    "build:ui": "npm --prefix ui run build",
+    "dashboard": "tsx src/cli.ts dashboard",
+    "dev": "tsx src/cli.ts",
+    "dev:ui": "npm --prefix ui run dev",
+    "start": "node dist/src/cli.js",
+    "test": "node --import tsx --test test/**/*.test.ts && npm run test:ui",
+    "test:server": "node --import tsx --test test/**/*.test.ts",
+    "test:ui": "npm --prefix ui test",
+    "check": "tsc -p tsconfig.json --noEmit && npm --prefix ui run check",
+    "ui": "tsx src/cli.ts ui"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "0.147.0",
+    "pixi.js": "8.19.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "ws": "8.21.3",
+    "zod": "4.4.3",
+    "zustand": "5.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "@types/ws": "8.18.1",
+    "@vitejs/plugin-react": "6.0.5",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "8.2.1"
+  }
+}
