@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#081628" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="application-name" content="Luna Swarm HQ" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Luna Swarm HQ" />
+    <meta
+      name="description"
+      content="100명 이상의 Luna Swarm 에이전트를 회사 조직처럼 관찰하는 실시간 운영 대시보드"
+    />
+    <title>Luna Swarm HQ · Agent Company</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.ico?v=luna-hq-20260812-12" />
+    <link rel="manifest" href="/site.webmanifest?v=luna-hq-20260812-12" />
+    <link rel="stylesheet" href="/styles.css?v=luna-hq-20260812-12" />
+  </head>
+  <body>
+    <a class="skip-link" href="#company-canvas">HQ 지도로 건너뛰기</a>
+    <noscript>실시간 회사 지도를 표시하려면 JavaScript가 필요합니다.</noscript>
+    <div id="app" class="app-shell" data-connection="connecting">
+      <header class="command-bar">
+        <div class="brand-lockup" aria-label="Luna HQ">
+          <div class="brand-mark" aria-hidden="true">
+            <span class="brand-moon"></span>
+            <span class="brand-orbit"></span>
+          </div>
+          <div>
+            <p class="eyebrow">AGENT COMPANY</p>
+            <h1>Luna Swarm HQ</h1>
+          </div>
+        </div>
+
+        <div class="run-heading">
+          <div class="run-line">
+            <span id="mode-badge" class="mode-badge">DEMO</span>
+            <span id="run-status" class="run-status">조직 연결 중</span>
+            <span id="run-id" class="run-id">—</span>
+          </div>
+          <p id="run-goal" class="run-goal">회사 운영 데이터를 불러오고 있습니다.</p>
+        </div>
+
+        <dl class="kpi-strip" aria-label="회사 운영 지표">
+          <div class="kpi">
+            <dt>전체 직원</dt>
+            <dd id="kpi-total">—</dd>
+          </div>
+          <div class="kpi kpi-active">
+            <dt>업무 중 직원</dt>
+            <dd id="kpi-active">—</dd>
+          </div>
+          <div class="kpi">
+            <dt>완료 업무</dt>
+            <dd id="kpi-completed">—</dd>
+          </div>
+          <div class="kpi kpi-alert">
+            <dt>차단</dt>
+            <dd id="kpi-blocked">—</dd>
+          </div>
+        </dl>
+
+        <div class="connection-cluster">
+          <div id="connection-badge" class="connection-badge" role="status">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label">연결 중</span>
+          </div>
+          <time id="last-sync" class="last-sync">마지막 동기화 —</time>
+        </div>
+      </header>
+
+      <main class="hq-layout">
+        <nav id="section-nav" class="section-rail panel" aria-label="HQ 빠른 이동">
+          <button class="rail-button is-active" type="button" data-nav-action="overview" aria-label="회사 전체 보기" aria-pressed="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10l8-6 8 6v10M8 20v-6h8v6M4 20h16"/></svg>
+            <span>본사</span>
+          </button>
+          <button class="rail-button" type="button" data-nav-action="people" aria-label="직원 검색으로 이동" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><path d="M3.5 20v-2.5A4.5 4.5 0 0 1 8 13h2a4.5 4.5 0 0 1 4.5 4.5V20M16 7.5a2.5 2.5 0 0 1 0 5M16.5 14a4 4 0 0 1 4 4v2"/></svg>
+            <span>직원</span>
+          </button>
+          <button class="rail-button" type="button" data-nav-action="blocked" aria-label="차단된 직원 보기" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 3.5 19h17L12 3Z"/><path d="M12 9v4M12 16.5v.5"/></svg>
+            <span>차단</span>
+          </button>
+          <button class="rail-button" type="button" data-nav-action="events" aria-label="회사 사건 이력 열기" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h12v16H6zM9 8h6M9 12h6M9 16h4"/></svg>
+            <span>사건</span>
+          </button>
+          <button class="rail-button rail-command" type="button" data-nav-action="command" aria-label="회장 명령석으로 이동" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v11H9l-4 3V5Z"/><path d="m9 10 2 2 4-4"/></svg>
+            <span>명령</span>
+          </button>
+        </nav>
+
+        <aside class="roster-panel panel" aria-label="회사 명부와 필터">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">DIRECTORY</p>
+              <h2>조직 명부</h2>
+            </div>
+            <span id="filtered-count" class="count-pill">0 / 0</span>
+          </div>
+
+          <label class="search-box" for="agent-search">
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle cx="8.5" cy="8.5" r="5.25"></circle>
+              <path d="m12.4 12.4 4.1 4.1"></path>
+            </svg>
+            <input
+              id="agent-search"
+              type="search"
+              autocomplete="off"
+              placeholder="이름·업무·직급 검색"
+            />
+            <kbd>/</kbd>
+          </label>
+
+          <section class="filter-section" aria-labelledby="status-filter-title">
+            <div class="section-label-row">
+              <h3 id="status-filter-title">업무 상태</h3>
+              <button id="clear-filters" class="text-button" type="button">초기화</button>
+            </div>
+            <div id="status-filters" class="status-filter-grid">
+              <button class="status-chip is-active" type="button" data-status="all">
+                <span class="chip-glyph glyph-all">◆</span>전체
+              </button>
+              <button class="status-chip" type="button" data-status="working">
+                <span class="chip-glyph glyph-working">●</span>작업
+              </button>
+              <button class="status-chip" type="button" data-status="researching">
+                <span class="chip-glyph glyph-researching">◇</span>조사
+              </button>
+              <button class="status-chip" type="button" data-status="reviewing">
+                <span class="chip-glyph glyph-reviewing">✓</span>검토
+              </button>
+              <button class="status-chip" type="button" data-status="waiting">
+                <span class="chip-glyph glyph-waiting">···</span>대기
+              </button>
+              <button class="status-chip" type="button" data-status="blocked">
+                <span class="chip-glyph glyph-blocked">!</span>차단
+              </button>
+            </div>
+          </section>
+
+          <section class="department-section" aria-labelledby="department-title">
+            <div class="section-label-row">
+              <h3 id="department-title">부서 현황</h3>
+              <span class="section-note">클릭해 집중</span>
+            </div>
+            <div id="department-list" class="department-list"></div>
+          </section>
+
+          <section class="people-section" aria-labelledby="people-title">
+            <div class="section-label-row sticky-label">
+              <h3 id="people-title">직원</h3>
+              <span id="roster-note" class="section-note">전체 명부</span>
+            </div>
+            <div id="roster-list" class="roster-list" role="list"></div>
+          </section>
+        </aside>
+
+        <section class="campus-panel panel" aria-label="Luna HQ 본사 지도">
+          <div class="campus-toolbar">
+            <div>
+              <p class="eyebrow">LIVE CAMPUS · <span id="campus-agent-count">0</span> SEATS</p>
+              <h2 id="campus-title">Luna HQ 본사</h2>
+            </div>
+            <div class="canvas-actions" aria-label="지도 조작">
+              <button id="zoom-out" class="icon-button" type="button" aria-label="축소">−</button>
+              <button id="fit-view" class="fit-button" type="button" title="전체 보기 (F)">전체 보기</button>
+              <button id="zoom-in" class="icon-button" type="button" aria-label="확대">＋</button>
+              <button id="fullscreen" class="icon-button fullscreen-button" type="button" aria-label="전체 화면">↗</button>
+            </div>
+          </div>
+
+          <div id="canvas-wrap" class="canvas-wrap">
+            <canvas
+              id="company-canvas"
+              tabindex="0"
+              aria-label="부서별 직원 좌석과 공용 공간이 표시된 Luna HQ 회사 지도"
+              aria-describedby="canvas-summary"
+            ></canvas>
+            <div id="canvas-loading" class="canvas-loading" role="status">
+              <span class="loading-orbit" aria-hidden="true"></span>
+              <strong>조직을 불러오는 중</strong>
+              <span>좌석과 보고 라인을 배치하고 있습니다.</span>
+            </div>
+            <div id="canvas-tooltip" class="canvas-tooltip" hidden></div>
+            <div class="campus-legend" aria-hidden="true">
+              <span><i class="legend-dot legend-working"></i>작업</span>
+              <span><i class="legend-diamond legend-researching"></i>조사</span>
+              <span><i class="legend-ring legend-reviewing"></i>검토</span>
+              <span><i class="legend-alert legend-blocked">!</i>차단</span>
+            </div>
+            <div class="campus-hint">드래그 이동 · 휠 확대 · 직원 클릭</div>
+          </div>
+
+          <form id="command-form" class="command-console" autocomplete="off">
+            <div class="command-symbol" aria-hidden="true">⌘</div>
+            <label class="command-input-wrap" for="company-command">
+              <span>회장 명령석</span>
+              <input
+                id="company-command"
+                name="goal"
+                type="text"
+                maxlength="2000"
+                placeholder="회사에 새 목표를 명령하세요…"
+                required
+              />
+            </label>
+            <label class="command-mode-wrap" for="command-action">
+              <span>명령 대상</span>
+              <select id="command-action" name="action">
+                <option value="intervene">현재 프로젝트에 지시</option>
+                <option value="resume" disabled>중단 프로젝트 재개</option>
+                <option value="start-real">새 프로젝트 · 실제</option>
+                <option value="start-mock">새 프로젝트 · 모의</option>
+              </select>
+            </label>
+            <label class="command-concurrency-wrap" for="command-concurrency">
+              <span>동시성</span>
+              <input id="command-concurrency" type="number" min="1" max="1024" value="128" />
+            </label>
+            <button id="command-submit" class="command-submit" type="submit">
+              <span>명령 실행</span>
+              <kbd>↵</kbd>
+            </button>
+            <p id="command-feedback" class="command-feedback" role="status"></p>
+          </form>
+
+          <div class="occupancy-bar" aria-label="동시 가동 현황">
+            <div class="occupancy-copy">
+              <span>모델 호출 동시성</span>
+              <strong id="concurrency-label">0 / 0</strong>
+            </div>
+            <div class="meter-track">
+              <div id="concurrency-meter" class="meter-fill"></div>
+            </div>
+            <div class="phase-copy">
+              <span>전체 진행</span>
+              <strong id="progress-label">0%</strong>
+            </div>
+          </div>
+
+          <p id="canvas-summary" class="sr-only" aria-live="polite"></p>
+        </section>
+
+        <aside class="inspector-panel panel" aria-label="선택한 직원 상세">
+          <div class="panel-heading inspector-heading">
+            <div>
+              <p class="eyebrow">INSPECTOR</p>
+              <h2>직원 상세</h2>
+            </div>
+            <button id="close-inspector" class="icon-button subtle-button" type="button" aria-label="선택 해제">×</button>
+          </div>
+
+          <div id="inspector-empty" class="inspector-empty">
+            <div class="empty-orbit" aria-hidden="true"></div>
+            <strong>직원을 선택하세요</strong>
+            <p>회사 지도나 왼쪽 명부에서 한 명을 선택하면 현재 업무와 최근 활동을 볼 수 있습니다.</p>
+          </div>
+
+          <div id="inspector-content" class="inspector-content" hidden>
+            <div class="identity-card">
+              <div id="agent-avatar" class="agent-avatar" aria-hidden="true">
+                <span class="avatar-head"></span>
+                <span class="avatar-body"></span>
+              </div>
+              <div class="identity-copy">
+                <div class="identity-status-line">
+                  <span id="agent-status" class="agent-status">작업 중</span>
+                  <span id="agent-id" class="agent-id">#000</span>
+                </div>
+                <h3 id="agent-name">—</h3>
+                <p id="agent-role">—</p>
+              </div>
+            </div>
+
+            <dl class="identity-meta">
+              <div><dt>부서</dt><dd id="agent-department">—</dd></div>
+              <div><dt>직급</dt><dd id="agent-rank">—</dd></div>
+              <div><dt>팀</dt><dd id="agent-team">—</dd></div>
+            </dl>
+
+            <section class="assignment-card">
+              <p class="card-label">CURRENT ASSIGNMENT</p>
+              <h4 id="agent-task">배정 업무 없음</h4>
+              <p id="agent-message">현재 좌석에서 다음 업무를 기다리고 있습니다.</p>
+              <div class="task-progress-row">
+                <span>업무 진행도</span>
+                <strong id="agent-progress-label">0%</strong>
+              </div>
+              <div class="task-progress-track">
+                <div id="agent-progress" class="task-progress-fill"></div>
+              </div>
+            </section>
+
+            <section class="capability-card" aria-labelledby="capability-title">
+              <div class="section-label-row">
+                <h3 id="capability-title">역량·근거</h3>
+                <span id="capability-state" class="capability-state">기록 없음</span>
+              </div>
+              <dl class="capability-list">
+                <div><dt>배정된 전문 역할</dt><dd id="agent-specialist">기록 없음</dd></div>
+                <div><dt>실제 사용 스킬</dt><dd id="agent-skills">기록 없음</dd></div>
+                <div><dt>메모리 조회</dt><dd id="agent-memory">0건</dd></div>
+              </dl>
+              <p class="capability-note">메모리는 현재 업무의 가설·절차 힌트로만 사용되며 외부 근거를 대신하지 않습니다.</p>
+            </section>
+
+            <section class="activity-card">
+              <div class="section-label-row">
+                <h3>활동 신호</h3>
+                <span id="agent-activity-badge" class="activity-badge">IDLE</span>
+              </div>
+              <div id="activity-visual" class="activity-visual" data-activity="idle" aria-hidden="true">
+                <span class="activity-line line-a"></span>
+                <span class="activity-line line-b"></span>
+                <span class="activity-line line-c"></span>
+                <span class="activity-cursor"></span>
+              </div>
+            </section>
+
+            <section class="agent-events-section">
+              <div class="section-label-row">
+                <h3>최근 사건</h3>
+                <button id="focus-agent" class="text-button" type="button">지도에서 보기</button>
+              </div>
+              <ol id="agent-events" class="agent-events"></ol>
+            </section>
+          </div>
+        </aside>
+      </main>
+
+      <footer class="event-dock" aria-label="실시간 회사 사건">
+        <button id="event-drawer-open" class="event-dock-label" type="button" aria-haspopup="dialog" aria-controls="event-drawer">
+          <span class="live-pulse" aria-hidden="true"></span>
+          <strong>LIVE</strong>
+          <span>회사 사건</span>
+          <span id="event-dock-count" class="event-dock-count">0</span>
+        </button>
+        <div id="event-stream" class="event-stream" aria-live="off"></div>
+        <div class="event-dock-stats">
+          <span>CALLS <strong id="metric-calls">0</strong></span>
+          <span>RETRY <strong id="metric-retries">0</strong></span>
+          <span>SKILL PICKS <strong id="metric-skills">0</strong></span>
+          <span>MEMORY READS <strong id="metric-memory">0</strong></span>
+          <span>EXPERIENCE WRITES <strong id="metric-learning">0</strong></span>
+        </div>
+      </footer>
+
+      <div id="event-drawer-backdrop" class="event-drawer-backdrop" hidden></div>
+      <section id="event-drawer" class="event-drawer" role="dialog" aria-modal="true" aria-labelledby="event-drawer-title" hidden>
+        <header class="event-drawer-header">
+          <div>
+            <p class="eyebrow">COMPANY HISTORY</p>
+            <div class="event-drawer-title-row">
+              <h2 id="event-drawer-title">회사 사건 이력</h2>
+              <span id="event-history-count" class="count-pill">0 / 0</span>
+            </div>
+          </div>
+          <button id="event-drawer-close" class="icon-button" type="button" aria-label="사건 이력 닫기">×</button>
+        </header>
+        <div id="event-category-filters" class="event-category-filters" aria-label="사건 카테고리">
+          <button class="event-category-chip is-active" type="button" data-event-category="all" aria-pressed="true">전체</button>
+          <button class="event-category-chip" type="button" data-event-category="important" aria-pressed="false">중요</button>
+          <button class="event-category-chip" type="button" data-event-category="task" aria-pressed="false">업무</button>
+          <button class="event-category-chip" type="button" data-event-category="model" aria-pressed="false">모델</button>
+          <button class="event-category-chip" type="button" data-event-category="capability" aria-pressed="false">역량·학습</button>
+        </div>
+        <div class="event-drawer-body">
+          <div id="event-history" class="event-history" role="list" aria-label="최신순 회사 사건"></div>
+          <aside id="event-detail" class="event-detail" aria-live="polite">
+            <p class="card-label">EVENT DETAIL</p>
+            <div id="event-detail-empty" class="event-detail-empty">
+              <strong>사건을 선택하세요</strong>
+              <p>직원이 없는 시스템·모델 사건은 이곳에서 전체 내용을 확인할 수 있습니다.</p>
+            </div>
+            <div id="event-detail-content" hidden>
+              <div class="event-detail-heading">
+                <span id="event-detail-severity" class="event-severity">INFO</span>
+                <time id="event-detail-time">—</time>
+              </div>
+              <h3 id="event-detail-title">—</h3>
+              <p id="event-detail-message">—</p>
+              <dl id="event-detail-meta" class="event-detail-meta"></dl>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </div>
+    <script type="module" src="/app.js?v=luna-hq-20260812-12"></script>
+  </body>
+</html>

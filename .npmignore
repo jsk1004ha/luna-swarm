@@ -1,0 +1,7 @@
+.luna-swarm/
+node_modules/
+dist/test/
+test/
+upload/
+*.zip
+*.tgz

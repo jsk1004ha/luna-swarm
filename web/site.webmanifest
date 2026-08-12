@@ -1,0 +1,19 @@
+{
+  "name": "Luna Swarm HQ",
+  "short_name": "Luna HQ",
+  "description": "100명 이상의 Luna Swarm 직원과 회사 사건을 관찰하는 실시간 운영 본부",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050b14",
+  "theme_color": "#081628",
+  "icons": [
+    {
+      "src": "/favicon.ico?v=luna-hq-20260812-9",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "lang": "ko-KR",
+  "orientation": "any"
+}
