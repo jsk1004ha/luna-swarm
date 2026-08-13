@@ -1,11 +1,11 @@
 # Luna Swarm Harness v2
 
-Harness v2는 128개의 모델을 한꺼번에 호출하는 기능이 아니라, 고정된 128개 논리 직원을 구조화된 계약과 검증 절차로 운영하는 계층입니다.
+Harness v2는 모델을 무조건 128개 호출하는 기능이 아니라, 실행 계획에 맞게 산정된 논리 직원을 구조화된 계약과 검증 절차로 운영하는 계층입니다.
 
 ## 현재 구현된 실행 계약
 
-- `lab-128@2` 고정 조직: 총괄 8, 연구 40, 개발 48, 품질 24, 통합 8
-- 본부 → 실 → 팀 → 셀의 128개 고정 Agent Slot과 역할별 도구·파일·네트워크 정책
+- 기본 `auto` 조직: 계획의 작업 수·동시성·검증자 수를 기준으로 14~256명의 논리 roster를 산정하고 실행 전체에 고정
+- 본부 → 실 → 팀 → 셀의 가변 Agent Slot과 역할별 도구·파일·네트워크 정책 (`lab-128@2` 명칭은 기존 저장 실행 호환용 schema version)
 - Task DAG를 revisioned Work Order로 변환하고 실행자와 독립 검증자를 결정적으로 배정
 - 자유 채팅 대신 `WORK_ORDER`, `ARTIFACT_SUBMITTED`, `GATE_RECEIPT` 등 구조화된 메시지 사용
 - 결과와 게이트 receipt를 실행 디렉터리의 `blackboard-v2`에 canonical JSON + SHA-256 CAS로 불변 저장
@@ -15,7 +15,7 @@ Harness v2는 128개의 모델을 한꺼번에 호출하는 기능이 아니라,
 - Work Order, Role Contract, Mission, dependency artifact를 item 단위로 Context Compiler에 넣고 필수 항목이 예산을 넘으면 자르지 않고 실패
 - Work Order의 도구·파일·네트워크 정책을 역할 계약보다 좁힌 뒤 실제 App Server sandbox에 적용; 현재 backend가 강제할 수 없는 쓰기·도구·좁은 파일 범위는 실행 전 거부
 - 최대 9명의 sealed-first Council Engine과 validator 충돌/고위험 검증 workflow 연결, claim 대상 challenge, minority report, 결정론 실패 우선 규칙
-- Dashboard API와 HQ·명부·조직 화면에 고유 이름을 가진 고정 128명 전체, Work Order 상태, 공개 가능한 Council 요약을 노출
+- Dashboard API와 HQ·명부·조직 화면에 해당 실행에 배정된 고유 이름의 논리 직원 전체, Work Order 상태, 공개 가능한 Council 요약을 노출
 - v2 이전의 진행 중 실행은 미완료 Work Order를 결정적으로 backfill하되, 구현 전에 봉인된 Oracle commitment나 검증 가능한 CAS/G0/G2/G3가 없는 과거 결과는 사후 생성으로 위장하지 않고 migration-required로 중단
 
 ## P0 지식·평가 엔진
@@ -48,7 +48,7 @@ Program Knowledge Graph는 현재 **정적 AST 관계**입니다. 탐색은 파�
 ```text
 src/harness-v2/
 ├── contracts.ts              # v2 계약과 상태
-├── organization-registry.ts  # 고정 128 Agent Slot
+├── organization-registry.ts  # 자동/지정형 가변 Agent Slot
 ├── work-orders.ts            # Work Order와 fenced lifecycle
 ├── blackboard.ts             # immutable CAS/revision/staleness
 ├── gates.ts                  # G0~G4 receipt 평가 엔진

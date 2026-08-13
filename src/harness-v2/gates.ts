@@ -4,6 +4,7 @@ import type {
   CouncilOverride,
   GateId,
   GateReceiptContent,
+  OrganizationRegistryV2,
   ValidationVoteArtifactContent,
   WorkOrder,
 } from "./contracts.js";
@@ -33,6 +34,8 @@ export interface GateSetEvaluationInput {
   overrides?: CouncilOverride[];
   blackboard?: ImmutableBlackboard;
   oracle?: { suite: OracleSuite; reveal?: HiddenOracleReveal };
+  /** Registry pinned to the run; defaults to the backward-compatible 128-slot roster. */
+  registry?: OrganizationRegistryV2;
 }
 
 export interface GateEvaluationResult {
@@ -130,6 +133,7 @@ export async function evaluateGateSet(input: GateSetEvaluationInput): Promise<Ga
           input.outputArtifacts,
           receipt,
           input.blackboard,
+          input.registry ?? organizationRegistryV2(),
         );
         blockers.push(...provenanceBlockers.map((reason) => `G3: ${reason}`));
       }
@@ -252,6 +256,7 @@ async function validateG3VoteProvenance(
   outputArtifacts: ArtifactRevision[],
   receipt: GateReceiptArtifact,
   blackboard: ImmutableBlackboard,
+  registry: OrganizationRegistryV2,
 ): Promise<string[]> {
   const blockers: string[] = [];
   const quorum = receipt.content.quorum;
@@ -286,7 +291,6 @@ async function validateG3VoteProvenance(
   const outputRefs = outputArtifacts.map(toRef);
   const outputProducerIds = new Set(outputArtifacts.map((artifact) => artifact.createdBy.agentId));
   const outputProducerTeams = new Set(outputArtifacts.map((artifact) => artifact.createdBy.teamId));
-  const registry = organizationRegistryV2();
   const seenAgents = new Set<string>();
   const seenValidatorIds = new Set<string>();
   for (const { ref, artifact, content } of records) {

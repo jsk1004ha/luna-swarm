@@ -2,7 +2,10 @@ import type { JsonValue } from "../types.js";
 import type { MissionPreflightReport } from "./preflight.js";
 
 export const HARNESS_V2_ORG_VERSION = "lab-128@2" as const;
+/** Default retained for persisted-run and deterministic assignment compatibility. */
 export const HARNESS_V2_AGENT_COUNT = 128 as const;
+export const HARNESS_V2_MIN_AGENT_COUNT = 14 as const;
+export const HARNESS_V2_MAX_AGENT_COUNT = 256 as const;
 
 export type HeadquartersId =
   | "command"
@@ -54,7 +57,7 @@ export interface AgentRoleContract {
 
 export interface OrganizationRegistryV2 {
   orgVersion: typeof HARNESS_V2_ORG_VERSION;
-  totalAgents: typeof HARNESS_V2_AGENT_COUNT;
+  totalAgents: number;
   units: OrganizationUnitV2[];
   agents: AgentRoleContract[];
 }
@@ -434,6 +437,10 @@ export interface KnowledgeCapsuleStateRef {
 
 export interface HarnessV2RunState {
   orgVersion: typeof HARNESS_V2_ORG_VERSION;
+  /** Resolved organization size pinned for the lifetime of this run. */
+  organizationHeadcount?: number;
+  /** Reviewer capacity used to build the pinned organization roster. */
+  organizationReviewerSlots?: number;
   workOrders: Record<string, WorkOrderRecordV2>;
   artifactHeads: Record<string, ArtifactRef>;
   councils: Record<string, CouncilSnapshot>;

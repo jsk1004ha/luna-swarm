@@ -4,6 +4,7 @@ import type { AgentRole, SwarmConfig } from "./types.js";
 
 export const DEFAULT_CONFIG: SwarmConfig = {
   model: "gpt-5.6-luna",
+  organizationHeadcount: "auto",
   maxConcurrency: 128,
   initialConcurrency: 8,
   minConcurrency: 2,
@@ -84,6 +85,9 @@ export async function loadConfig(
 }
 
 export function validateConfig(config: SwarmConfig): void {
+  if (config.organizationHeadcount !== "auto") {
+    intInRange("organizationHeadcount", config.organizationHeadcount, 14, 256);
+  }
   intInRange("maxConcurrency", config.maxConcurrency, 1, 1_024);
   intInRange("initialConcurrency", config.initialConcurrency, 1, 1_024);
   intInRange("minConcurrency", config.minConcurrency, 1, 1_024);
@@ -101,6 +105,10 @@ export function validateConfig(config: SwarmConfig): void {
   intInRange("planningCommitteeSize", config.planningCommitteeSize, 1, 5);
   intInRange("validatorsLowRisk", config.validatorsLowRisk, 1, 5);
   intInRange("validatorsHighRisk", config.validatorsHighRisk, 1, 7);
+  const minimumOrganizationHeadcount = 8 + (2 * Math.max(3, config.validatorsLowRisk, config.validatorsHighRisk));
+  if (config.organizationHeadcount !== "auto" && config.organizationHeadcount < minimumOrganizationHeadcount) {
+    throw new Error(`organizationHeadcount must be at least ${minimumOrganizationHeadcount} for the configured validator pool`);
+  }
   intInRange("maxAttempts", config.maxAttempts, 1, 10);
   intInRange("gatewayMaxAttempts", config.gatewayMaxAttempts, 1, 10);
   intInRange("schedulerAgingMs", config.schedulerAgingMs, 100, 60_000);

@@ -59,7 +59,10 @@ import { AtomicRunStore } from "./store.js";
 import { ControlConflictError, ProcessInterruptedError, changeTaskPriority } from "./controls/types.js";
 import { AdaptiveHarness } from "./harness.js";
 import { BlackboardStore, toRef } from "./harness-v2/blackboard.js";
-import { organizationRegistryV2 } from "./harness-v2/organization-registry.js";
+import {
+  automaticOrganizationHeadcount,
+  organizationRegistryV2,
+} from "./harness-v2/organization-registry.js";
 import {
   acquireWorkOrderLease,
   createWorkOrderRecord,
@@ -124,10 +127,11 @@ import type {
   GateId,
   GateReceiptContent,
   HarnessV2RunState,
+  OrganizationRegistryV2,
   ValidationVoteArtifactContent,
   WorkOrder,
 } from "./harness-v2/contracts.js";
-import { HARNESS_V2_ORG_VERSION } from "./harness-v2/contracts.js";
+import { HARNESS_V2_AGENT_COUNT, HARNESS_V2_ORG_VERSION } from "./harness-v2/contracts.js";
 import {
   EVOLUTION_WORKLOAD,
   executionBudgetDigest,
@@ -248,7 +252,12 @@ export class SwarmOrchestrator {
       threadIds: {},
       metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
       harness: this.harness.state(),
-      harnessV2: emptyHarnessV2State(),
+      harnessV2: emptyHarnessV2State(
+        typeof this.options.config.organizationHeadcount === "number"
+          ? this.options.config.organizationHeadcount
+          : undefined,
+        configuredReviewerSlots(this.options.config),
+      ),
       evolution: evolutionState,
     };
     await this.options.store.save(structuredClone(this.state));
@@ -786,7 +795,18 @@ export class SwarmOrchestrator {
       }
     }
     if (!plan) throw new Error(`Architect plan failed deterministic gates: ${validationError}`);
-    const registry = organizationRegistryV2();
+    const organizationReviewerSlots = configuredReviewerSlots(this.options.config);
+    const organizationHeadcount = typeof this.options.config.organizationHeadcount === "number"
+      ? this.options.config.organizationHeadcount
+      : automaticOrganizationHeadcount({
+          taskCount: plan.tasks.length,
+          maxConcurrency: this.options.config.maxConcurrency,
+          reviewerSlots: organizationReviewerSlots,
+        });
+    const registry = organizationRegistryV2({
+      headcount: organizationHeadcount,
+      reviewerSlots: organizationReviewerSlots,
+    });
     const preparedAt = isoNow();
     const environmentDigest = this.currentEnvironmentDigest();
     const preparedOrders = plan.tasks.map((task) => {
@@ -814,7 +834,7 @@ export class SwarmOrchestrator {
       state.teams = teamRecordsFromPlan(plan);
       state.tasks = recordsFromPlan(plan);
       const previousHarness = state.harnessV2;
-      state.harnessV2 = emptyHarnessV2State();
+      state.harnessV2 = emptyHarnessV2State(organizationHeadcount, organizationReviewerSlots);
       if (previousHarness?.missionPreflight) {
         state.harnessV2.missionPreflight = structuredClone(previousHarness.missionPreflight);
       }
@@ -1048,7 +1068,7 @@ export class SwarmOrchestrator {
     });
     const inputArtifacts = await Promise.all(inputArtifactRefs.map((ref) => this.blackboard.read(ref)));
     const agentSlot = workOrderRecord
-      ? organizationRegistryV2().agents.find((agent) => agent.agentId === workOrderRecord.assignedAgentId)
+      ? this.organizationRegistry().agents.find((agent) => agent.agentId === workOrderRecord.assignedAgentId)
       : undefined;
     if (!agentSlot) throw new Error(`Harness v2 assigned agent ${workOrderRecord.assignedAgentId} does not exist`);
     const forgedOracle = this.restoreAndValidateOracleSuite(workOrderRecord.order);
@@ -1289,7 +1309,7 @@ export class SwarmOrchestrator {
     const oracleSuite = forgedOracle.suite;
     const oracleGate = await this.ensureOracleGate(task, outputArtifact, workOrderRecord, forgedOracle);
     const oracleReviewContract = renderOracleReviewContract(oracleSuite);
-    const validationBindings = validationAgentBindings(workOrderRecord, count);
+    const validationBindings = validationAgentBindings(workOrderRecord, count, this.organizationRegistry());
     const managerId = "MANAGER";
     await this.event({
       type: "manager_review_started",
@@ -1347,7 +1367,7 @@ export class SwarmOrchestrator {
     const auditReview = async (index: number): Promise<ValidationVote> => {
       const validatorId = `V${index + 1}`;
       const validatorSlot = validationBindings.auditors[index];
-      if (!validatorSlot) throw new Error(`No fixed reviewer slot is bound to ${validatorId}`);
+      if (!validatorSlot) throw new Error(`No registered reviewer slot is bound to ${validatorId}`);
       const auditLens = VALIDATION_LENSES[index % VALIDATION_LENSES.length]!;
       const response = await this.callAndRemember(
         {
@@ -1553,6 +1573,7 @@ export class SwarmOrchestrator {
       receipts: [envelopeReceipt, oracleGate.gateReceipt, semanticReceipt],
       ...(gateOverrides.length > 0 ? { overrides: gateOverrides } : {}),
       blackboard: this.blackboard,
+      registry: this.organizationRegistry(),
       oracle: {
         suite: forgedOracle.suite,
         ...(forgedOracle.reveal ? { reveal: forgedOracle.reveal } : {}),
@@ -2701,6 +2722,7 @@ export class SwarmOrchestrator {
       outputArtifacts: [outputArtifact],
       receipts,
       blackboard: this.blackboard,
+      registry: this.organizationRegistry(),
       oracle: {
         suite: forged.suite,
         ...(forged.reveal ? { reveal: forged.reveal } : {}),
@@ -2758,8 +2780,15 @@ export class SwarmOrchestrator {
     harness.oracleSuites ??= {};
     harness.experiments ??= {};
     harness.knowledgeCapsules ??= {};
+    // Runs created before adaptive sizing used the canonical 128/3 roster.
+    // Pin that legacy identity instead of reassigning work during resume.
+    harness.organizationHeadcount ??= HARNESS_V2_AGENT_COUNT;
+    harness.organizationReviewerSlots ??= 3;
     if (!loaded.plan) return { harness, errors: [] };
-    const registry = organizationRegistryV2();
+    const registry = organizationRegistryV2({
+      headcount: harness.organizationHeadcount,
+      reviewerSlots: harness.organizationReviewerSlots,
+    });
     const errors: string[] = [];
     for (const task of Object.values(loaded.tasks)) {
       const order = workOrderFromTask(task, { missionId: `mission:${loaded.runId}`, registry });
@@ -2841,6 +2870,7 @@ export class SwarmOrchestrator {
               outputArtifacts: [artifact],
               receipts: [g0, g2, g3],
               blackboard: this.blackboard,
+              registry,
               oracle: {
                 suite: forgedOracle.suite,
                 ...(forgedOracle.reveal ? { reveal: forgedOracle.reveal } : {}),
@@ -3266,6 +3296,18 @@ export class SwarmOrchestrator {
     const persisted = await this.options.store.appendEvent(complete);
     this.options.onProgress?.(persisted);
   }
+
+  private organizationRegistry(): OrganizationRegistryV2 {
+    const harness = this.state.harnessV2;
+    return organizationRegistryV2({
+      headcount: harness?.organizationHeadcount ?? (
+        typeof this.options.config.organizationHeadcount === "number"
+          ? this.options.config.organizationHeadcount
+          : HARNESS_V2_AGENT_COUNT
+      ),
+      reviewerSlots: harness?.organizationReviewerSlots ?? configuredReviewerSlots(this.options.config),
+    });
+  }
 }
 
 function finalViolations(
@@ -3342,9 +3384,14 @@ function finalViolations(
   return violations;
 }
 
-function emptyHarnessV2State(): HarnessV2RunState {
+function emptyHarnessV2State(
+  organizationHeadcount?: number,
+  organizationReviewerSlots?: number,
+): HarnessV2RunState {
   return {
     orgVersion: "lab-128@2",
+    ...(organizationHeadcount !== undefined ? { organizationHeadcount } : {}),
+    ...(organizationReviewerSlots !== undefined ? { organizationReviewerSlots } : {}),
     workOrders: {},
     artifactHeads: {},
     councils: {},
@@ -3600,13 +3647,13 @@ function effectiveToolPolicy(
 function validationAgentBindings(
   record: HarnessV2RunState["workOrders"][string],
   count: number,
+  registry: OrganizationRegistryV2,
 ): { manager: AgentRoleContract; auditors: AgentRoleContract[] } {
-  const registry = organizationRegistryV2();
   const ownerAgents = registry.agents
     .filter((agent) => agent.teamId === record.order.ownerTeam && agent.agentId !== record.assignedAgentId)
     .sort((left, right) => left.agentId.localeCompare(right.agentId));
   const manager = ownerAgents[0];
-  if (!manager) throw new Error(`Work order ${record.order.id} has no fixed manager slot`);
+  if (!manager) throw new Error(`Work order ${record.order.id} has no eligible manager slot`);
   const preferredIds = new Set(record.reviewerAgentIds);
   const auditors = registry.agents
     .filter((agent) =>
@@ -3619,9 +3666,13 @@ function validationAgentBindings(
     })
     .slice(0, count);
   if (auditors.length !== count) {
-    throw new Error(`Work order ${record.order.id} requires ${count} fixed reviewer slots but only ${auditors.length} are eligible`);
+    throw new Error(`Work order ${record.order.id} requires ${count} reviewer slots but only ${auditors.length} are eligible`);
   }
   return { manager, auditors };
+}
+
+function configuredReviewerSlots(config: SwarmConfig): number {
+  return Math.max(3, config.validatorsLowRisk, config.validatorsHighRisk);
 }
 
 function sameArtifactRefSet(left: ArtifactRef[], right: ArtifactRef[]): boolean {

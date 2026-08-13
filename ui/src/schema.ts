@@ -95,7 +95,7 @@ export const outputArtifactSchema = z.object({
 
 const organizationV2Schema = z.object({
   orgVersion: z.string(),
-  totalAgents: z.number().int().nonnegative(),
+  totalAgents: z.number().int().min(14).max(256),
   headquarters: z.array(z.object({
     id: z.string(), name: z.string(), allocation: z.number().int().nonnegative(),
   })),
@@ -164,7 +164,7 @@ export const snapshotSchema = z.object({
   mode: z.enum(["real", "demo"]),
   run: runSchema,
   agents: z.array(agentSchema),
-  logicalAgents: z.array(logicalAgentSchema).length(128),
+  logicalAgents: z.array(logicalAgentSchema).min(14).max(256),
   departments: z.array(departmentSchema),
   metrics: z.object({
     totalAgents: z.number(), activeAgents: z.number(), workingAgents: z.number(),
@@ -192,6 +192,14 @@ export const snapshotSchema = z.object({
   }).optional(),
   observation: observationSchema.optional(),
   control: controlSchema.optional(),
+}).superRefine((snapshot, context) => {
+  if (snapshot.organizationV2 && snapshot.organizationV2.totalAgents !== snapshot.logicalAgents.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["organizationV2", "totalAgents"],
+      message: "organization totalAgents must match the logical roster length",
+    });
+  }
 });
 
 export const runsSchema = z.union([

@@ -164,7 +164,8 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
   const ownerTeams = [...new Set(registry.agents.filter((agent) => agent.headquartersId === headquartersId).map((agent) => agent.teamId))].sort();
   const reviewTeams = [...new Set(registry.agents.filter((agent) => agent.headquartersId === "quality").map((agent) => agent.teamId))].sort();
   const ownerTeam = ownerTeams[stableIndex(task.id, ownerTeams.length)];
-  const reviewerTeam = reviewTeams[stableIndex(`${task.id}:review`, reviewTeams.length)];
+  const independentReviewTeams = reviewTeams.filter((teamId) => teamId !== ownerTeam);
+  const reviewerTeam = independentReviewTeams[stableIndex(`${task.id}:review`, independentReviewTeams.length)];
   if (!ownerTeam || !reviewerTeam) throw new Error("Harness v2 registry has no eligible owner/reviewer teams");
   const workOrder: WorkOrder = {
     id: task.id,

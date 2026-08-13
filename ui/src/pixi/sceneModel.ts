@@ -40,14 +40,29 @@ export interface SceneModel {
 export const MAX_FLOOR_AGENTS = 144;
 
 export function agentsForFloor(agents: Agent[], selectedAgentId: string | null): Agent[] {
-  if (agents.length <= MAX_FLOOR_AGENTS) return agents;
-  return agents
-    .slice()
-    .sort((left, right) =>
-      Number(right.id === selectedAgentId) - Number(left.id === selectedAgentId)
-      || Number(right.isActive) - Number(left.isActive)
-      || left.id.localeCompare(right.id))
-    .slice(0, MAX_FLOOR_AGENTS);
+  const comparePriority = (left: Agent, right: Agent): number =>
+    Number(right.id === selectedAgentId) - Number(left.id === selectedAgentId)
+    || Number(right.isActive) - Number(left.isActive)
+    || left.id.localeCompare(right.id);
+  const buckets = zones.map((zone) => agents
+    .filter((agent) => agent.department === zone.id)
+    .sort(comparePriority)
+    .slice(0, zone.seatColumns * zone.seatRows));
+  const visible: Agent[] = [];
+  let row = 0;
+  while (visible.length < MAX_FLOOR_AGENTS) {
+    let added = false;
+    for (const bucket of buckets) {
+      const agent = bucket[row];
+      if (!agent) continue;
+      visible.push(agent);
+      added = true;
+      if (visible.length === MAX_FLOOR_AGENTS) break;
+    }
+    if (!added) break;
+    row += 1;
+  }
+  return visible;
 }
 
 export function sceneVisualRevision(snapshot: Snapshot, visibleAgentIds?: Set<string>): number {

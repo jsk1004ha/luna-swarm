@@ -22,9 +22,9 @@ test("demo snapshot deterministically presents a 144-person, seven-department co
   assert.equal(first.agents.length, 144);
   assert.equal(first.departments.length, 7);
   assert.equal(first.metrics.totalAgents, 144);
-  assert.equal(first.logicalAgents.length, 128);
-  assert.equal(new Set(first.logicalAgents.map((agent) => agent.id)).size, 128);
-  assert.equal(new Set(first.logicalAgents.map((agent) => agent.name)).size, 128);
+  assert.equal(first.logicalAgents.length, 144);
+  assert.equal(new Set(first.logicalAgents.map((agent) => agent.id)).size, 144);
+  assert.equal(new Set(first.logicalAgents.map((agent) => agent.name)).size, 144);
   assert.ok(first.logicalAgents.every((agent) => agent.logical && agent.lineage.length === 4));
   assert.equal(new Set(first.agents.map((agent) => agent.name)).size, 144);
   assert.ok(first.agents.every((agent) => /^[가-힣]{3}$/.test(agent.name)));
@@ -143,6 +143,8 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
   const state = realState(workspace, runId);
   state.harnessV2 = {
     orgVersion: "lab-128@2",
+    organizationHeadcount: 128,
+    organizationReviewerSlots: 3,
     workOrders: {
       "task-1": {
         order: {
@@ -248,6 +250,35 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
       experiments: { preregistered: 1, observing: 0, decided: 0, observations: 0 },
       capsules: { total: 1, candidate: 1, verified: 0, stale: 0, revoked: 0, negative: 0 },
     });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("real snapshot exposes the run-pinned adaptive Harness v2 roster", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-adaptive-org-"));
+  const runId = "run-adaptive-org";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  const state = realState(workspace, runId);
+  state.harnessV2 = {
+    orgVersion: "lab-128@2",
+    organizationHeadcount: 31,
+    organizationReviewerSlots: 3,
+    workOrders: {},
+    artifactHeads: {},
+    councils: {},
+    missionCells: {},
+    messages: [],
+  };
+  await writeStateEnvelope(runDirectory, state);
+
+  try {
+    const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
+    assert.equal(snapshot.organizationV2?.totalAgents, 31);
+    assert.equal(snapshot.logicalAgents.length, 31);
+    assert.equal(snapshot.organizationV2?.headquarters.reduce((sum, item) => sum + item.allocation, 0), 31);
+    assert.equal(new Set(snapshot.logicalAgents.map((agent) => agent.id)).size, 31);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

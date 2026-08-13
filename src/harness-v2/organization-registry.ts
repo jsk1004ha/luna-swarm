@@ -1,5 +1,7 @@
 import {
   HARNESS_V2_AGENT_COUNT,
+  HARNESS_V2_MAX_AGENT_COUNT,
+  HARNESS_V2_MIN_AGENT_COUNT,
   HARNESS_V2_ORG_VERSION,
   type AgentRoleContract,
   type HeadquartersId,
@@ -19,7 +21,6 @@ interface DivisionBlueprint {
 interface HeadquartersBlueprint {
   id: HeadquartersId;
   name: string;
-  headcount: number;
   mission: string;
   divisions: readonly DivisionBlueprint[];
 }
@@ -28,7 +29,6 @@ const BLUEPRINTS: readonly HeadquartersBlueprint[] = [
   {
     id: "command",
     name: "Project Command HQ",
-    headcount: 8,
     mission: "Translate the user mission into bounded, traceable execution authority.",
     divisions: [
       { id: "executive-office", name: "Representative Office", mission: "Own mission intent and escalation.", teams: ["mission-command"] },
@@ -38,7 +38,6 @@ const BLUEPRINTS: readonly HeadquartersBlueprint[] = [
   {
     id: "research",
     name: "Research HQ",
-    headcount: 40,
     mission: "Produce source-grounded claims, counterevidence, and reproducible research.",
     divisions: [
       { id: "source-intelligence", name: "Source Intelligence Division", mission: "Gather authoritative primary evidence.", teams: ["official-sources", "academic-sources"] },
@@ -50,7 +49,6 @@ const BLUEPRINTS: readonly HeadquartersBlueprint[] = [
   {
     id: "engineering",
     name: "Engineering HQ",
-    headcount: 48,
     mission: "Design, implement, integrate, and safely operate verifiable software.",
     divisions: [
       { id: "architecture", name: "Architecture Division", mission: "Own system and interface boundaries.", teams: ["system-architecture", "interface-architecture"] },
@@ -63,7 +61,6 @@ const BLUEPRINTS: readonly HeadquartersBlueprint[] = [
   {
     id: "quality",
     name: "Quality Assurance HQ",
-    headcount: 24,
     mission: "Independently falsify outputs and enforce deterministic quality gates.",
     divisions: [
       { id: "deterministic-testing", name: "Deterministic Testing Division", mission: "Run unit and integration verification.", teams: ["unit-testing", "integration-e2e"] },
@@ -74,7 +71,6 @@ const BLUEPRINTS: readonly HeadquartersBlueprint[] = [
   {
     id: "integration",
     name: "Final Integration HQ",
-    headcount: 8,
     mission: "Integrate only accepted artifacts and issue the final release decision.",
     divisions: [
       { id: "final-integration", name: "Final Integration Division", mission: "Integrate technical and research results without inventing content.", teams: ["technical-integration"] },
@@ -130,12 +126,145 @@ function rolePolicy(headquartersId: HeadquartersId): Pick<AgentRoleContract, "to
   };
 }
 
-function buildRegistry(): OrganizationRegistryV2 {
+interface TeamBlueprint extends DivisionBlueprint {
+  headquartersId: HeadquartersId;
+  headquartersName: string;
+  headquartersMission: string;
+  teamName: string;
+  teamIndex: number;
+}
+
+export interface OrganizationRegistryOptions {
+  /** Exact logical roster size. Runtime concurrency remains independent. */
+  headcount?: number;
+  /** Largest blind validation pool a quality team must support. */
+  reviewerSlots?: number;
+}
+
+export interface AutomaticOrganizationSizingInput {
+  taskCount: number;
+  maxConcurrency: number;
+  reviewerSlots: number;
+}
+
+export function automaticOrganizationHeadcount(input: AutomaticOrganizationSizingInput): number {
+  if (!Number.isInteger(input.taskCount) || input.taskCount < 0) throw new Error("taskCount must be a non-negative integer");
+  if (!Number.isInteger(input.maxConcurrency) || input.maxConcurrency < 1) throw new Error("maxConcurrency must be a positive integer");
+  if (!Number.isInteger(input.reviewerSlots) || input.reviewerSlots < 1 || input.reviewerSlots > 7) {
+    throw new Error("reviewerSlots must be an integer between 1 and 7");
+  }
+  const protectedReviewers = Math.max(3, input.reviewerSlots);
+  const operatingFloor = 8 + (2 * protectedReviewers);
+  const concurrentExecutors = Math.min(input.taskCount, input.maxConcurrency);
+  return Math.min(
+    HARNESS_V2_MAX_AGENT_COUNT,
+    Math.max(operatingFloor, concurrentExecutors + operatingFloor),
+  );
+}
+
+function teamBlueprints(): TeamBlueprint[] {
+  return BLUEPRINTS.flatMap((headquarters) => headquarters.divisions.flatMap((division) =>
+    division.teams.map((teamName, teamIndex) => ({
+      ...division,
+      headquartersId: headquarters.id,
+      headquartersName: headquarters.name,
+      headquartersMission: headquarters.mission,
+      teamName,
+      teamIndex,
+    }))));
+}
+
+function teamKey(team: TeamBlueprint): string {
+  return `${team.headquartersId}/${team.id}/${team.teamName}`;
+}
+
+function activationOrder(teams: readonly TeamBlueprint[]): TeamBlueprint[] {
+  const byHeadquarters = new Map<HeadquartersId, TeamBlueprint[]>();
+  for (const headquarters of BLUEPRINTS) {
+    byHeadquarters.set(headquarters.id, teams.filter((team) => team.headquartersId === headquarters.id));
+  }
+  const mandatory = [
+    byHeadquarters.get("command")?.[0],
+    byHeadquarters.get("research")?.[0],
+    byHeadquarters.get("engineering")?.[0],
+    byHeadquarters.get("quality")?.[0],
+    byHeadquarters.get("quality")?.[1],
+    byHeadquarters.get("integration")?.[0],
+  ].filter((team): team is TeamBlueprint => Boolean(team));
+  const selected = new Set(mandatory.map(teamKey));
+  const remainder: TeamBlueprint[] = [];
+  const longestHeadquarters = Math.max(...[...byHeadquarters.values()].map((items) => items.length));
+  for (let index = 0; index < longestHeadquarters; index += 1) {
+    for (const headquarters of BLUEPRINTS) {
+      const team = byHeadquarters.get(headquarters.id)?.[index];
+      if (team && !selected.has(teamKey(team))) {
+        remainder.push(team);
+        selected.add(teamKey(team));
+      }
+    }
+  }
+  return [...mandatory, ...remainder];
+}
+
+function allocateTeams(headcount: number, reviewerSlots: number): Map<string, number> {
+  const teams = teamBlueprints();
+  const order = activationOrder(teams);
+  const allocations = new Map<string, number>();
+  const minimumFor = (team: TeamBlueprint): number => team.headquartersId === "quality" ? reviewerSlots : 2;
+  let remaining = headcount;
+
+  for (const team of order.slice(0, 6)) {
+    const minimum = minimumFor(team);
+    allocations.set(teamKey(team), minimum);
+    remaining -= minimum;
+  }
+  if (remaining < 0) {
+    throw new Error(`Organization headcount ${headcount} cannot preserve independent execution and review roles`);
+  }
+  for (const team of order.slice(6)) {
+    const minimum = minimumFor(team);
+    if (remaining < minimum) continue;
+    allocations.set(teamKey(team), minimum);
+    remaining -= minimum;
+  }
+  const active = teams.filter((team) => allocations.has(teamKey(team)));
+  for (const target of [4, 9]) {
+    let changed = true;
+    while (remaining > 0 && changed) {
+      changed = false;
+      for (const team of active) {
+        const key = teamKey(team);
+        const current = allocations.get(key)!;
+        if (current >= target) continue;
+        allocations.set(key, current + 1);
+        remaining -= 1;
+        changed = true;
+        if (remaining === 0) break;
+      }
+    }
+  }
+  if (remaining !== 0) throw new Error(`Organization headcount ${headcount} exceeds available bounded team capacity`);
+  return allocations;
+}
+
+function buildRegistry(options: OrganizationRegistryOptions = {}): OrganizationRegistryV2 {
+  const headcount = options.headcount ?? HARNESS_V2_AGENT_COUNT;
+  const requestedReviewerSlots = options.reviewerSlots ?? 3;
+  if (!Number.isInteger(headcount) || headcount < HARNESS_V2_MIN_AGENT_COUNT || headcount > HARNESS_V2_MAX_AGENT_COUNT) {
+    throw new Error(`Organization headcount must be an integer between ${HARNESS_V2_MIN_AGENT_COUNT} and ${HARNESS_V2_MAX_AGENT_COUNT}`);
+  }
+  if (!Number.isInteger(requestedReviewerSlots) || requestedReviewerSlots < 1 || requestedReviewerSlots > 7) {
+    throw new Error("reviewerSlots must be an integer between 1 and 7");
+  }
+  const reviewerSlots = Math.max(3, requestedReviewerSlots);
+  const allocations = allocateTeams(headcount, reviewerSlots);
   const units: OrganizationUnitV2[] = [];
   const agents: AgentRoleContract[] = [];
   let sequence = 1;
 
   for (const headquarters of BLUEPRINTS) {
+    const headquartersTeams = teamBlueprints().filter((team) => team.headquartersId === headquarters.id);
+    const headquartersHeadcount = headquartersTeams.reduce((sum, team) => sum + (allocations.get(teamKey(team)) ?? 0), 0);
     const headquartersUnitId = `hq:${headquarters.id}`;
     units.push({
       id: headquartersUnitId,
@@ -144,11 +273,27 @@ function buildRegistry(): OrganizationRegistryV2 {
       headquartersId: headquarters.id,
       parentId: null,
       mission: headquarters.mission,
-      declaredHeadcount: headquarters.headcount,
+      declaredHeadcount: headquartersHeadcount,
     });
     for (const division of headquarters.divisions) {
+      const activeTeams = division.teams.filter((teamName, teamIndex) => allocations.has(teamKey({
+        ...division,
+        headquartersId: headquarters.id,
+        headquartersName: headquarters.name,
+        headquartersMission: headquarters.mission,
+        teamName,
+        teamIndex,
+      })));
+      if (activeTeams.length === 0) continue;
       const divisionId = `${headquartersUnitId}/division:${division.id}`;
-      const divisionHeadcount = division.teams.length * 4;
+      const divisionHeadcount = division.teams.reduce((sum, teamName, teamIndex) => sum + (allocations.get(teamKey({
+        ...division,
+        headquartersId: headquarters.id,
+        headquartersName: headquarters.name,
+        headquartersMission: headquarters.mission,
+        teamName,
+        teamIndex,
+      })) ?? 0), 0);
       units.push({
         id: divisionId,
         name: division.name,
@@ -158,7 +303,16 @@ function buildRegistry(): OrganizationRegistryV2 {
         mission: division.mission,
         declaredHeadcount: divisionHeadcount,
       });
-      for (const teamName of division.teams) {
+      for (const [teamIndex, teamName] of division.teams.entries()) {
+        const allocation = allocations.get(teamKey({
+          ...division,
+          headquartersId: headquarters.id,
+          headquartersName: headquarters.name,
+          headquartersMission: headquarters.mission,
+          teamName,
+          teamIndex,
+        }));
+        if (!allocation) continue;
         const teamSlug = normalizedId(teamName);
         const teamId = `${divisionId}/team:${teamSlug}`;
         const cellId = `${teamId}/cell:01`;
@@ -169,7 +323,7 @@ function buildRegistry(): OrganizationRegistryV2 {
           headquartersId: headquarters.id,
           parentId: divisionId,
           mission: `${division.mission} Deliver the ${teamName} workstream.`,
-          declaredHeadcount: 4,
+          declaredHeadcount: allocation,
         });
         units.push({
           id: cellId,
@@ -178,12 +332,12 @@ function buildRegistry(): OrganizationRegistryV2 {
           headquartersId: headquarters.id,
           parentId: teamId,
           mission: `Execute bounded ${teamName} work orders with independent evidence.`,
-          declaredHeadcount: 4,
+          declaredHeadcount: allocation,
         });
-        for (let position = 1; position <= 4; position += 1) {
+        for (let position = 1; position <= allocation; position += 1) {
           const agentId = `luna-${String(sequence).padStart(3, "0")}`;
           const policy = rolePolicy(headquarters.id);
-          const role = position === 1 ? "cell-lead" : position === 4 ? "review-liaison" : "specialist";
+          const role = position === 1 ? "cell-lead" : position === allocation ? "review-liaison" : "specialist";
           agents.push({
             agentId,
             orgVersion: HARNESS_V2_ORG_VERSION,
@@ -215,24 +369,35 @@ function buildRegistry(): OrganizationRegistryV2 {
 
   return {
     orgVersion: HARNESS_V2_ORG_VERSION,
-    totalAgents: HARNESS_V2_AGENT_COUNT,
+    totalAgents: headcount,
     units,
     agents,
   };
 }
 
-const REGISTRY = buildRegistry();
+const REGISTRIES = new Map<string, OrganizationRegistryV2>();
 
-export function organizationRegistryV2(): OrganizationRegistryV2 {
-  return structuredClone(REGISTRY);
+export function organizationRegistryV2(options: OrganizationRegistryOptions = {}): OrganizationRegistryV2 {
+  const requestedReviewerSlots = options.reviewerSlots ?? 3;
+  if (!Number.isInteger(requestedReviewerSlots) || requestedReviewerSlots < 1 || requestedReviewerSlots > 7) {
+    throw new Error("reviewerSlots must be an integer between 1 and 7");
+  }
+  const key = `${options.headcount ?? HARNESS_V2_AGENT_COUNT}:${Math.max(3, requestedReviewerSlots)}`;
+  let registry = REGISTRIES.get(key);
+  if (!registry) {
+    registry = buildRegistry(options);
+    validateOrganizationRegistryV2(registry);
+    REGISTRIES.set(key, registry);
+  }
+  return structuredClone(registry);
 }
 
 export const createOrganizationRegistryV2 = organizationRegistryV2;
 
 export function validateOrganizationRegistryV2(registry: OrganizationRegistryV2): void {
   if (registry.orgVersion !== HARNESS_V2_ORG_VERSION) throw new Error("Organization version does not match Harness v2");
-  if (registry.totalAgents !== HARNESS_V2_AGENT_COUNT || registry.agents.length !== HARNESS_V2_AGENT_COUNT) {
-    throw new Error(`Organization must contain exactly ${HARNESS_V2_AGENT_COUNT} agents`);
+  if (!Number.isInteger(registry.totalAgents) || registry.totalAgents < HARNESS_V2_MIN_AGENT_COUNT || registry.totalAgents > HARNESS_V2_MAX_AGENT_COUNT || registry.agents.length !== registry.totalAgents) {
+    throw new Error(`Organization must contain its declared ${HARNESS_V2_MIN_AGENT_COUNT}-${HARNESS_V2_MAX_AGENT_COUNT} agents`);
   }
   const units = new Map(registry.units.map((unit) => [unit.id, unit]));
   if (units.size !== registry.units.length) throw new Error("Organization unit IDs must be unique");
@@ -240,14 +405,14 @@ export function validateOrganizationRegistryV2(registry: OrganizationRegistryV2)
   if (agentIds.size !== registry.agents.length) throw new Error("Agent IDs must be unique");
 
   for (const unit of registry.units) {
-    if ((unit.kind === "team" || unit.kind === "cell") && unit.declaredHeadcount > 6) {
-      throw new Error(`${unit.kind} ${unit.id} exceeds the six-agent limit`);
+    if ((unit.kind === "team" || unit.kind === "cell") && (unit.declaredHeadcount < 2 || unit.declaredHeadcount > 9)) {
+      throw new Error(`${unit.kind} ${unit.id} must contain between two and nine agents`);
     }
     if (unit.kind === "headquarters" && unit.parentId !== null) throw new Error(`Headquarters ${unit.id} cannot have a parent`);
     if (unit.kind !== "headquarters" && (!unit.parentId || !units.has(unit.parentId))) throw new Error(`Unit ${unit.id} has an invalid parent`);
   }
 
-  const counts = new Map<HeadquartersId, number>();
+  const counts = new Map<string, number>();
   for (const agent of registry.agents) {
     const division = units.get(agent.divisionId);
     const team = units.get(agent.teamId);
@@ -259,10 +424,12 @@ export function validateOrganizationRegistryV2(registry: OrganizationRegistryV2)
     if (!agent.cannotReview.includes(agent.agentId) || !agent.cannotReview.includes(agent.teamId)) {
       throw new Error(`Agent ${agent.agentId} must be prohibited from self/team review`);
     }
-    counts.set(agent.headquartersId, (counts.get(agent.headquartersId) ?? 0) + 1);
+    for (const unitId of [`hq:${agent.headquartersId}`, agent.divisionId, agent.teamId, agent.cellId]) {
+      counts.set(unitId, (counts.get(unitId) ?? 0) + 1);
+    }
   }
-  for (const blueprint of BLUEPRINTS) {
-    if (counts.get(blueprint.id) !== blueprint.headcount) throw new Error(`${blueprint.id} headcount does not match its fixed allocation`);
+  for (const unit of registry.units) {
+    if ((counts.get(unit.id) ?? 0) !== unit.declaredHeadcount) throw new Error(`${unit.id} headcount does not match its declared allocation`);
   }
 }
 
@@ -335,4 +502,4 @@ export function createMissionCell(registry: OrganizationRegistryV2, input: Missi
   return cell;
 }
 
-validateOrganizationRegistryV2(REGISTRY);
+validateOrganizationRegistryV2(organizationRegistryV2());

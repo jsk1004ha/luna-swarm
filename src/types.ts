@@ -310,6 +310,8 @@ export interface RunState {
 
 export interface SwarmConfig {
   model: string;
+  /** Logical Harness v2 roster size, or auto-size from the accepted execution plan. */
+  organizationHeadcount: number | "auto";
   /** Concrete CI/build identity for non-Git workspaces. Placeholder values are rejected. */
   sourceIdentity?: string;
   /** Public verification keys for protected benchmark quality receipts. Private keys never belong here. */

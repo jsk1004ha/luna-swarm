@@ -271,6 +271,7 @@ stateDiagram-v2
 | 키 | 기본값 | 의미 |
 |---|---:|---|
 | `model` | `gpt-5.6-luna` | 모든 조직원이 사용할 모델 |
+| `organizationHeadcount` | `auto` | 실행 계획·동시성·검증자 수로 논리 조직 규모를 자동 산정하거나 14~256 사이 정수로 고정 |
 | `maxConcurrency` | 128 | 전역 활성 호출 상한; 최대 1,024로 설정 가능 |
 | `initialConcurrency` | 8 | 시작 활성 호출 수 |
 | `maxTasks` | 512 | architect가 만들 수 있는 DAG 작업 수 |
@@ -315,7 +316,7 @@ stateDiagram-v2
 
 ## Harness v2
 
-실행 계획은 고유 이름을 가진 `lab-128@2` 고정 조직의 revisioned Work Order로 투영됩니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, bounded AST 기반 Program Knowledge Graph가 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급합니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, 고정 reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다.
+실행 계획은 고유 이름을 가진 가변형 Harness v2 조직의 revisioned Work Order로 투영됩니다. 기본 `auto` 모드는 계획의 작업 수·동시성·검증자 수에 맞춰 14~256명의 논리 조직을 산정하며, 산정된 roster는 실행에 고정되어 재시도·재개에도 같은 직원 배정을 보존합니다. `lab-128@2`는 기존 실행 호환을 위해 유지한 조직 계약 버전 이름이며 인원 제한을 뜻하지 않습니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, bounded AST 기반 Program Knowledge Graph가 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급합니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, run-pinned reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다.
 
 SQLite WAL, App Server sharding, 실제 쓰기 Tool Broker, Git worktree/Single Committer, G1 command receipt, runtime trace 자동 수집, arbitrary experiment runner는 아직 구현됐다고 주장하지 않습니다. 현재 범위와 남은 안전 경계는 [Harness v2 설계 문서](docs/HARNESS_V2.ko.md)에 명시했습니다.
 

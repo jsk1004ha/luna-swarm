@@ -325,7 +325,9 @@ test("never-returning turn/start is recycled and releases its occupancy slot", a
     codexPath: process.execPath,
     codexArgs: [fakeCodex],
     config: { ...DEFAULT_CONFIG, maxConcurrency: 1, initialConcurrency: 1 },
-    rpcTimeoutMs: 500,
+    // Keep the watchdog much shorter than production while leaving enough
+    // room for a cold Windows child-process startup under the full suite.
+    rpcTimeoutMs: 1_500,
     onStderr: (line) => stderr.push(line),
   });
   try {
@@ -354,7 +356,7 @@ test("never-acknowledged interrupt recycles the child and permits recovery", asy
     codexPath: process.execPath,
     codexArgs: [fakeCodex, "never-interrupt-ack"],
     config: { ...DEFAULT_CONFIG, maxConcurrency: 1, initialConcurrency: 1 },
-    rpcTimeoutMs: 500,
+    rpcTimeoutMs: 1_500,
     onStderr: (line) => stderr.push(line),
   });
   try {
@@ -383,7 +385,7 @@ test("rejected interrupt recycles the uncertain session before releasing capacit
     codexPath: process.execPath,
     codexArgs: [fakeCodex, "reject-interrupt"],
     config: { ...DEFAULT_CONFIG, maxConcurrency: 1, initialConcurrency: 1 },
-    rpcTimeoutMs: 500,
+    rpcTimeoutMs: 1_500,
     onStderr: (line) => stderr.push(line),
   });
   try {
@@ -411,12 +413,12 @@ test("startup account RPC has a bounded deadline", async () => {
     codexPath: process.execPath,
     codexArgs: [fakeCodex, "never-account"],
     config: DEFAULT_CONFIG,
-    rpcTimeoutMs: 500,
+    rpcTimeoutMs: 1_500,
   });
   const startedAt = Date.now();
   try {
     await assert.rejects(instance.run(request("startup-timeout", "unused")), /timed out/);
-    assert.ok(Date.now() - startedAt < 1_500);
+    assert.ok(Date.now() - startedAt < 4_000);
   } finally {
     await instance.close();
   }

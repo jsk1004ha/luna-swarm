@@ -63,9 +63,9 @@ function agentAt(index: number): Agent {
   };
 }
 
-export function createMockSnapshot(count = 30): Snapshot {
+export function createMockSnapshot(count = 30, organizationHeadcount = count): Snapshot {
   const agents = Array.from({ length: count }, (_, index) => agentAt(index));
-  const logicalAgents = Array.from({ length: 128 }, (_, index) => {
+  const logicalAgents = Array.from({ length: organizationHeadcount }, (_, index) => {
     const agent = agentAt(index);
     const headquartersId = agent.department === "executive" || agent.department === "strategy"
       ? "command"
@@ -147,7 +147,7 @@ export function createMockSnapshot(count = 30): Snapshot {
     run: {
       id: "mock-luna-run",
       status: "running",
-      goal: "100명 이상의 전문 에이전트가 하나의 회사처럼 협업하는 운영 구조를 검증합니다.",
+      goal: "업무 규모에 맞게 구성된 전문 에이전트가 하나의 회사처럼 협업하는 운영 구조를 검증합니다.",
       updatedAt: now.toISOString(),
     },
     agents,

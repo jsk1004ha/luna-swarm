@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DEFAULT_CONFIG, validateConfig } from "../../src/config.js";
 import {
+  automaticOrganizationHeadcount,
   assertCapabilityNarrowing,
   createMissionCell,
   narrowCapabilities,
@@ -8,18 +10,49 @@ import {
   validateOrganizationRegistryV2,
 } from "../../src/harness-v2/organization-registry.js";
 
-test("Harness v2 registry has a fixed 128-agent allocation and complete lineage", () => {
+test("Harness v2 keeps the legacy 128-agent default allocation and complete lineage", () => {
   const registry = organizationRegistryV2();
   assert.doesNotThrow(() => validateOrganizationRegistryV2(registry));
   assert.equal(registry.agents.length, 128);
   const counts = Object.fromEntries(["command", "research", "engineering", "quality", "integration"].map((id) => [id, registry.agents.filter((agent) => agent.headquartersId === id).length]));
   assert.deepEqual(counts, { command: 8, research: 40, engineering: 48, quality: 24, integration: 8 });
   assert.equal(new Set(registry.agents.map((agent) => agent.agentId)).size, 128);
-  assert.ok(registry.units.filter((unit) => unit.kind === "team" || unit.kind === "cell").every((unit) => unit.declaredHeadcount <= 6));
+  assert.ok(registry.units.filter((unit) => unit.kind === "team" || unit.kind === "cell").every((unit) => unit.declaredHeadcount <= 9));
   assert.ok(registry.agents.every((agent) => agent.divisionId && agent.teamId && agent.cellId));
 });
 
-test("mission cells reuse 3-9 fixed slots and require an independent verifier", () => {
+test("adaptive registries preserve exact headcount, deterministic IDs, and independent review capacity", () => {
+  for (const headcount of [14, 17, 31, 64, 192, 256]) {
+    const first = organizationRegistryV2({ headcount, reviewerSlots: 3 });
+    const second = organizationRegistryV2({ headcount, reviewerSlots: 3 });
+    assert.doesNotThrow(() => validateOrganizationRegistryV2(first));
+    assert.equal(first.totalAgents, headcount);
+    assert.equal(first.agents.length, headcount);
+    assert.deepEqual(first, second);
+    assert.ok(first.agents.some((agent) => agent.headquartersId === "quality"));
+    assert.ok(first.agents.some((agent) => agent.headquartersId === "integration"));
+    assert.ok(first.units.filter((unit) => unit.kind === "team").every((unit) => unit.declaredHeadcount >= 2 && unit.declaredHeadcount <= 9));
+  }
+  assert.throws(() => organizationRegistryV2({ headcount: 13 }), /between 14 and 256/);
+  assert.throws(() => organizationRegistryV2({ headcount: 257 }), /between 14 and 256/);
+  assert.throws(() => organizationRegistryV2({ reviewerSlots: 8 }), /between 1 and 7/);
+});
+
+test("automatic sizing follows task concurrency and protected reviewer capacity", () => {
+  assert.equal(automaticOrganizationHeadcount({ taskCount: 0, maxConcurrency: 8, reviewerSlots: 3 }), 14);
+  assert.equal(automaticOrganizationHeadcount({ taskCount: 3, maxConcurrency: 8, reviewerSlots: 3 }), 17);
+  assert.equal(automaticOrganizationHeadcount({ taskCount: 500, maxConcurrency: 128, reviewerSlots: 3 }), 142);
+  assert.equal(automaticOrganizationHeadcount({ taskCount: 500, maxConcurrency: 500, reviewerSlots: 7 }), 256);
+
+  assert.doesNotThrow(() => validateConfig({ ...DEFAULT_CONFIG, organizationHeadcount: "auto" }));
+  assert.doesNotThrow(() => validateConfig({ ...DEFAULT_CONFIG, organizationHeadcount: 22, validatorsHighRisk: 7 }));
+  assert.throws(
+    () => validateConfig({ ...DEFAULT_CONFIG, organizationHeadcount: 21, validatorsHighRisk: 7 }),
+    /at least 22/,
+  );
+});
+
+test("mission cells reuse 3-9 registered slots and require an independent verifier", () => {
   const registry = organizationRegistryV2();
   const engineers = registry.agents.filter((agent) => agent.headquartersId === "engineering").slice(0, 2);
   const verifier = registry.agents.find((agent) => agent.headquartersId === "quality" && agent.teamId !== engineers[0]!.teamId)!;

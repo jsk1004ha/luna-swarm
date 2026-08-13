@@ -137,6 +137,11 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     assert.ok(traces.every((trace) => trace.bundleHash.startsWith("sha256:") && trace.timings.modelTurns !== null));
     assert.ok(outcomeReceipts.every((receipt) => receipt.level === "L3" && receipt.promotionEligible));
     assert.equal(state.harnessV2?.orgVersion, "lab-128@2");
+    assert.equal(state.harnessV2?.organizationHeadcount, 17);
+    assert.equal(state.harnessV2?.organizationReviewerSlots, 3);
+    assert.ok(Object.values(state.harnessV2?.workOrders ?? {}).every((order) =>
+      /^luna-0(?:0[1-9]|1[0-7])$/.test(order.assignedAgentId) &&
+      order.reviewerAgentIds.every((agentId) => /^luna-0(?:0[1-9]|1[0-7])$/.test(agentId))));
     assert.ok(
       Object.values(state.harnessV2?.workOrders ?? {}).every((order) => order.state === "ACCEPTED"),
       JSON.stringify(Object.fromEntries(Object.entries(state.harnessV2?.workOrders ?? {}).map(([id, order]) => [id, order.state]))),

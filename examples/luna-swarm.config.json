@@ -1,5 +1,6 @@
 {
   "model": "gpt-5.6-luna",
+  "organizationHeadcount": "auto",
   "maxConcurrency": 128,
   "initialConcurrency": 8,
   "minConcurrency": 2,

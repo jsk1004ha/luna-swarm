@@ -16,15 +16,15 @@ describe("Pixi scene model", () => {
     expect(model.agents.every(({ agent, x, y }) => agent.department === "engineering" && x > 0 && y > 0)).toBe(true);
   });
 
-  it("renders all 128 logical employees when runtime and company IDs are disjoint", () => {
-    const snapshot = createMockSnapshot(4);
+  it("renders every logical employee when runtime and company IDs are disjoint", () => {
+    const snapshot = createMockSnapshot(4, 31);
     expect(snapshot.agents.every((agent) => agent.id.startsWith("mock-agent-"))).toBe(true);
     expect(snapshot.logicalAgents.every((agent) => agent.id.startsWith("luna-"))).toBe(true);
     const visible = new Set(snapshot.logicalAgents.map((agent) => agent.id));
 
     const model = buildSceneModel(snapshot, visible);
 
-    expect(model.agents).toHaveLength(128);
+    expect(model.agents).toHaveLength(31);
     expect(model.agents).not.toHaveLength(0);
     expect(new Set(model.agents.map(({ agent }) => agent.id))).toEqual(visible);
     expect(model.agents.some(({ agent }) => agent.runtime?.taskStatus === "running")).toBe(true);
@@ -46,6 +46,17 @@ describe("Pixi scene model", () => {
     const selected = largerCompany.agents.at(-1)!;
     const visible = agentsForFloor(largerCompany.agents, selected.id);
     expect(visible).toHaveLength(MAX_FLOOR_AGENTS);
+    expect(visible.some((agent) => agent.id === selected.id)).toBe(true);
+  });
+
+  it("keeps dense departments within their physical seat capacity", () => {
+    const snapshot = createMockSnapshot(80);
+    const denseDepartment = snapshot.agents.map((agent) => ({ ...agent, department: "integration" as const }));
+    const selected = denseDepartment.at(-1)!;
+    const visible = agentsForFloor(denseDepartment, selected.id);
+    const integration = zones.find((zone) => zone.id === "integration")!;
+
+    expect(visible).toHaveLength(integration.seatColumns * integration.seatRows);
     expect(visible.some((agent) => agent.id === selected.id)).toBe(true);
   });
 

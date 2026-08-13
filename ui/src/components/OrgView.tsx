@@ -88,7 +88,7 @@ export function OrgView() {
 export function HarnessOrganizationReadout({ organization }: { organization: OrganizationV2Summary }) {
   return <section aria-labelledby="harness-v2-org-title" style={{ marginBottom: 16, padding: 12, border: "1px solid var(--line-soft)", borderRadius: 8, background: "var(--surface-2)" }}>
     <header style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline", marginBottom: 10 }}>
-      <span><small style={{ color: "var(--quiet)" }}>HARNESS V2 · {organization.orgVersion}</small><h3 id="harness-v2-org-title">고정 128명 지휘 체계</h3></span>
+      <span><small style={{ color: "var(--quiet)" }}>HARNESS V2 · {organization.orgVersion}</small><h3 id="harness-v2-org-title">가변형 지휘 체계</h3></span>
       <strong aria-label={`총 ${organization.totalAgents}명`}>{organization.totalAgents} agents</strong>
     </header>
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>

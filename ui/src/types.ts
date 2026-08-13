@@ -196,7 +196,7 @@ export interface Snapshot {
     lastActivityAt?: string;
   };
   agents: Agent[];
-  /** Fixed 128-person company roster; `agents` remains runtime/concurrency seats. */
+  /** Run-pinned logical company roster; `agents` remains runtime/concurrency seats. */
   logicalAgents: LogicalAgent[];
   departments: Department[];
   metrics: Metrics;

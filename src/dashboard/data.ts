@@ -3,6 +3,13 @@ import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { organizationRegistryV2 } from "../harness-v2/organization-registry.js";
+import {
+  HARNESS_V2_AGENT_COUNT,
+  HARNESS_V2_MAX_AGENT_COUNT,
+  HARNESS_V2_MIN_AGENT_COUNT,
+  type HarnessV2RunState,
+  type OrganizationRegistryV2,
+} from "../harness-v2/contracts.js";
 import { isValidRunId } from "../store.js";
 import type {
   AgentRole,
@@ -194,7 +201,7 @@ export interface DashboardSnapshot {
     lastActivityAt?: string;
   };
   agents: DashboardAgent[];
-  /** Runtime/concurrency seats. The fixed company roster is exposed separately. */
+  /** Runtime/concurrency seats. The run-pinned logical company roster is exposed separately. */
   logicalAgents: DashboardLogicalAgent[];
   departments: DashboardDepartment[];
   metrics: DashboardMetrics;
@@ -811,7 +818,7 @@ function dashboardHarnessV2(harnessV2: NonNullable<RunState["harnessV2"]>): Pick
   DashboardSnapshot,
   "organizationV2" | "workOrders" | "councils" | "intelligenceV2"
 > {
-  const registry = organizationRegistryV2();
+  const registry = registryForDashboard(harnessV2);
   const oracleSuites = Object.values(harnessV2.oracleSuites ?? {});
   const experiments = Object.values(harnessV2.experiments ?? {});
   const capsules = Object.values(harnessV2.knowledgeCapsules ?? {});
@@ -897,7 +904,7 @@ function logicalAgentsForDashboard(
   runtimeAgents: readonly DashboardAgent[],
   harnessV2?: NonNullable<RunState["harnessV2"]>,
 ): DashboardLogicalAgent[] {
-  const registry = organizationRegistryV2();
+  const registry = registryForDashboard(harnessV2, runtimeAgents.length);
   const units = new Map(registry.units.map((unit) => [unit.id, unit]));
   const runtimeByTask = new Map(runtimeAgents.flatMap((agent) => agent.taskId ? [[agent.taskId, agent] as const] : []));
   const records = Object.values(harnessV2?.workOrders ?? {})
@@ -1244,13 +1251,12 @@ function buildSnapshot(
     },
     events,
     outputs,
-    organizationV2: dashboardOrganizationV2(),
+    organizationV2: dashboardOrganizationV2(registryForDashboard(undefined, agents.length)),
     ...(harness ? { harness } : {}),
   };
 }
 
-function dashboardOrganizationV2(): DashboardOrganizationV2 {
-  const registry = organizationRegistryV2();
+function dashboardOrganizationV2(registry: OrganizationRegistryV2): DashboardOrganizationV2 {
   return {
     orgVersion: registry.orgVersion,
     totalAgents: registry.totalAgents,
@@ -1261,6 +1267,20 @@ function dashboardOrganizationV2(): DashboardOrganizationV2 {
       id, name, kind, headquartersId, parentId, declaredHeadcount,
     })),
   };
+}
+
+function registryForDashboard(
+  harnessV2?: HarnessV2RunState,
+  runtimeAgentCount: number = HARNESS_V2_AGENT_COUNT,
+): OrganizationRegistryV2 {
+  const inferredHeadcount = Math.max(
+    HARNESS_V2_MIN_AGENT_COUNT,
+    Math.min(HARNESS_V2_MAX_AGENT_COUNT, runtimeAgentCount || HARNESS_V2_MIN_AGENT_COUNT),
+  );
+  return organizationRegistryV2({
+    headcount: harnessV2?.organizationHeadcount ?? (harnessV2 ? HARNESS_V2_AGENT_COUNT : inferredHeadcount),
+    reviewerSlots: harnessV2?.organizationReviewerSlots ?? 3,
+  });
 }
 
 function dashboardEvent(event: StoredRunEvent, id: string, agent?: DashboardAgent): DashboardEvent {

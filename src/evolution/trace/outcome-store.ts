@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { BlackboardStore } from "../../harness-v2/blackboard.js";
 import { evaluateGateSet, type GateReceiptArtifact } from "../../harness-v2/gates.js";
+import { organizationRegistryV2 } from "../../harness-v2/organization-registry.js";
 import type { ArtifactRef, ArtifactRevision, GateReceiptContent } from "../../harness-v2/contracts.js";
 import { forgeOracleSuite } from "../../harness-v2/oracle-forge.js";
 import { taskResultArtifactId } from "../../harness-v2/work-orders.js";
@@ -226,6 +227,10 @@ export class ObjectiveOutcomeReceiptStore {
         outputArtifacts: outputs,
         receipts: [...gates.values()],
         blackboard,
+        registry: organizationRegistryV2({
+          headcount: state.harnessV2?.organizationHeadcount ?? 128,
+          reviewerSlots: state.harnessV2?.organizationReviewerSlots ?? 3,
+        }),
         oracle: {
           suite: forgedOracle.suite,
           ...(forgedOracle.reveal ? { reveal: forgedOracle.reveal } : {}),

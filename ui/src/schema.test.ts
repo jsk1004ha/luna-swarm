@@ -7,20 +7,20 @@ describe("UI transport schemas", () => {
     const snapshot = createMockSnapshot(30);
     const parsed = snapshotSchema.parse(snapshot);
     expect(parsed.agents).toHaveLength(30);
-    expect(parsed.logicalAgents).toHaveLength(128);
-    expect(new Set(parsed.logicalAgents.map((agent) => agent.id)).size).toBe(128);
+    expect(parsed.logicalAgents).toHaveLength(30);
+    expect(new Set(parsed.logicalAgents.map((agent) => agent.id)).size).toBe(30);
     expect(parsed.logicalAgents.every((agent) => agent.lineage.length === 4)).toBe(true);
   });
 
   it("accepts optional Harness v2 organization, work-order, and council projections", () => {
-    const snapshot = createMockSnapshot(4);
+    const snapshot = createMockSnapshot(4, 31);
     const parsed = snapshotSchema.parse({
       ...snapshot,
       organizationV2: {
         orgVersion: "lab-128@2",
-        totalAgents: 128,
-        headquarters: [{ id: "command", name: "Project Command HQ", allocation: 8 }],
-        units: [{ id: "hq-command", name: "Project Command HQ", kind: "headquarters", headquartersId: "command", parentId: null, declaredHeadcount: 8 }],
+        totalAgents: 31,
+        headquarters: [{ id: "command", name: "Project Command HQ", allocation: 3 }],
+        units: [{ id: "hq-command", name: "Project Command HQ", kind: "headquarters", headquartersId: "command", parentId: null, declaredHeadcount: 3 }],
       },
       workOrders: [{
         id: "WO-1", revision: 1, state: "VALIDATING", objective: "검증 가능한 결과 생성", owner: "team-core",
@@ -39,11 +39,27 @@ describe("UI transport schemas", () => {
       },
     });
 
-    expect(parsed.organizationV2?.totalAgents).toBe(128);
+    expect(parsed.logicalAgents).toHaveLength(31);
+    expect(parsed.organizationV2?.totalAgents).toBe(31);
     expect(parsed.workOrders?.[0]?.gates).toEqual(["G0", "G1"]);
     expect(parsed.councils?.[0]?.minorityCount).toBe(1);
     expect(parsed.intelligenceV2?.experiments.observations).toBe(0);
     expect(parsed.intelligenceV2?.capsules.verified).toBe(0);
+  });
+
+  it("rejects organization totals that do not match the logical roster", () => {
+    const snapshot = createMockSnapshot(4, 31);
+    const parsed = snapshotSchema.safeParse({
+      ...snapshot,
+      organizationV2: {
+        orgVersion: "lab-128@2",
+        totalAgents: 30,
+        headquarters: [{ id: "command", name: "Project Command HQ", allocation: 30 }],
+        units: [{ id: "hq:command", name: "Project Command HQ", kind: "headquarters", headquartersId: "command", parentId: null, declaredHeadcount: 30 }],
+      },
+    });
+
+    expect(parsed.success).toBe(false);
   });
 
   it("accepts sequenced websocket events", () => {

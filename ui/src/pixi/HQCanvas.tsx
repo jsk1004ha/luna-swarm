@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { filteredAgents, useCompanyStore } from "../store/companyStore";
 import { mapPixelSize, zones } from "../map/officeMap";
 import { mountHQOffice, renderHQScene } from "./renderScene";
-import { agentsForFloor, MAX_FLOOR_AGENTS, sceneVisualRevision } from "./sceneModel";
+import { agentsForFloor, sceneVisualRevision } from "./sceneModel";
 
 export function HQCanvas() {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -244,9 +244,9 @@ export function HQCanvas() {
       {!ready && <div className="canvas-loading" role="status"><span className="moon-loader" />본사 지도를 여는 중</div>}
       {renderError && <div className="canvas-error" role="alert"><strong>본사 지도를 표시하지 못했습니다.</strong><span>{renderError}</span><button onClick={() => setRenderNonce((value) => value + 1)}>지도 다시 그리기</button></div>}
       <p className="sr-only" aria-live="polite">
-        {snapshot ? `${snapshot.logicalAgents.length}명 중 현재 층 ${visibleAgents.length}명이 표시됩니다. ${matchingAgents.length > MAX_FLOOR_AGENTS ? `${MAX_FLOOR_AGENTS}명 초과 실행은 현재 필터의 대표 좌석을 표시하며 명부에서 전원을 검색할 수 있습니다.` : ""}` : "회사 데이터를 불러오는 중입니다."}
+        {snapshot ? `${snapshot.logicalAgents.length}명 중 현재 층 ${visibleAgents.length}명이 표시됩니다. ${matchingAgents.length > visibleAgents.length ? `좌석 또는 화면 밀도를 초과한 직원은 대표 좌석으로 집계되며 명부에서 전원을 검색할 수 있습니다.` : ""}` : "회사 데이터를 불러오는 중입니다."}
       </p>
-      {snapshot && <div className="floor-density" aria-hidden="true">현재 층 <strong>{visibleAgents.length}명</strong> · 논리 직원 <strong>{snapshot.logicalAgents.length}명</strong> · 런타임 좌석 <strong>{snapshot.agents.length}명</strong>{matchingAgents.length > MAX_FLOOR_AGENTS ? " · 집계 표시" : ""}</div>}
+      {snapshot && <div className="floor-density" aria-hidden="true">현재 층 <strong>{visibleAgents.length}명</strong> · 논리 직원 <strong>{snapshot.logicalAgents.length}명</strong> · 런타임 좌석 <strong>{snapshot.agents.length}명</strong>{matchingAgents.length > visibleAgents.length ? " · 집계 표시" : ""}</div>}
       <div className="map-controls" aria-label="지도 확대 및 이동">
         <button onClick={() => cameraActionsRef.current.zoom(0.84)} aria-label="지도 축소">−</button>
         <button onClick={() => cameraActionsRef.current.fit()}>전체</button>
