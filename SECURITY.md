@@ -1,8 +1,8 @@
 # Security notes
 
 - Luna Swarm runs all Codex threads with `sandbox: read-only` and `approvalPolicy: never`.
-- Child App Server processes receive the current environment except `OPENAI_API_KEY` and `CODEX_API_KEY`, which are removed to enforce ChatGPT authentication instead of API billing.
-- `CODEX_HOME` and normal platform variables are preserved because Codex needs its login cache and writable state database.
+- Child App Server processes receive only an explicit allowlist of platform paths and `CODEX_HOME`.
+- API keys, ChatGPT access/refresh tokens, cloud credentials, and database credentials are not forwarded. Codex uses the login cache and writable state database under `CODEX_HOME`.
 - Prompts and model outputs are not written to `events.jsonl`; only execution metadata is logged. Full accepted task results remain in the checksum-protected run state.
 - The command-enabled Luna HQ dashboard binds only to loopback and rejects untrusted Host/Origin headers. Run IDs are restricted to safe path components before any state or directive file is opened.
 - Directive append and terminal finalization share a per-run filesystem gate. A closed gate returns a conflict instead of accepting work that can no longer reach a model checkpoint.

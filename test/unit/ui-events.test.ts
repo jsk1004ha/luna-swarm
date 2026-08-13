@@ -160,6 +160,65 @@ test("WebSocket upgrade rejects an invalid token before connection", async () =>
   }
 });
 
+test("WebSocket upgrade rejects a cross-origin browser before connection", async () => {
+  const hub = new UiEventHub();
+  const server = createServer((_request, response) => response.writeHead(404).end());
+  const attachment = attachUiEventWebSocketServer(server, hub, { requireSameOrigin: true });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new WebSocket(
+    `ws://127.0.0.1:${address.port}/api/ui/events?runId=run-ws`,
+    { origin: "https://attacker.invalid" },
+  );
+  try {
+    const status = await new Promise<number>((resolveStatus, reject) => {
+      client.once("unexpected-response", (_request, response) => resolveStatus(response.statusCode ?? 0));
+      client.once("open", () => reject(new Error("Cross-origin WebSocket unexpectedly opened")));
+      client.once("error", () => undefined);
+    });
+    assert.equal(status, 403);
+  } finally {
+    client.terminate();
+    attachment.close();
+    await new Promise<void>((resolveClose, reject) => {
+      server.close((error) => error ? reject(error) : resolveClose());
+      server.closeIdleConnections();
+    });
+  }
+});
+
+test("WebSocket upgrade rejects a DNS-rebinding Host even when Origin matches it", async () => {
+  const hub = new UiEventHub();
+  const server = createServer((_request, response) => response.writeHead(404).end());
+  const attachment = attachUiEventWebSocketServer(server, hub, { requireSameOrigin: true });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new WebSocket(
+    `ws://127.0.0.1:${address.port}/api/ui/events?runId=run-ws`,
+    {
+      origin: `http://attacker.invalid:${address.port}`,
+      headers: { host: `attacker.invalid:${address.port}` },
+    },
+  );
+  try {
+    const status = await new Promise<number>((resolveStatus, reject) => {
+      client.once("unexpected-response", (_request, response) => resolveStatus(response.statusCode ?? 0));
+      client.once("open", () => reject(new Error("DNS-rebinding WebSocket unexpectedly opened")));
+      client.once("error", () => undefined);
+    });
+    assert.equal(status, 403);
+  } finally {
+    client.terminate();
+    attachment.close();
+    await new Promise<void>((resolveClose, reject) => {
+      server.close((error) => error ? reject(error) : resolveClose());
+      server.closeIdleConnections();
+    });
+  }
+});
+
 test("observer reads server-side run files, marks external observation, and avoids duplicate replay", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-ui-events-"));
   const runId = "run-observed";

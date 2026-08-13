@@ -1,3 +1,10 @@
+import type {
+  GateId,
+  HarnessV2RunState,
+  StructuredMessageType,
+} from "./harness-v2/contracts.js";
+import type { EvolutionAttemptRecord, EvolutionRunState } from "./evolution/domain/bundle.js";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue =
   | JsonPrimitive
@@ -71,6 +78,7 @@ export type RunStatus =
   | "completed"
   | "partial"
   | "failed"
+  | "interrupted"
   | "cancelled";
 
 export interface Requirement {
@@ -140,6 +148,29 @@ export interface SwarmPlan {
 export interface Claim {
   statement: string;
   support: string;
+  requirementIds: string[];
+  evidenceRefs: Array<{ kind: "evidence" | "check"; ordinal: number }>;
+}
+
+export interface EvidenceLineageItem {
+  id: string;
+  hash: string;
+  taskId: string;
+  requirementIds: string[];
+  kind: "evidence" | "check";
+  ordinal: number;
+  content: string;
+}
+
+export interface ClaimLineageItem {
+  id: string;
+  hash: string;
+  taskId: string;
+  requirementIds: string[];
+  ordinal: number;
+  statement: string;
+  support: string;
+  evidenceIds: string[];
 }
 
 export interface AgentResult {
@@ -175,11 +206,15 @@ export interface TaskRecord extends TaskSpec {
   error?: string;
   startedAt?: string;
   completedAt?: string;
+  /** Immutable Evolution identity for the current execution attempt. */
+  evolution?: EvolutionAttemptRecord;
 }
 
 export interface SynthesisPacket {
   summary: string;
   claims: Claim[];
+  claimLineage: ClaimLineageItem[];
+  evidenceLineage: EvidenceLineageItem[];
   conflicts: string[];
   gaps: string[];
   recommendations: string[];
@@ -190,11 +225,24 @@ export interface FinalReport {
   goal: string;
   executiveSummary: string;
   answer: string;
+  supportedClaims: Array<{ claimId: string; statement: string }>;
   requirementsCoverage: Array<{
     requirementId: string;
     covered: boolean;
     explanation: string;
+    supportingClaimIds: string[];
+    supportingEvidenceIds: string[];
   }>;
+  criticResolution: {
+    verdict: VoteVerdict;
+    issueResolutions: Array<{
+      issue: string;
+      resolved: boolean;
+      explanation: string;
+      supportingClaimIds: string[];
+      supportingEvidenceIds: string[];
+    }>;
+  };
   conflicts: string[];
   caveats: string[];
   nextActions: string[];
@@ -254,10 +302,22 @@ export interface RunState {
   error?: string;
   metrics: RunMetrics;
   harness?: RunHarnessState;
+  /** Harness v2 is additive so company-v1 runs remain resumable without migration. */
+  harnessV2?: HarnessV2RunState;
+  /** Additive Evolution Harness state. Legacy runs remain explicitly unpinned. */
+  evolution?: EvolutionRunState;
 }
 
 export interface SwarmConfig {
   model: string;
+  /** Concrete CI/build identity for non-Git workspaces. Placeholder values are rejected. */
+  sourceIdentity?: string;
+  /** Public verification keys for protected benchmark quality receipts. Private keys never belong here. */
+  evolutionBenchmarkAuthorities?: Record<string, {
+    evaluatorVersion: string;
+    publicKeyPem: string;
+    benchmarkSuites: Record<string, string>;
+  }>;
   maxConcurrency: number;
   initialConcurrency: number;
   minConcurrency: number;
@@ -301,6 +361,11 @@ export interface RunEvent {
   at: string;
   runId: string;
   type: string;
+  messageType?: StructuredMessageType;
+  workOrderId?: string;
+  artifactIds?: string[];
+  councilId?: string;
+  gateId?: GateId;
   directiveId?: string;
   taskId?: string;
   role?: AgentRole;

@@ -35,7 +35,10 @@ export interface PoolSnapshot {
 
 export class Permit {
   private released = false;
-  constructor(private readonly pool: AdaptivePermitPool) {}
+  constructor(
+    private readonly pool: AdaptivePermitPool,
+    readonly queueWaitMs: number,
+  ) {}
   release(): void {
     if (this.released) return;
     this.released = true;
@@ -167,7 +170,7 @@ export class AdaptivePermitPool {
       if (this.queueWaitSamples.length > 1_024) this.queueWaitSamples.shift();
       this.active += 1;
       this.maxSeen = Math.max(this.maxSeen, this.active);
-      waiter.resolve(new Permit(this));
+      waiter.resolve(new Permit(this, queueWaitMs));
     }
   }
 

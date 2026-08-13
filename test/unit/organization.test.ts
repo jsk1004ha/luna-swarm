@@ -25,13 +25,19 @@ test("ChatGPT-only child environment strips API billing credentials", () => {
   const source = {
     PATH: "/bin",
     CODEX_HOME: "/tmp/codex",
+    CHATGPT_ACCESS_TOKEN: "oauth-token",
     OPENAI_API_KEY: "secret-a",
     CODEX_API_KEY: "secret-b",
+    AWS_SECRET_ACCESS_KEY: "secret-c",
+    DATABASE_URL: "postgres://secret",
   };
   const env = chatGptOnlyEnvironment(source);
   assert.equal(env.OPENAI_API_KEY, undefined);
   assert.equal(env.CODEX_API_KEY, undefined);
   assert.equal(env.CODEX_HOME, "/tmp/codex");
+  assert.equal(env.CHATGPT_ACCESS_TOKEN, undefined);
+  assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(env.DATABASE_URL, undefined);
   assert.equal(source.OPENAI_API_KEY, "secret-a");
 });
 

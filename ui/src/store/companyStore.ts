@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Activity, CompanyEvent, ConnectionState, DepartmentId, RunSummary, Snapshot, ViewMode } from "../types";
+import type { Activity, Agent, CompanyEvent, ConnectionState, DepartmentId, RunSummary, Snapshot, ViewMode } from "../types";
 
 type MobilePanel = "directory" | "events" | null;
 
@@ -48,7 +48,7 @@ export const useCompanyStore = create<CompanyState>((set) => ({
     snapshot,
     connection: snapshot.run.isStale ? "stale" : connection,
     error: null,
-    selectedAgentId: state.selectedAgentId && snapshot.agents.some((agent) => agent.id === state.selectedAgentId)
+    selectedAgentId: state.selectedAgentId && companyRoster(snapshot).some((agent) => agent.id === state.selectedAgentId)
       ? state.selectedAgentId
       : null,
     lastSeq: snapshot.run.id === state.snapshot?.run.id
@@ -75,12 +75,17 @@ export const useCompanyStore = create<CompanyState>((set) => ({
 
 export function filteredAgents(state: Pick<CompanyState, "snapshot" | "selectedDepartment" | "activityFilter" | "search">) {
   const query = state.search.trim().toLocaleLowerCase("ko");
-  return (state.snapshot?.agents ?? []).filter((agent) => {
+  return companyRoster(state.snapshot).filter((agent) => {
     if (state.selectedDepartment && agent.department !== state.selectedDepartment) return false;
     if (state.activityFilter !== "all" && agent.activity !== state.activityFilter) return false;
     if (!query) return true;
-    return [agent.name, agent.taskTitle, agent.role, agent.capability?.specialistId]
+    return [agent.id, agent.name, agent.taskTitle, agent.role, agent.capability?.specialistId]
       .filter(Boolean)
       .some((value) => value!.toLocaleLowerCase("ko").includes(query));
   });
+}
+
+/** The logical company directory is distinct from runtime concurrency seats. */
+export function companyRoster(snapshot: Snapshot | null | undefined): Agent[] {
+  return snapshot?.logicalAgents ?? snapshot?.agents ?? [];
 }

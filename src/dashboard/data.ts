@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { open, readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { organizationRegistryV2 } from "../harness-v2/organization-registry.js";
 import { isValidRunId } from "../store.js";
 import type {
   AgentRole,
@@ -71,6 +72,25 @@ export interface DashboardAgent {
     auditVotes: { accept: number; revise: number; reject: number };
     manager?: { teamId: string; role: string; rank: string };
   };
+}
+
+export type DashboardLogicalAgentStatus =
+  | "available"
+  | "assigned"
+  | "working"
+  | "reviewing"
+  | "blocked"
+  | "completed";
+
+export interface DashboardLogicalAgent extends DashboardAgent {
+  logical: true;
+  logicalStatus: DashboardLogicalAgentStatus;
+  headquartersId: string;
+  divisionId: string;
+  cellId: string;
+  lineage: Array<{ id: string; name: string; kind: "headquarters" | "division" | "team" | "cell" }>;
+  workOrderId?: string;
+  workOrderIds: string[];
 }
 
 export interface DashboardDepartment {
@@ -174,6 +194,8 @@ export interface DashboardSnapshot {
     lastActivityAt?: string;
   };
   agents: DashboardAgent[];
+  /** Runtime/concurrency seats. The fixed company roster is exposed separately. */
+  logicalAgents: DashboardLogicalAgent[];
   departments: DashboardDepartment[];
   metrics: DashboardMetrics;
   events: DashboardEvent[];
@@ -199,6 +221,86 @@ export interface DashboardSnapshot {
     learningPolicyImprovement?: number;
     learningPolicyRollbacks?: number;
   };
+  organizationV2?: DashboardOrganizationV2;
+  workOrders?: DashboardWorkOrderV2[];
+  councils?: DashboardCouncilV2[];
+  intelligenceV2?: DashboardIntelligenceV2;
+}
+
+export interface DashboardIntelligenceV2 {
+  preflight?: {
+    status: "ready" | "attention_required";
+    assumptions: number;
+    blockers: number;
+    risks: number;
+  };
+  programKnowledge?: {
+    status: "ready" | "unavailable";
+    nodes: number;
+    edges: number;
+    omittedFiles: number;
+  };
+  oracles: {
+    suites: number;
+    oracles: number;
+    hidden: number;
+  };
+  experiments: {
+    preregistered: number;
+    observing: number;
+    decided: number;
+    observations: number;
+  };
+  capsules: {
+    total: number;
+    candidate: number;
+    verified: number;
+    stale: number;
+    revoked: number;
+    negative: number;
+  };
+}
+
+export interface DashboardOrganizationV2 {
+  orgVersion: string;
+  totalAgents: number;
+  headquarters: Array<{
+    id: string;
+    name: string;
+    allocation: number;
+  }>;
+  units: Array<{
+    id: string;
+    name: string;
+    kind: "headquarters" | "division" | "team" | "cell";
+    headquartersId: string;
+    parentId: string | null;
+    declaredHeadcount: number;
+  }>;
+}
+
+export interface DashboardWorkOrderV2 {
+  id: string;
+  revision: number;
+  state: string;
+  objective: string;
+  owner: string;
+  reviewers: string[];
+  risk: string;
+  dependencies: string[];
+  gates: string[];
+  artifacts: string[];
+}
+
+export interface DashboardCouncilV2 {
+  id: string;
+  type: string;
+  state: string;
+  question: string;
+  round: number;
+  outcome?: string;
+  minorityCount: number;
+  blockingFindings: string[];
 }
 
 export interface DashboardDataOptions {
@@ -629,7 +731,7 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
   const staleAfterMs = Math.max(state.config.callTimeoutMs + 60_000, 120_000);
   const isStale = !isTerminalRunStatus(state.status) &&
     now.getTime() - eventTimestamp(lastActivityAt) > staleAfterMs;
-  return buildSnapshot(
+  const snapshot = buildSnapshot(
     "real",
     {
       id: state.runId,
@@ -697,6 +799,192 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
       : undefined,
     outputs,
   );
+  if (!state.harnessV2) return snapshot;
+  return {
+    ...snapshot,
+    logicalAgents: logicalAgentsForDashboard(agents, state.harnessV2),
+    ...dashboardHarnessV2(state.harnessV2),
+  };
+}
+
+function dashboardHarnessV2(harnessV2: NonNullable<RunState["harnessV2"]>): Pick<
+  DashboardSnapshot,
+  "organizationV2" | "workOrders" | "councils" | "intelligenceV2"
+> {
+  const registry = organizationRegistryV2();
+  const oracleSuites = Object.values(harnessV2.oracleSuites ?? {});
+  const experiments = Object.values(harnessV2.experiments ?? {});
+  const capsules = Object.values(harnessV2.knowledgeCapsules ?? {});
+  const headquarters = registry.units
+    .filter((unit) => unit.kind === "headquarters")
+    .map((unit) => ({ id: unit.headquartersId, name: unit.name, allocation: unit.declaredHeadcount }));
+  return {
+    organizationV2: {
+      orgVersion: harnessV2.orgVersion,
+      totalAgents: registry.totalAgents,
+      headquarters,
+      units: registry.units.map(({ id, name, kind, headquartersId, parentId, declaredHeadcount }) => ({
+        id, name, kind, headquartersId, parentId, declaredHeadcount,
+      })),
+    },
+    workOrders: Object.values(harnessV2.workOrders)
+      .sort((left, right) => left.order.priority - right.order.priority || left.order.id.localeCompare(right.order.id))
+      .map(({ order, state, assignedAgentId, reviewerAgentIds, artifactIds }) => ({
+        id: order.id,
+        revision: order.revision,
+        state,
+        objective: order.objective,
+        owner: assignedAgentId,
+        reviewers: [...reviewerAgentIds],
+        risk: order.risk,
+        dependencies: [...order.dependencies],
+        gates: [...order.requiredGateIds],
+        artifacts: [...artifactIds],
+      })),
+    councils: Object.values(harnessV2.councils)
+      .sort((left, right) => left.agenda.createdAt.localeCompare(right.agenda.createdAt) || left.agenda.councilId.localeCompare(right.agenda.councilId))
+      .map((council) => ({
+        id: council.agenda.councilId,
+        type: council.agenda.type,
+        state: council.state,
+        question: council.agenda.question,
+        round: council.round,
+        ...(council.decision ? { outcome: council.decision.outcome } : {}),
+        minorityCount: council.decision?.minorityReports.length ?? 0,
+        blockingFindings: [...(council.decision?.blockingFindingIds ?? [])],
+      })),
+    intelligenceV2: {
+      ...(harnessV2.missionPreflight ? {
+        preflight: {
+          status: harnessV2.missionPreflight.ready ? "ready" : "attention_required",
+          assumptions: harnessV2.missionPreflight.assumptions.length,
+          blockers: harnessV2.missionPreflight.blockers.length,
+          risks: harnessV2.missionPreflight.risks.length,
+        },
+      } : {}),
+      ...(harnessV2.programKnowledge ? {
+        programKnowledge: {
+          status: harnessV2.programKnowledge.status,
+          nodes: harnessV2.programKnowledge.nodeCount,
+          edges: harnessV2.programKnowledge.edgeCount,
+          omittedFiles: harnessV2.programKnowledge.omittedFiles,
+        },
+      } : {}),
+      oracles: {
+        suites: oracleSuites.length,
+        oracles: oracleSuites.reduce((sum, suite) => sum + suite.oracleCount, 0),
+        hidden: oracleSuites.reduce((sum, suite) => sum + suite.hiddenCount, 0),
+      },
+      experiments: {
+        preregistered: experiments.filter((experiment) => experiment.status === "PREREGISTERED").length,
+        observing: experiments.filter((experiment) => experiment.status === "OBSERVING").length,
+        decided: experiments.filter((experiment) => experiment.status === "DECIDED").length,
+        observations: experiments.reduce((sum, experiment) => sum + experiment.observationCount, 0),
+      },
+      capsules: {
+        total: capsules.length,
+        candidate: capsules.filter((capsule) => capsule.lifecycle === "candidate").length,
+        verified: capsules.filter((capsule) => capsule.lifecycle === "verified").length,
+        stale: capsules.filter((capsule) => capsule.lifecycle === "stale").length,
+        revoked: capsules.filter((capsule) => capsule.lifecycle === "revoked").length,
+        negative: capsules.filter((capsule) => capsule.kind === "negative-result").length,
+      },
+    },
+  };
+}
+
+function logicalAgentsForDashboard(
+  runtimeAgents: readonly DashboardAgent[],
+  harnessV2?: NonNullable<RunState["harnessV2"]>,
+): DashboardLogicalAgent[] {
+  const registry = organizationRegistryV2();
+  const units = new Map(registry.units.map((unit) => [unit.id, unit]));
+  const runtimeByTask = new Map(runtimeAgents.flatMap((agent) => agent.taskId ? [[agent.taskId, agent] as const] : []));
+  const records = Object.values(harnessV2?.workOrders ?? {})
+    .sort((left, right) => left.order.priority - right.order.priority || left.order.id.localeCompare(right.order.id));
+  const workOrdersByOwner = new Map<string, typeof records>();
+  for (const record of records) {
+    workOrdersByOwner.set(record.assignedAgentId, [...(workOrdersByOwner.get(record.assignedAgentId) ?? []), record]);
+  }
+  const reviewerOrders = new Map<string, NonNullable<RunState["harnessV2"]>["workOrders"][string]>();
+  for (const record of records) {
+    for (const reviewerId of record.reviewerAgentIds) {
+      if (["SUBMITTED", "VALIDATING", "VALIDATION_RETRY"].includes(record.state)) reviewerOrders.set(reviewerId, record);
+    }
+  }
+
+  const logicalAgents = registry.agents.map((slot, index): DashboardLogicalAgent => {
+    const ownedRecords = workOrdersByOwner.get(slot.agentId) ?? [];
+    const owned = ownedRecords.find((candidate) => !["INTEGRATED", "CANCELLED", "FAILED"].includes(candidate.state)) ?? ownedRecords[0];
+    const reviewed = reviewerOrders.get(slot.agentId);
+    const record = owned ?? reviewed;
+    // Legacy/demo snapshots have no slot assignment. Pairing by stable registry order
+    // keeps the roster useful without conflating the two arrays in the API.
+    const runtime = record ? runtimeByTask.get(record.order.id) : harnessV2 ? undefined : runtimeAgents[index];
+    const state = record?.state;
+    const logicalStatus: DashboardLogicalAgentStatus = reviewed
+      ? "reviewing"
+      : state === "ACCEPTED" || state === "INTEGRATED"
+        ? "completed"
+        : state === "FAILED" || state === "CANCELLED" || state === "BLOCKED" || state === "REWORK_REQUIRED" || state === "UNKNOWN_SIDE_EFFECT"
+          ? "blocked"
+          : state === "EXECUTING" || state === "LEASED"
+            ? "working"
+            : record
+              ? "assigned"
+              : runtime?.activity === "done"
+                ? "completed"
+                : runtime?.activity === "blocked"
+                  ? "blocked"
+                  : runtime?.isActive
+                    ? "working"
+                    : runtime?.taskId
+                      ? "assigned"
+                      : "available";
+    const department = departmentForSlot(slot.headquartersId, slot.divisionId);
+    const activity: DashboardActivity = reviewed
+      ? "reviewing"
+      : runtime?.activity ?? (logicalStatus === "working" ? "working" : logicalStatus === "completed" ? "done" : logicalStatus === "blocked" ? "blocked" : "idle");
+    const status = statusForActivity(activity);
+    const lineageIds = [`hq:${slot.headquartersId}`, slot.divisionId, slot.teamId, slot.cellId];
+    return {
+      id: slot.agentId,
+      ...agentIdentity(slot.agentId),
+      department,
+      rank: slot.role === "cell-lead" ? "section_chief" : slot.role === "review-liaison" ? "assistant_manager" : "staff",
+      role: slot.title,
+      teamId: slot.teamId,
+      ...(record ? { taskId: record.order.id, workOrderId: record.order.id } : runtime?.taskId ? { taskId: runtime.taskId } : {}),
+      taskTitle: record?.order.objective ?? runtime?.taskTitle ?? "새 업무 배정 대기",
+      status,
+      activity,
+      progress: runtime?.progress ?? (logicalStatus === "completed" ? 100 : logicalStatus === "reviewing" ? 78 : logicalStatus === "working" ? 45 : 0),
+      ...(runtime?.message ? { message: runtime.message } : {}),
+      isActive: ["working", "reviewing", "researching"].includes(activity),
+      ...(runtime?.capability ? { capability: structuredClone(runtime.capability) } : {}),
+      ...(runtime?.runtime ? { runtime: structuredClone(runtime.runtime) } : {}),
+      logical: true,
+      logicalStatus,
+      headquartersId: slot.headquartersId,
+      divisionId: slot.divisionId,
+      cellId: slot.cellId,
+      lineage: lineageIds.flatMap((id) => {
+        const unit = units.get(id);
+        return unit ? [{ id: unit.id, name: unit.name, kind: unit.kind }] : [];
+      }),
+      workOrderIds: ownedRecords.map((candidate) => candidate.order.id),
+    };
+  });
+  ensureUniqueAgentNames(logicalAgents);
+  return logicalAgents;
+}
+
+function departmentForSlot(headquartersId: string, divisionId: string): Department {
+  if (headquartersId === "command") return divisionId.includes("executive-office") ? "executive" : "strategy";
+  if (headquartersId === "research") return divisionId.includes("falsification") ? "risk" : "research";
+  if (headquartersId === "engineering") return "engineering";
+  if (headquartersId === "quality") return "quality";
+  return "integration";
 }
 
 function taskAgent(
@@ -932,6 +1220,7 @@ function buildSnapshot(
     mode,
     run,
     agents,
+    logicalAgents: logicalAgentsForDashboard(agents),
     departments,
     metrics: {
       totalAgents: agents.length,
@@ -955,7 +1244,22 @@ function buildSnapshot(
     },
     events,
     outputs,
+    organizationV2: dashboardOrganizationV2(),
     ...(harness ? { harness } : {}),
+  };
+}
+
+function dashboardOrganizationV2(): DashboardOrganizationV2 {
+  const registry = organizationRegistryV2();
+  return {
+    orgVersion: registry.orgVersion,
+    totalAgents: registry.totalAgents,
+    headquarters: registry.units
+      .filter((unit) => unit.kind === "headquarters")
+      .map((unit) => ({ id: unit.headquartersId, name: unit.name, allocation: unit.declaredHeadcount })),
+    units: registry.units.map(({ id, name, kind, headquartersId, parentId, declaredHeadcount }) => ({
+      id, name, kind, headquartersId, parentId, declaredHeadcount,
+    })),
   };
 }
 

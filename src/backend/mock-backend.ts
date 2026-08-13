@@ -7,6 +7,7 @@ import type {
   SwarmPlan,
   TaskRecord,
 } from "../types.js";
+import type { MissionPreflightInput } from "../harness-v2/preflight.js";
 
 export type MockHandler = (
   request: AgentRequest,
@@ -54,6 +55,9 @@ export class MockAgentBackend implements AgentBackend {
 export async function demoHandler(request: AgentRequest): Promise<unknown> {
   const data = (request.data ?? {}) as Record<string, unknown>;
   const goal = String(data.goal ?? "Demo goal");
+  if (request.purpose === "mission_preflight") {
+    return demoMissionPreflight(goal, String(data.missionId ?? "mission:demo"));
+  }
   if (request.purpose === "candidate_plan") {
     return demoPlan(goal);
   }
@@ -65,7 +69,12 @@ export async function demoHandler(request: AgentRequest): Promise<unknown> {
     const result: AgentResult = {
       taskId: task.id,
       summary: `${task.title}의 계약을 충족하는 모의 결과`,
-      claims: [{ statement: `${task.id} 핵심 결론`, support: "결정론적 mock evidence" }],
+      claims: [{
+        statement: `${task.id} 핵심 결론`,
+        support: "결정론적 mock evidence",
+        requirementIds: task.requirementIds,
+        evidenceRefs: [{ kind: "evidence", ordinal: 0 }, { kind: "check", ordinal: 0 }],
+      }],
       evidence: ["mock://deterministic-evidence"],
       deliverables: [task.deliverable],
       checks: task.acceptanceCriteria.map((item) => `확인: ${item}`),
@@ -103,25 +112,61 @@ export async function demoHandler(request: AgentRequest): Promise<unknown> {
     const sourceTaskIds = data.sourceTaskIds as string[];
     return {
       summary: packets.map((packet) => packet.summary).join("\n"),
-      claims: packets.flatMap((packet) => packet.claims),
-      conflicts: packets.flatMap((packet) => packet.conflicts),
-      gaps: packets.flatMap((packet) => packet.gaps),
-      recommendations: packets.flatMap((packet) => packet.recommendations),
+      claims: packets.flatMap((packet) => packet.claims)
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+      claimLineage: packets.flatMap((packet) => packet.claimLineage).sort((a, b) => a.id.localeCompare(b.id)),
+      evidenceLineage: packets.flatMap((packet) => packet.evidenceLineage).sort((a, b) => a.id.localeCompare(b.id)),
+      conflicts: [...new Set(packets.flatMap((packet) => packet.conflicts))].sort((a, b) => a.localeCompare(b)),
+      gaps: [...new Set(packets.flatMap((packet) => packet.gaps))].sort((a, b) => a.localeCompare(b)),
+      recommendations: [...new Set(packets.flatMap((packet) => packet.recommendations))].sort((a, b) => a.localeCompare(b)),
       sourceTaskIds,
     } satisfies SynthesisPacket;
   }
   if (request.purpose === "final" || request.purpose === "final_repair") {
     const plan = data.plan as SwarmPlan;
     const root = data.root as SynthesisPacket;
+    const critic = data.critic as import("../types.js").ValidationVote;
+    const materialIssues = [
+      ...critic.issues,
+      ...critic.criteria
+        .filter((criterion) => !criterion.passed)
+        .map((criterion) => `Failed criterion: ${criterion.criterion} — ${criterion.note}`),
+      ...(critic.verdict === "reject" && critic.issues.length === 0 && critic.criteria.every((item) => item.passed)
+        ? ["Critic verdict: reject"]
+        : []),
+    ].filter((issue, index, issues) => issues.indexOf(issue) === index).sort();
+    const defaultClaim = root.claimLineage[0];
+    const defaultEvidence = root.evidenceLineage.find((item) => defaultClaim?.evidenceIds.includes(item.id));
     return {
       goal,
       executiveSummary: "모의 Swarm 실행이 검증과 출처 보존을 통과했습니다.",
       answer: root.summary,
-      requirementsCoverage: plan.requirements.map((requirement) => ({
-        requirementId: requirement.id,
-        covered: true,
-        explanation: "검증된 작업 결과에 포함됨",
-      })),
+      supportedClaims: root.claimLineage.map((item) => ({ claimId: item.id, statement: item.statement })),
+      requirementsCoverage: plan.requirements.map((requirement) => {
+        const supportingClaim = root.claimLineage.find((item) =>
+          item.requirementIds.includes(requirement.id),
+        );
+        const supportingEvidence = root.evidenceLineage.find((item) =>
+          item.requirementIds.includes(requirement.id) && supportingClaim?.evidenceIds.includes(item.id),
+        );
+        return {
+          requirementId: requirement.id,
+          covered: true,
+          explanation: "검증된 leaf 주장과 근거 계보에 직접 연결되어 있음",
+          supportingClaimIds: supportingClaim ? [supportingClaim.id] : [],
+          supportingEvidenceIds: supportingEvidence ? [supportingEvidence.id] : [],
+        };
+      }),
+      criticResolution: {
+        verdict: critic.verdict,
+        issueResolutions: materialIssues.map((issue) => ({
+          issue,
+          resolved: true,
+          explanation: "검증된 leaf 주장과 근거가 해당 비판을 명시적으로 해소함",
+          supportingClaimIds: defaultClaim ? [defaultClaim.id] : [],
+          supportingEvidenceIds: defaultEvidence ? [defaultEvidence.id] : [],
+        })),
+      },
       conflicts: root.conflicts,
       caveats: root.gaps,
       nextActions: root.recommendations,
@@ -247,6 +292,48 @@ export function demoPlan(goal: string): SwarmPlan {
       },
     ],
     finalInstructions: "결론, 근거, 위험, 다음 행동을 명확히 제시한다.",
+  };
+}
+
+function demoMissionPreflight(goal: string, missionId: string): MissionPreflightInput {
+  const boundaryKinds = ["failure", "input", "interruption", "output", "performance", "security"];
+  return {
+    missionId,
+    objective: goal,
+    assumptions: [
+      {
+        statement: "The requested outcome can be verified with observable artifacts and checks",
+        classification: "inference",
+        falsification: "Attempt to define an observable acceptance test for every requirement",
+      },
+      {
+        statement: "Unverified model confidence is not evidence",
+        classification: "constraint",
+        falsification: "Inspect whether any acceptance decision relies only on self-reported confidence",
+      },
+    ],
+    requirements: [
+      { id: "PREFLIGHT-R1", statement: "Produce an evidence-backed result for the stated goal" },
+      { id: "PREFLIGHT-R2", statement: "Expose material risks, boundaries, and uncertainty" },
+    ],
+    acceptanceTests: [
+      { id: "PREFLIGHT-T1", statement: "Every material claim has an observable artifact or check", requirementIds: ["PREFLIGHT-R1"] },
+      { id: "PREFLIGHT-T2", statement: "Failure, interruption, security, performance, input, and output boundaries are addressed", requirementIds: ["PREFLIGHT-R2"] },
+    ],
+    requirementMutations: [
+      { requirementId: "PREFLIGHT-R1", mutation: "Allow unsupported material claims", acceptanceTestIds: ["PREFLIGHT-T1"] },
+      { requirementId: "PREFLIGHT-R2", mutation: "Omit one required boundary condition", acceptanceTestIds: ["PREFLIGHT-T2"] },
+    ],
+    ambiguities: [],
+    conflicts: [],
+    requiredBoundaryKinds: boundaryKinds,
+    boundaryConditions: boundaryKinds.map((kind) => ({ kind, statement: `Verify the mission's ${kind} boundary explicitly` })),
+    risks: [{
+      failureMode: "A plausible result passes without direct evidence",
+      falsification: "Inject an unsupported claim and require the deterministic evidence gate to reject it",
+      ownerTeam: "quality",
+      mitigation: "Keep acceptance bound to immutable artifacts and independent receipts",
+    }],
   };
 }
 

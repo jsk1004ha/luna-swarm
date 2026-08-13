@@ -5,8 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { MockAgentBackend, demoHandler } from "../../src/backend/mock-backend.js";
 import { SkillCatalog } from "../../src/capabilities.js";
-import { DEFAULT_CONFIG } from "../../src/config.js";
+import { DEFAULT_CONFIG, validateConfig } from "../../src/config.js";
 import { AdaptiveHarness } from "../../src/harness.js";
+import { LearningSnapshot } from "../../src/learning.js";
 import { SwarmOrchestrator } from "../../src/orchestrator.js";
 import { AgentGateway } from "../../src/runtime/gateway.js";
 import { AtomicRunStore } from "../../src/store.js";
@@ -22,6 +23,33 @@ function config() {
     rateLimitCooldownMs: 1,
   };
 }
+
+test("learning auto-apply is disabled by default", () => {
+  assert.equal(DEFAULT_CONFIG.learningAutoApply, false);
+  assert.throws(
+    () => validateConfig({ ...DEFAULT_CONFIG, learningAutoApply: true }),
+    /Evolution Bundle promotion requires an explicit manual CAS operation/,
+  );
+  assert.doesNotThrow(() => validateConfig({
+    ...DEFAULT_CONFIG,
+    evolutionBenchmarkAuthorities: {
+      "benchmark-key-v1": {
+        evaluatorVersion: "benchmark-evaluator-v1",
+        publicKeyPem: "-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----",
+        benchmarkSuites: { "engineering-bugfix-v1": `sha256:${"a".repeat(64)}` },
+      },
+    },
+  }));
+  assert.throws(
+    () => validateConfig({
+      ...DEFAULT_CONFIG,
+      evolutionBenchmarkAuthorities: {
+        bad: { evaluatorVersion: "", publicKeyPem: "private", benchmarkSuites: {} },
+      },
+    }),
+    /evolutionBenchmarkAuthorities/,
+  );
+});
 
 test("skill catalog loads bounded workspace skills and routes a specialist", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-skills-"));
@@ -112,6 +140,59 @@ test("harness decisions are deterministic and independent audit calls receive st
     assert.equal(state.independentReviewSelections, 2);
     assert.equal(state.gateApplications, first.gates.length * 2);
   } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("legacy learning remains observation-only and cannot alter automatic skill selection", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-harness-unpromoted-"));
+  const original = LearningSnapshot.prototype.performanceFor;
+  try {
+    const baseline = new AdaptiveHarness(workspace, {
+      ...config(),
+      stateDirectory: ".state",
+      learningEnabled: false,
+      maxSkillsPerCall: 1,
+    });
+    await baseline.initialize();
+    const request = {
+      threadKey: "worker:T1",
+      role: "worker" as const,
+      corporateRole: "software_engineer",
+      department: "engineering" as const,
+      purpose: "execute_task",
+      taskId: "T1",
+      taskKind: "implementation",
+      taskRisk: "medium" as const,
+      prompt: "Implement and test the change.",
+      reasoningEffort: "medium" as const,
+    };
+    const expected = baseline.apply(request).skillIds;
+
+    let rawPerformanceReads = 0;
+    LearningSnapshot.prototype.performanceFor = () => {
+      rawPerformanceReads += 1;
+      return new Map([["unpromoted-skill", {
+        uses: 10_000,
+        accepted: 10_000,
+        failed: 0,
+        reworked: 0,
+        meanQuality: 1,
+      }]]);
+    };
+    const collecting = new AdaptiveHarness(workspace, {
+      ...config(),
+      stateDirectory: ".state",
+      learningEnabled: true,
+      learningAutoApply: true,
+      maxSkillsPerCall: 1,
+    });
+    await collecting.initialize();
+    assert.deepEqual(collecting.apply(request).skillIds, expected);
+    assert.equal(rawPerformanceReads, 0);
+    assert.equal(collecting.state().learningPolicyStatus, "collecting");
+  } finally {
+    LearningSnapshot.prototype.performanceFor = original;
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -229,7 +310,7 @@ test("tampered learning lessons are isolated instead of recalled into prompts", 
   }
 });
 
-test("verified run experience is persisted without raw goals or result content and recalled next run", async () => {
+test("current run experience is persisted as weak observation and never recalled", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-learning-"));
   try {
     const cfg = { ...config(), stateDirectory: ".state" };
@@ -251,6 +332,18 @@ test("verified run experience is persisted without raw goals or result content a
     assert.doesNotMatch(recordText, /private-customer-secret-9482/);
     assert.doesNotMatch(recordText, /결정론적 mock evidence/);
     assert.match(recordText, /requirements-traceability|evidence-first-research/);
+    const learningRecord = JSON.parse(recordText) as {
+      experiences: Array<{
+        evidenceClass?: string;
+        skillAttribution?: { worker: string[]; manager: string[]; validator: string[] };
+      }>;
+    };
+    assert.ok(learningRecord.experiences.every((experience) =>
+      experience.evidenceClass === "weak_observation" &&
+      (experience.skillAttribution?.worker.length ?? 0) > 0 &&
+      (experience.skillAttribution?.manager.length ?? 0) > 0 &&
+      (experience.skillAttribution?.validator.length ?? 0) > 0,
+    ), "persisted learning keeps worker, manager, and validator skill attribution separate");
 
     const restartedHarness = new AdaptiveHarness(workspace, cfg);
     await restartedHarness.initialize();
@@ -274,10 +367,9 @@ test("verified run experience is persisted without raw goals or result content a
     const worker = secondBackend.calls.find(
       (call) => call.purpose === "execute_task" && call.taskId === "T1",
     );
-    assert.ok((worker?.memoryIds?.length ?? 0) > 0);
-    assert.match(worker?.prompt ?? "", /RECALLED VERIFIED EXPERIENCE/);
-    assert.match(worker?.prompt ?? "", /never cite memory as external evidence/);
-    assert.ok((secondState.harness?.memoriesRecalled ?? 0) > 0);
+    assert.deepEqual(worker?.memoryIds ?? [], []);
+    assert.doesNotMatch(worker?.prompt ?? "", /RECALLED VERIFIED EXPERIENCE/);
+    assert.equal(secondState.harness?.memoriesRecalled, 0);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

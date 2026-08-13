@@ -27,14 +27,14 @@ export const DEFAULT_CONFIG: SwarmConfig = {
   growthIncrement: 2,
   rateLimitCooldownMs: 30_000,
   schedulerAgingMs: 5_000,
-  allowNetwork: true,
+  allowNetwork: false,
   ephemeralThreads: false,
   stateDirectory: ".luna-swarm",
   harnessEnabled: true,
   maxSkillsPerCall: 3,
   maxSkillChars: 6_000,
   learningEnabled: true,
-  learningAutoApply: true,
+  learningAutoApply: false,
   maxMemoriesPerCall: 4,
   maxMemoryChars: 3_000,
   learningHistoryRuns: 200,
@@ -111,10 +111,28 @@ export function validateConfig(config: SwarmConfig): void {
   intInRange("maxMemoryChars", config.maxMemoryChars, 0, 20_000);
   intInRange("learningHistoryRuns", config.learningHistoryRuns, 1, 2_000);
   intInRange("learningMinSamples", config.learningMinSamples, 2, 100);
+  if (config.learningAutoApply) {
+    throw new Error("learningAutoApply is disabled; Evolution Bundle promotion requires an explicit manual CAS operation");
+  }
   if (!(config.validationQuorum > 0.5 && config.validationQuorum <= 1)) {
     throw new Error("validationQuorum must be > 0.5 and <= 1");
   }
   if (!config.model.trim()) throw new Error("model is required");
+  if (config.sourceIdentity !== undefined && !config.sourceIdentity.trim()) {
+    throw new Error("sourceIdentity must be a non-empty concrete build identity when provided");
+  }
+  for (const [keyId, authority] of Object.entries(config.evolutionBenchmarkAuthorities ?? {})) {
+    if (!keyId.trim() || !authority.evaluatorVersion.trim() || !authority.publicKeyPem.includes("BEGIN PUBLIC KEY")) {
+      throw new Error(`evolutionBenchmarkAuthorities.${keyId || "<empty>"} is invalid`);
+    }
+    const suites = Object.entries(authority.benchmarkSuites);
+    if (suites.length === 0) throw new Error(`evolutionBenchmarkAuthorities.${keyId}.benchmarkSuites must not be empty`);
+    for (const [suiteId, hash] of suites) {
+      if (!suiteId.trim() || !/^sha256:[a-f0-9]{64}$/.test(hash)) {
+        throw new Error(`evolutionBenchmarkAuthorities.${keyId}.benchmarkSuites.${suiteId || "<empty>"} is invalid`);
+      }
+    }
+  }
   for (const role of ROLE_KEYS) {
     if (!config.reasoning[role]) throw new Error(`reasoning.${role} is required`);
   }

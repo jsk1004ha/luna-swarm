@@ -11,6 +11,7 @@ export interface UiEventWebSocketOptions {
   path?: string;
   maxMessageBytes?: number;
   requireLoopback?: boolean;
+  requireSameOrigin?: boolean;
   allowedOrigins?: readonly string[] | ((origin: string) => boolean);
   token?: string;
 }
@@ -198,10 +199,20 @@ function assertTrustedUpgrade(
   url: URL,
   options: UiEventWebSocketOptions,
 ): void {
-  if (options.requireLoopback !== false && !isLoopbackAddress(request.socket.remoteAddress)) {
-    throw new Error("UI event WebSocket only accepts loopback clients");
+  if (options.requireLoopback !== false) {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      throw new Error("UI event WebSocket only accepts loopback clients");
+    }
+    if (!isTrustedLoopbackAuthority(request.headers.host, request.socket.localPort)) {
+      throw new Error("WebSocket Host does not match the loopback UI server");
+    }
   }
   const origin = request.headers.origin;
+  if (options.requireSameOrigin === true) {
+    if (!origin || !isSameOrigin(request, origin)) {
+      throw new Error("WebSocket Origin does not match the UI server");
+    }
+  }
   if (options.allowedOrigins !== undefined) {
     if (!origin) throw new Error("WebSocket Origin is required");
     const allowed = typeof options.allowedOrigins === "function"
@@ -215,6 +226,35 @@ function assertTrustedUpgrade(
       ? authorization.slice("Bearer ".length)
       : url.searchParams.get("token") ?? "";
     if (!secureEqual(provided, options.token)) throw new Error("Invalid WebSocket token");
+  }
+}
+
+function isTrustedLoopbackAuthority(authority: string | undefined, localPort: number | undefined): boolean {
+  if (!authority || !localPort) return false;
+  try {
+    const url = new URL(`http://${authority}`);
+    const authorityPort = url.port ? Number(url.port) : 80;
+    return isLoopbackAddress(url.hostname) && authorityPort === localPort;
+  } catch {
+    return false;
+  }
+}
+
+function isSameOrigin(request: IncomingMessage, origin: string): boolean {
+  const authority = request.headers.host;
+  const localPort = request.socket.localPort;
+  if (!authority || !localPort) return false;
+  try {
+    const originUrl = new URL(origin);
+    const authorityUrl = new URL(`http://${authority}`);
+    const originPort = originUrl.port ? Number(originUrl.port) : 80;
+    const authorityPort = authorityUrl.port ? Number(authorityUrl.port) : 80;
+    return originUrl.protocol === "http:"
+      && originUrl.hostname.toLowerCase() === authorityUrl.hostname.toLowerCase()
+      && originPort === authorityPort
+      && originPort === localPort;
+  } catch {
+    return false;
   }
 }
 

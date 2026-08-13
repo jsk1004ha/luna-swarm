@@ -32,6 +32,10 @@ export function teamCorporatePrompt(team: TeamRecord, body: string): string {
   return `DYNAMIC PROJECT REPORTING CHARTER\n${teamLeadBrief(team)}\n\n${body}`;
 }
 
+export function missionPreflightPrompt(goal: string, missionId: string): string {
+  return `Perform a mission preflight before any implementation plan is created.\n\nMISSION ID:\n${missionId}\n\nUSER GOAL:\n${goal}\n\nReturn a schema-valid JSON preflight input that:\n- separates facts, inferences, preferences, and constraints; every assumption needs a concrete falsification method,\n- assigns stable requirement and acceptance-test IDs and traces each test to the requirements it detects,\n- mutates every requirement at least once and links the mutation to a detecting acceptance test,\n- identifies ambiguous wording and conflicting requirements; add a resolution only when the goal itself supports it,\n- covers input, failure, interruption, security, performance, and output boundary conditions,\n- includes at least one owned pre-mortem risk with a falsification method,\n- never invents user intent merely to make the report ready. Unresolved findings are allowed and must remain unresolved.\nReturn only JSON.`;
+}
+
 export function plannerPrompt(
   goal: string,
   lens: string,
@@ -67,7 +71,7 @@ export function workerPrompt(
     acceptanceCriteria: task.acceptanceCriteria,
     requirementIds: task.requirementIds,
     feedback: task.feedback,
-  })}\n\nACCEPTED DEPENDENCY RESULTS:\n${JSON.stringify(dependencyResults)}\n\nProduce a self-contained result. Distinguish evidence from inference. State checks actually performed and remaining uncertainty. Do not claim work that was not performed. Return only JSON.`;
+  })}\n\nACCEPTED DEPENDENCY RESULTS:\n${JSON.stringify(dependencyResults)}\n\nProduce a self-contained result. Distinguish evidence from inference. State checks actually performed and remaining uncertainty. Every claim must list only task requirementIds it directly supports and cite one or more actual evidence/check entries by zero-based {kind, ordinal}. Do not claim work that was not performed. Return only JSON.`;
 }
 
 export function validatorPrompt(
@@ -104,7 +108,7 @@ export function managerPrompt(
 }
 
 export function reducerPrompt(packets: SynthesisPacket[], sourceTaskIds: string[]): string {
-  return `Reduce these accepted packets without losing provenance.\n\nINPUT PACKETS:\n${JSON.stringify(packets)}\n\nREQUIRED SOURCE TASK IDS:\n${JSON.stringify(sourceTaskIds)}\n\nReconcile duplication and surface conflicts; never invent a source. sourceTaskIds must be exactly the sorted union supplied above. Return only JSON.`;
+  return `Reduce these accepted packets without losing provenance.\n\nINPUT PACKETS:\n${JSON.stringify(packets)}\n\nREQUIRED SOURCE TASK IDS:\n${JSON.stringify(sourceTaskIds)}\n\nNever invent or rewrite facts. claims must be the exact unique input union. conflicts, gaps, and recommendations must each be the exact sorted unique union of the corresponding input field. sourceTaskIds must be exactly the sorted union supplied above. claimLineage and evidenceLineage are immutable leaf records: return each input record exactly once, ordered by id, without rewriting any field. Return only JSON.`;
 }
 
 export function teamLeadPrompt(
@@ -113,6 +117,15 @@ export function teamLeadPrompt(
   sourceTaskIds: string[],
   unsuccessfulWork: Array<{ id: string; status: string; error?: string }>,
 ): string {
+  const synthesisInputs = packets.map((packet) => ({
+    summary: packet.summary,
+    claims: packet.claims,
+    conflicts: packet.conflicts,
+    gaps: packet.gaps,
+    recommendations: packet.recommendations,
+    sourceTaskIds: packet.sourceTaskIds,
+    evidence: packet.evidenceLineage.map(({ taskId, kind, content }) => ({ taskId, kind, content })),
+  }));
   return `Act as the accountable lead of one project team. Synthesize direct reports and already-synthesized child-team reports, then report one level upward.\n\nTEAM CHARTER:\n${JSON.stringify({
     id: team.id,
     name: team.name,
@@ -120,7 +133,7 @@ export function teamLeadPrompt(
     parentTeamId: team.parentTeamId,
     requirementIds: team.requirementIds,
     synthesisCriteria: team.synthesisCriteria,
-  })}\n\nACCEPTED DIRECT/CHILD PACKETS:\n${JSON.stringify(packets)}\n\nUNSUCCESSFUL WORK IN THIS SUBTREE:\n${JSON.stringify(unsuccessfulWork)}\n\nREQUIRED SOURCE TASK IDS:\n${JSON.stringify(sourceTaskIds)}\n\nDo not merely concatenate. Resolve duplication, surface conflicts and gaps, and make a concise upward report. Never invent a source. sourceTaskIds must be exactly the sorted required set. Return only JSON.`;
+  })}\n\nACCEPTED DIRECT/CHILD PACKETS:\n${JSON.stringify(synthesisInputs)}\n\nUNSUCCESSFUL WORK IN THIS SUBTREE:\n${JSON.stringify(unsuccessfulWork)}\n\nREQUIRED SOURCE TASK IDS:\n${JSON.stringify(sourceTaskIds)}\n\nMake a concise upward summary without inventing or rewriting facts. claims must be the exact unique union of input claims. conflicts, gaps, and recommendations must each be the exact sorted unique union of the corresponding input field. sourceTaskIds must be exactly the sorted required set. Immutable claimLineage and evidenceLineage are attached and verified by the orchestrator; omit those two fields from your output. Return only JSON.`;
 }
 
 export function finalPrompt(
@@ -133,7 +146,7 @@ export function finalPrompt(
   prior?: FinalReport,
   violations?: string[],
 ): string {
-  return `Write the final decision-grade response.\n\nGOAL:\n${goal}\n\nREQUIREMENTS:\n${JSON.stringify(requirements)}\n\nVERIFIED SYNTHESIS:\n${JSON.stringify(root)}\n\nINDEPENDENT FINAL CRITIC:\n${JSON.stringify(critic)}\n\nUNSUCCESSFUL TASKS:\n${JSON.stringify(failedTasks)}\n\nFINAL INSTRUCTIONS:\n${instructions}\n${prior ? `\nPRIOR DRAFT:\n${JSON.stringify(prior)}\n\nGATE VIOLATIONS:\n${JSON.stringify(violations ?? [])}` : ""}\n\nAddress every material critic issue or preserve it as a caveat. Cover each requirement exactly once in requirementsCoverage. Do not hide gaps. sourceTaskIds must exactly preserve synthesis provenance. The answer may contain Markdown. Return only JSON.`;
+  return `Write the final decision-grade response.\n\nGOAL:\n${goal}\n\nREQUIREMENTS:\n${JSON.stringify(requirements)}\n\nVERIFIED SYNTHESIS:\n${JSON.stringify(root)}\n\nINDEPENDENT FINAL CRITIC:\n${JSON.stringify(critic)}\n\nUNSUCCESSFUL TASKS:\n${JSON.stringify(failedTasks)}\n\nFINAL INSTRUCTIONS:\n${instructions}\n${prior ? `\nPRIOR DRAFT:\n${JSON.stringify(prior)}\n\nGATE VIOLATIONS:\n${JSON.stringify(violations ?? [])}` : ""}\n\nCover each requirement exactly once and mark every item covered, with a meaningful explanation plus supportingClaimIds and supportingEvidenceIds from the verified synthesis that carry that requirementId and are directly linked to each other. List every factual assertion used in the answer in supportedClaims; every claimId and statement must exactly match a verified immutable leaf claim, and the answer must introduce no other factual assertion. sourceTaskIds must exactly preserve synthesis provenance. criticResolution.verdict must echo the accepted critic verdict and issueResolutions must be empty. The prose fields are provisional: after validation the orchestrator deterministically replaces executiveSummary, answer, conflicts, caveats, and nextActions using only immutable claims, linked evidence, requirements, and failed-task state. Do not hide gaps. Return only JSON.`;
 }
 
 export function finalCriticPrompt(

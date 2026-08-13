@@ -1,11 +1,8 @@
 import {
-  Assets,
   Container,
   Graphics,
   Rectangle,
-  Sprite,
   Text,
-  Texture,
   type Application,
   type Ticker,
 } from "pixi.js";
@@ -18,11 +15,9 @@ import {
   seatSlots,
   zones,
   type FurnitureKind,
-  type SeatFacing,
 } from "../map/officeMap";
 import type { Agent, DepartmentId } from "../types";
-import { loadAssetWithRetry, OFFICE_ASSET_PATHS } from "./assetLoader";
-import { atlasCell, buildSceneModel, standingAtlasCell, type AgentVisualState, type SceneAgent } from "./sceneModel";
+import { agentVisualVariant, buildSceneModel, type AgentVisualState, type SceneAgent } from "./sceneModel";
 
 const COLORS = {
   floorA: 0x0d1815, floorB: 0x101d19, commons: 0x14241f, corridor: 0x192a24, spine: 0x22362e,
@@ -38,48 +33,6 @@ const STATE_COLOR: Record<AgentVisualState, number> = {
   meeting: 0xd6b36a, reporting: 0xb8ef9f, waiting: 0xe7b75d, blocked: 0xff766d,
   accepted: 0x8bd8b0, failed: 0xff766d, cancelled: 0x7b807d,
 };
-
-interface AtlasSheet { texture: Texture; cellSize: number; key: string }
-interface OfficeAtlases { standing: AtlasSheet; north: AtlasSheet; south: AtlasSheet; east: AtlasSheet }
-
-let atlasPromise: Promise<OfficeAtlases> | null = null;
-let atlasGeneration = 0;
-const cellTextures = new Map<string, Texture>();
-
-async function loadAtlases(): Promise<OfficeAtlases> {
-  if (atlasPromise) return atlasPromise;
-  const entries = [
-    ["standing", OFFICE_ASSET_PATHS.standing, 192],
-    ["north", OFFICE_ASSET_PATHS.north, 96],
-    ["south", OFFICE_ASSET_PATHS.south, 96],
-    ["east", OFFICE_ASSET_PATHS.east, 96],
-  ] as const;
-  const pending = Promise.allSettled(entries.map(async ([key, path, cellSize]) => {
-    const texture = await loadAssetWithRetry(path, (url) => Assets.load<Texture>(url), { generation: atlasGeneration });
-    texture.source.scaleMode = "nearest";
-    return { key, texture, cellSize } satisfies AtlasSheet;
-  })).then((settled) => {
-    const loaded = settled.map((result) => result.status === "fulfilled" ? result.value : null);
-    const fallback = loaded.find((entry) => entry !== null);
-    if (!fallback) {
-      const reasons = settled.map((result) => result.status === "rejected" ? String(result.reason) : "").filter(Boolean);
-      throw new AggregateError(reasons, "직원 아틀라스를 하나도 불러오지 못했습니다.");
-    }
-    const sheet = (index: number) => loaded[index] ?? fallback;
-    return { standing: sheet(0), north: sheet(1), south: sheet(2), east: sheet(3) };
-  });
-  atlasPromise = pending.catch((error) => {
-    atlasPromise = null;
-    throw error;
-  });
-  return atlasPromise;
-}
-
-export function resetOfficeAssetCache(): void {
-  atlasPromise = null;
-  atlasGeneration += 1;
-  cellTextures.clear();
-}
 
 function textLabel(text: string, x: number, y: number, size = 11, color = COLORS.text, weight: "normal" | "600" = "normal") {
   const label = new Text({ text, style: { fontFamily: "Pretendard Variable, SUIT, sans-serif", fontSize: size, fontWeight: weight, fill: color, letterSpacing: 0.35 } });
@@ -287,37 +240,47 @@ function drawReportPath(layer: Container, model: ReturnType<typeof buildSceneMod
   };
 }
 
-function atlasTexture(sheet: AtlasSheet, cell: number) {
-  const cacheKey = `${sheet.key}:${sheet.texture.source.uid}:${cell}`;
-  let texture = cellTextures.get(cacheKey);
-  if (!texture) {
-    texture = new Texture({ source: sheet.texture.source, frame: new Rectangle((cell % 4) * sheet.cellSize, Math.floor(cell / 4) * sheet.cellSize, sheet.cellSize, sheet.cellSize) });
-    cellTextures.set(cacheKey, texture);
-  }
-  return texture;
-}
-
 function stateIcon(state: AgentVisualState) {
   return ({ researching: "⌕", coding: "</>", testing: "T", reviewing: "▤", auditing: "◆", meeting: "●", reporting: "▣", waiting: "⌛", queued: "…", blocked: "!", accepted: "✓", failed: "×", cancelled: "–", walking: "→", idle: "·" } as Record<AgentVisualState, string>)[state];
 }
 
-function characterEntity(scene: SceneAgent, atlases: OfficeAtlases, showBubble: boolean, animate: boolean, onSelect: (id: string) => void) {
+function agentMarker(scene: SceneAgent, moving: boolean) {
+  const { agent, facing, visualState } = scene;
+  const departmentColor = DEPARTMENT_META[agent.department].color;
+  const stateColor = STATE_COLOR[visualState];
+  const variant = agentVisualVariant(agent);
+  const marker = new Container();
+  const body = new Graphics();
+  const width = moving ? 24 : 29;
+  const height = moving ? 24 : 22;
+  const radius = moving ? 8 : 6;
+  body
+    .roundRect(-width / 2, -height / 2, width, height, radius)
+    .fill({ color: departmentColor, alpha: moving ? 0.92 : 0.72 })
+    .roundRect(-width / 2 + 3, -height / 2 + 3, width - 6, height - 6, Math.max(3, radius - 2))
+    .fill({ color: 0x101a17, alpha: 0.88 });
+  if (variant % 3 === 0) body.circle(0, 0, 4).fill({ color: stateColor, alpha: 0.95 });
+  else if (variant % 3 === 1) body.rect(-5, -2, 10, 4).fill({ color: stateColor, alpha: 0.95 });
+  else body.moveTo(0, -5).lineTo(5, 0).lineTo(0, 5).lineTo(-5, 0).closePath().fill({ color: stateColor, alpha: 0.95 });
+  marker.addChild(body);
+
+  if (!moving) {
+    const notch = new Graphics().moveTo(-4, -13).lineTo(4, -13).lineTo(0, -9).closePath().fill({ color: departmentColor, alpha: 1 });
+    notch.rotation = ({ north: Math.PI, south: 0, east: -Math.PI / 2, west: Math.PI / 2 })[facing];
+    marker.addChild(notch);
+  }
+  return marker;
+}
+
+function characterEntity(scene: SceneAgent, showBubble: boolean, animate: boolean, onSelect: (id: string) => void) {
   const { agent, facing, visualState } = scene;
   const holder = new Container();
   const stateColor = STATE_COLOR[visualState];
   const ring = new Graphics().ellipse(0, 8, 28, 18).fill({ color: stateColor, alpha: 0.035 }).ellipse(0, 8, 28, 18).stroke({ color: stateColor, width: 1, alpha: 0.38 });
   holder.addChild(ring);
-  const directional = facing === "north" ? atlases.north : facing === "south" ? atlases.south : atlases.east;
-  const seated = new Sprite(atlasTexture(directional, atlasCell(agent)));
-  seated.anchor.set(0.5);
-  seated.width = 58;
-  seated.height = 58;
-  if (facing === "west") seated.scale.x *= -1;
-  const standing = new Sprite(atlasTexture(atlases.standing, standingAtlasCell(agent)));
-  standing.anchor.set(0.5, 0.67);
-  standing.width = 38;
-  standing.height = 38;
   const moving = scene.path.length > 1;
+  const seated = agentMarker(scene, false);
+  const standing = agentMarker(scene, true);
   seated.visible = !moving && scene.destination === "seat";
   standing.visible = moving || scene.destination !== "seat";
   holder.addChild(seated, standing);
@@ -355,7 +318,7 @@ function characterEntity(scene: SceneAgent, atlases: OfficeAtlases, showBubble: 
   }
   let segment = 0;
   let progress = 0;
-  const speed = 58 + (atlasCell(agent) % 5) * 4;
+  const speed = 58 + (agentVisualVariant(agent) % 5) * 4;
   const advance = (milliseconds: number) => {
     let remaining = speed * milliseconds / 1000;
     while (remaining > 0 && segment < scene.path.length - 1) {
@@ -369,7 +332,7 @@ function characterEntity(scene: SceneAgent, atlases: OfficeAtlases, showBubble: 
     const from = scene.path[Math.min(segment, scene.path.length - 1)]!;
     const to = scene.path[Math.min(segment + 1, scene.path.length - 1)]!;
     holder.position.set(from.x + (to.x - from.x) * progress, from.y + (to.y - from.y) * progress);
-    standing.scale.x = to.x < from.x ? -Math.abs(standing.scale.x) : Math.abs(standing.scale.x);
+    standing.rotation = Math.atan2(to.y - from.y, to.x - from.x) + Math.PI / 2;
     if (segment >= scene.path.length - 1) {
       seated.visible = scene.destination === "seat";
       standing.visible = scene.destination !== "seat";
@@ -425,7 +388,6 @@ export async function renderHQScene(
   visibleAgentIds: Set<string>,
   onSelect: (id: string) => void,
 ) {
-  const atlases = await loadAtlases();
   const model = buildSceneModel(snapshot, visibleAgentIds);
   const root = new Container();
   root.label = "luna-office-dynamic";
@@ -444,7 +406,7 @@ export async function renderHQScene(
   const selection = selectionOverlay();
   if (reportAdvance && !reducedMotion) advances.push(reportAdvance);
   model.agents.forEach((scene) => {
-    const character = characterEntity(scene, atlases, bubbles.has(scene.agent.id), animated.has(scene.agent.id), onSelect);
+    const character = characterEntity(scene, bubbles.has(scene.agent.id), animated.has(scene.agent.id), onSelect);
     root.addChild(character.holder);
     characters.set(scene.agent.id, { holder: character.holder, name: scene.agent.name });
     if (character.advance) advances.push(character.advance);

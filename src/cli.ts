@@ -23,12 +23,20 @@ import {
   DirectiveLimitError,
   RunExecutionLockedError,
 } from "./store.js";
-import { createDashboardServer, type DashboardCommand } from "./dashboard/server.js";
+import {
+  createDashboardServer,
+  type DashboardCommand,
+  type DashboardCommandResult,
+} from "./dashboard/server.js";
 import type { JsonValue, RunDirective, RunEvent, RunState, SwarmConfig } from "./types.js";
-import { SkillCatalog } from "./capabilities.js";
+import { HARNESS_POLICY_VERSION, SkillCatalog } from "./capabilities.js";
 import { LearningStore } from "./learning.js";
 import { LearningPolicyStore } from "./improvement.js";
-import { DurableControlStore, ExecutionController } from "./controls/index.js";
+import {
+  AtomicStartGate,
+  DurableControlStore,
+  ExecutionController,
+} from "./controls/index.js";
 import { UiRuntimeRegistry, type ManagedRunRuntime } from "./ui-server/runtime-registry.js";
 import { UiObservationCoordinator } from "./ui-server/observation-coordinator.js";
 import { MockUiRuntime } from "./ui-server/mock-runtime.js";
@@ -37,6 +45,21 @@ import {
   UiEventHub,
   attachUiEventWebSocketServer,
 } from "./ui-events/index.js";
+import { HARNESS_V2_ORG_VERSION } from "./harness-v2/contracts.js";
+import {
+  EVOLUTION_WORKLOAD_CLASSES,
+  initializeEvolutionRuntime,
+  resolveLocalSourceIdentity,
+  verifyRunnableEvolutionBundle,
+  type EvolutionRuntimeFingerprintInput,
+} from "./evolution/runtime.js";
+import { ExecutionBundleStore } from "./evolution/registry/bundle-store.js";
+import { OrganizationGenomeStore } from "./evolution/registry/genome-store.js";
+import { StablePointerStore } from "./evolution/registry/stable-pointer-store.js";
+import { PairedEvaluationReceiptStore } from "./evolution/evaluation/receipt.js";
+import type { TrustedBenchmarkAuthority } from "./evolution/evaluation/quality-receipt.js";
+import { DecisionTraceStore, ObjectiveOutcomeReceiptStore } from "./evolution/trace/index.js";
+import { FailureCapsuleStore } from "./evolution/failure/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,6 +71,7 @@ async function main(): Promise<void> {
   if (command === "org") return printOrganization(args);
   if (command === "skills") return printSkills(args);
   if (command === "learning" || command === "learn") return printLearning(args);
+  if (command === "evolve") return evolve(args);
   if (command === "status") return status(args);
   if (command === "dashboard") return dashboard(args);
   if (command === "ui") return ui(args);
@@ -88,11 +112,11 @@ async function ui(args: string[]): Promise<void> {
       },
     });
   let activeRun: Promise<void> | null = null;
+  const startGate = new AtomicStartGate<UiControlResult>();
 
-  const startRun = async (command: Extract<UiControlCommand, { action: "start" }>): Promise<UiControlResult> => {
-    if (activeRun) {
-      return { accepted: false, code: "RUN_ALREADY_ACTIVE", message: "이 UI 서버가 이미 실행 하나를 소유하고 있습니다." };
-    }
+  const startReservedRun = async (
+    command: Extract<UiControlCommand, { action: "start" }>,
+  ): Promise<UiControlResult> => {
     const runId = makeRunId();
     const maxConcurrency = command.maxConcurrency ?? config.maxConcurrency;
     const runConfig: SwarmConfig = {
@@ -144,6 +168,7 @@ async function ui(args: string[]): Promise<void> {
       })
       .finally(() => {
         if (activeRun === execution) activeRun = null;
+        startGate.release();
         void observer?.poll().catch(() => undefined);
       });
     try {
@@ -158,6 +183,17 @@ async function ui(args: string[]): Promise<void> {
     }
     return { accepted: true, runId, message: command.mock ? "Mock Luna 실행을 시작했습니다." : "Luna 실행을 시작했습니다." };
   };
+  const startRun = (
+    command: Extract<UiControlCommand, { action: "start" }>,
+  ): Promise<UiControlResult> => startGate.start(
+    command.requestId,
+    () => ({
+      accepted: false,
+      code: "RUN_ALREADY_ACTIVE",
+      message: "이 UI 서버가 이미 실행 하나를 소유하고 있습니다.",
+    }),
+    () => startReservedRun(command),
+  );
 
   const server = createDashboardServer({
     workspace,
@@ -176,13 +212,29 @@ async function ui(args: string[]): Promise<void> {
         }
       : {}),
     onUiControl: async (command) => {
-      if (mockRuntime) return mockRuntime.control(command);
+      if (mockRuntime) {
+        if (command.action === "start") {
+          return startGate.start(
+            command.requestId,
+            () => ({
+              accepted: false,
+              code: "RUN_ALREADY_ACTIVE",
+              message: "이 UI 서버가 이미 실행 하나를 소유하고 있습니다.",
+            }),
+            () => mockRuntime.control(command),
+          );
+        }
+        const result = await mockRuntime.control(command);
+        if (command.action === "cancel" && result.accepted) startGate.release();
+        return result;
+      }
       if (command.action === "start") return startRun(command);
       return registry.control(command);
     },
   });
   const webSockets = attachUiEventWebSocketServer(server.server, hub, {
     requireLoopback: isLoopbackBind(host),
+    requireSameOrigin: true,
     ...(accessToken ? { token: accessToken } : {}),
   });
   if (mockRuntime) mockRuntime.start();
@@ -215,6 +267,7 @@ async function dashboard(args: string[]): Promise<void> {
   const host = option(args, "--host") ?? "127.0.0.1";
   const assetsDirectory = await locateDashboardAssets();
   let activeRun: Promise<void> | null = null;
+  const startGate = new AtomicStartGate<DashboardCommandResult>();
 
   const server = createDashboardServer({
     workspace,
@@ -226,13 +279,11 @@ async function dashboard(args: string[]): Promise<void> {
       if (command.action === "intervene") {
         return queueDashboardDirective(workspace, config.stateDirectory, command);
       }
-      if (activeRun) {
-        return {
-          accepted: false,
-          message: "A dashboard-started run is already active",
-        };
-      }
-      if (command.action === "resume") {
+      return startGate.start(
+        command.requestId,
+        () => ({ accepted: false, message: "A dashboard-started run is already active" }),
+        async () => {
+        if (command.action === "resume") {
         if (!command.runId) {
           return { accepted: false, message: "A run id is required" };
         }
@@ -291,6 +342,7 @@ async function dashboard(args: string[]): Promise<void> {
           })
           .finally(() => {
             if (activeRun === execution) activeRun = null;
+            startGate.release();
           });
         return {
           accepted: true,
@@ -324,12 +376,15 @@ async function dashboard(args: string[]): Promise<void> {
         })
         .finally(() => {
           if (activeRun === execution) activeRun = null;
+          startGate.release();
         });
       return {
         accepted: true,
         runId,
         message: command.mock ? "Mock run started" : "Luna run started",
       };
+      },
+      );
     },
   });
   const address = await server.listen();
@@ -408,6 +463,7 @@ async function isStaleRun(
   now = Date.now(),
 ): Promise<boolean> {
   if (["completed", "partial", "failed", "cancelled"].includes(state.status)) return false;
+  if (state.status === "interrupted") return true;
   const stateUpdatedAt = Date.parse(state.updatedAt);
   let eventUpdatedAt = Number.NEGATIVE_INFINITY;
   try {
@@ -444,13 +500,7 @@ async function locateDashboardAssets(): Promise<string> {
 
 async function locateUiAssets(): Promise<string> {
   const entryDirectory = dirname(fileURLToPath(import.meta.url));
-  const requiredAssets = [
-    "index.html",
-    "assets/employee-atlas-v2.png",
-    "assets/hq/seated-workers-north.png",
-    "assets/hq/seated-workers-south.png",
-    "assets/hq/seated-workers-east.png",
-  ];
+  const requiredAssets = ["index.html"];
   const candidates = [
     resolve(process.cwd(), "ui/dist"),
     resolve(entryDirectory, "../ui/dist"),
@@ -501,6 +551,9 @@ async function resume(args: string[]): Promise<void> {
   const bootstrap = await loadConfig(option(args, "--config"), concurrencyOverrides(args));
   const store = new AtomicRunStore(workspace, bootstrap.stateDirectory, runId);
   const state = await store.load();
+  if (["completed", "partial", "failed", "cancelled"].includes(state.status)) {
+    throw new Error(`Run ${runId} is already ${state.status} and cannot be resumed`);
+  }
   const config: SwarmConfig = {
     ...DEFAULT_CONFIG,
     ...state.config,
@@ -553,6 +606,7 @@ async function launch(options: {
   });
   const controls = new ExecutionController(controlStore, { abortController: controller });
   await controls.init();
+  if (options.loaded) await controls.resume();
   const gateway = new AgentGateway({
     backend,
     config: options.config,
@@ -572,12 +626,16 @@ async function launch(options: {
     },
     controls,
   });
-  const onSignal = () => {
-    process.stderr.write("\n취소 요청을 전달했습니다. 상태를 저장하는 중입니다…\n");
-    void controls.cancel(new Error("Cancelled by process signal"));
+  const onSignal = (signal: "SIGINT" | "SIGTERM") => {
+    process.stderr.write("\n실행을 일시정지하고 재개 가능한 상태를 저장하는 중입니다…\n");
+    void controls.interrupt(signal).catch((error: unknown) => {
+      process.stderr.write(`[interrupt_failed] ${error instanceof Error ? error.message : String(error)}\n`);
+    });
   };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
+  const onSigint = () => onSignal("SIGINT");
+  const onSigterm = () => onSignal("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
   let managedRuntime: ManagedRunRuntime | undefined;
   try {
     printBanner(options.store.runId, backend.info(), options.config);
@@ -606,8 +664,8 @@ async function launch(options: {
     printResult(state, options.store.finalPath, options.store.organizationPath);
     if (state.status === "failed") process.exitCode = 1;
   } finally {
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
     try {
       await backend.close();
     } finally {
@@ -717,6 +775,100 @@ async function printLearning(args: string[]): Promise<void> {
   );
 }
 
+async function evolve(args: string[]): Promise<void> {
+  const workspace = resolve(option(args, "--workspace") ?? process.cwd());
+  const config = await loadConfig(option(args, "--config"));
+  const [action = "status"] = positional(args);
+  if (action === "bootstrap") {
+    const fingerprint = await evolutionCliFingerprint(config, workspace);
+    const runtime = await initializeEvolutionRuntime(workspace, fingerprint);
+    process.stdout.write(`${JSON.stringify({ mode: "manual", pins: runtime.pins }, null, 2)}\n`);
+    return;
+  }
+
+  const bundleStore = new ExecutionBundleStore(workspace);
+  const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
+  const evaluationStore = new PairedEvaluationReceiptStore(workspace, {
+    trustedBenchmarkAuthorities: evolutionBenchmarkAuthorities(config),
+  });
+  const pointers = new StablePointerStore(workspace, { bundleStore, evaluationStore });
+  if (action === "promote") {
+    const fingerprint = await evolutionCliFingerprint(config, workspace);
+    const bundleId = positional(args)[1];
+    const workloadClass = requiredOption(args, "--workload");
+    if (!bundleId) throw new Error("Usage: luna-swarm evolve promote <bundle-id> --workload <class> --expected-generation <n> --evaluation <receipt-id> --evaluation-hash <sha256:...> --actor <name> --reason <text>");
+    const expectedGeneration = requiredIntegerOption(args, "--expected-generation", 0);
+    const bundle = await bundleStore.read(bundleId);
+    await verifyRunnableEvolutionBundle(genomeStore, bundle, fingerprint);
+    const pointer = await pointers.promote({
+      workloadClass,
+      bundleId,
+      expectedGeneration,
+      mode: "manual",
+      actor: requiredOption(args, "--actor"),
+      reason: requiredOption(args, "--reason"),
+      evaluationReceipt: {
+        receiptId: requiredOption(args, "--evaluation"),
+        contentHash: canonicalEvolutionHashOption(args, "--evaluation-hash"),
+      },
+    });
+    process.stdout.write(`${JSON.stringify({ pointer }, null, 2)}\n`);
+    return;
+  }
+  if (action === "rollback") {
+    const workloadClass = positional(args)[1] ?? requiredOption(args, "--workload");
+    const pointer = await pointers.rollback(
+      workloadClass,
+      requiredIntegerOption(args, "--expected-generation", 1),
+      { actor: requiredOption(args, "--actor"), reason: requiredOption(args, "--reason") },
+    );
+    process.stdout.write(`${JSON.stringify({ pointer, quarantinedPrevious: true }, null, 2)}\n`);
+    return;
+  }
+  if (action !== "status") throw new Error(`Unknown evolve command: ${action}`);
+
+  const stable = Object.fromEntries(await Promise.all(EVOLUTION_WORKLOAD_CLASSES.map(async (workload) => [workload, await pointers.get(workload)])));
+  const [traces, outcomes, failures, evaluations, audit] = await Promise.all([
+    new DecisionTraceStore(workspace).list(),
+    new ObjectiveOutcomeReceiptStore(workspace).list(),
+    new FailureCapsuleStore(workspace).listHeads(),
+    evaluationStore.list(),
+    pointers.getAudit(),
+  ]);
+  process.stdout.write(`${JSON.stringify({
+    mode: "observation-only/manual-promotion",
+    stable,
+    counts: { traces: traces.length, outcomes: outcomes.length, failures: failures.length, evaluations: evaluations.length },
+    audit,
+  }, null, 2)}\n`);
+}
+
+function evolutionBenchmarkAuthorities(config: SwarmConfig): Readonly<Record<string, TrustedBenchmarkAuthority>> {
+  return Object.fromEntries(Object.entries(config.evolutionBenchmarkAuthorities ?? {}).map(([keyId, authority]) => [keyId, {
+    evaluatorVersion: authority.evaluatorVersion,
+    publicKeyPem: authority.publicKeyPem,
+    benchmarkSuites: authority.benchmarkSuites as Record<string, `sha256:${string}`>,
+  }]));
+}
+
+async function evolutionCliFingerprint(
+  config: SwarmConfig,
+  workspace: string,
+): Promise<EvolutionRuntimeFingerprintInput> {
+  return {
+    model: config.model,
+    reasoning: config.reasoning,
+    maxContextChars: config.maxContextChars,
+    maxConcurrency: config.maxConcurrency,
+    harnessPolicyVersion: HARNESS_POLICY_VERSION,
+    organizationVersion: HARNESS_V2_ORG_VERSION,
+    sourceCommit: await resolveLocalSourceIdentity(
+      workspace,
+      config.sourceIdentity ?? process.env.LUNA_SOURCE_COMMIT ?? process.env.GITHUB_SHA,
+    ),
+  };
+}
+
 async function initConfig(args: string[]): Promise<void> {
   const path = resolve(positional(args)[0] ?? "luna-swarm.config.json");
   try {
@@ -803,6 +955,25 @@ function option(args: string[], name: string): string | undefined {
   return value;
 }
 
+function requiredOption(args: string[], name: string): string {
+  const value = option(args, name);
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+function requiredIntegerOption(args: string[], name: string, min: number): number {
+  const raw = requiredOption(args, name);
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min) throw new Error(`${name} must be an integer >= ${min}`);
+  return value;
+}
+
+function canonicalEvolutionHashOption(args: string[], name: string): string {
+  const value = requiredOption(args, name);
+  if (!/^sha256:[a-f0-9]{64}$/.test(value)) throw new Error(`${name} must be a canonical SHA-256 digest`);
+  return value;
+}
+
 function numberOption(
   args: string[],
   name: string,
@@ -829,6 +1000,13 @@ function positional(args: string[]): string[] {
     "--initial-concurrency",
     "--port",
     "--host",
+    "--token",
+    "--workload",
+    "--expected-generation",
+    "--evaluation",
+    "--evaluation-hash",
+    "--actor",
+    "--reason",
   ]);
   const result: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -881,6 +1059,10 @@ function printHelp(): void {
   luna-swarm org [run-id]
   luna-swarm skills [--workspace .] [--json]
   luna-swarm learning [--workspace .] [--recent] [--rollback]
+  luna-swarm evolve status [--workspace .]
+  luna-swarm evolve bootstrap [--workspace .]
+  luna-swarm evolve promote <bundle-id> --workload <class> --expected-generation <n> --evaluation <receipt-id> --evaluation-hash <sha256:...> --actor <name> --reason <text>
+  luna-swarm evolve rollback <workload-class> --expected-generation <n> --actor <name> --reason <text>
   luna-swarm init [config.json]
   luna-swarm run --goal "작업" [--workspace .] [--mock]
   luna-swarm resume <run-id> [--workspace .]
@@ -899,6 +1081,11 @@ function printHelp(): void {
   --json                    스킬 카탈로그를 JSON으로 출력
   --recent                  최근 학습 경험 메타데이터 20개 포함
   --rollback                직전 검증된 학습 정책 또는 안전 기준선으로 복구
+  --evaluation <receipt>    PROMOTABLE paired 평가 영수증
+  --evaluation-hash <hash>  평가 영수증의 canonical SHA-256
+  --expected-generation <n> Stable Pointer CAS 세대
+  --actor <identity>        수동 승격·롤백 실행자 감사 ID
+  --reason <text>           수동 변경 사유
 `);
 }
 

@@ -53,6 +53,13 @@ export class ControlConflictError extends Error {
   }
 }
 
+export class ProcessInterruptedError extends Error {
+  constructor(readonly signal: "SIGINT" | "SIGTERM") {
+    super(`Run interrupted by ${signal}`);
+    this.name = "ProcessInterruptedError";
+  }
+}
+
 export function changeTaskPriority(task: TaskRecord, priority: number): TaskRecord {
   assertPriority(priority);
   if (!isPriorityMutableStatus(task.status)) {

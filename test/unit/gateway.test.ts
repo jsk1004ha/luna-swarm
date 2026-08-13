@@ -5,10 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { MockAgentBackend } from "../../src/backend/mock-backend.js";
 import { DEFAULT_CONFIG } from "../../src/config.js";
-import { AgentCallError, AgentGateway } from "../../src/runtime/gateway.js";
+import { AgentCallError, AgentGateway, classifyError } from "../../src/runtime/gateway.js";
 import type { AgentRequest, AgentResponse } from "../../src/backend/agent-backend.js";
 import type { RunEvent } from "../../src/types.js";
 import { DurableControlStore, ExecutionController } from "../../src/controls/index.js";
+import type { Clock } from "../../src/util.js";
 
 const request: AgentRequest = {
   threadKey: "test",
@@ -47,6 +48,121 @@ test("retries transient failures exactly up to success", async () => {
   assert.equal(response.text, JSON.stringify({ ok: true }));
   assert.equal(backend.calls.length, 3);
   assert.equal(gateway.metrics().retries, 2);
+});
+
+test("app-server process loss is transient so the same task can recover", async () => {
+  for (const message of [
+    "codex app-server exited (23)",
+    "App server stdin is unavailable",
+    "write EPIPE",
+  ]) {
+    assert.equal(classifyError(new Error(message)), "transient", message);
+  }
+  let attempts = 0;
+  const backend = new MockAgentBackend(() => {
+    attempts += 1;
+    return attempts === 1 ? new Error("codex app-server exited (23)") : { recovered: true };
+  });
+  const gateway = new AgentGateway({
+    backend,
+    config: testConfig(),
+    jitter: () => 0,
+  });
+  const response = await gateway.run(request);
+  assert.equal(response.text, JSON.stringify({ recovered: true }));
+  assert.equal(attempts, 2);
+  assert.equal(gateway.metrics().retries, 1);
+});
+
+test("retry backoff releases global and durable permits for queued calls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "luna-gateway-retry-permits-"));
+  let finishBackoff!: () => void;
+  let failFirstAttempt!: () => void;
+  let signalFirstAttemptStarted!: () => void;
+  const firstAttemptStarted = new Promise<void>((resolve) => {
+    signalFirstAttemptStarted = resolve;
+  });
+  const firstAttemptFailure = new Promise<void>((resolve) => {
+    failFirstAttempt = resolve;
+  });
+  let signalBackoffStarted!: () => void;
+  const backoffStarted = new Promise<void>((resolve) => {
+    signalBackoffStarted = resolve;
+  });
+  const clock: Clock = {
+    now: () => Date.now(),
+    sleep: () =>
+      new Promise<void>((resolve) => {
+        finishBackoff = resolve;
+        signalBackoffStarted();
+      }),
+  };
+  let first: Promise<AgentResponse> | undefined;
+  try {
+    let retryingAttempts = 0;
+    const order: string[] = [];
+    const backend = new MockAgentBackend(async (call) => {
+      order.push(call.purpose);
+      if (call.purpose === "retrying" && retryingAttempts++ === 0) {
+        signalFirstAttemptStarted();
+        await firstAttemptFailure;
+        throw new Error("network connection reset");
+      }
+      return { ok: true };
+    });
+    const store = new DurableControlStore(directory, "run-gateway-retry-permits", {
+      initialConcurrencyCap: 1,
+    });
+    const controls = new ExecutionController(store, { ownerId: "gateway-retry-test", pollMs: 1 });
+    await controls.init();
+    let acquireCount = 0;
+    let signalQueuedAcquire!: () => void;
+    const queuedAcquireStarted = new Promise<void>((resolve) => {
+      signalQueuedAcquire = resolve;
+    });
+    const acquire = controls.acquire.bind(controls);
+    controls.acquire = async (...args) => {
+      acquireCount += 1;
+      if (acquireCount === 2) signalQueuedAcquire();
+      return acquire(...args);
+    };
+    const gateway = new AgentGateway({
+      backend,
+      config: {
+        ...testConfig(),
+        initialConcurrency: 1,
+        maxConcurrency: 1,
+        retryBaseMs: 100,
+        retryMaxMs: 100,
+      },
+      controls,
+      clock,
+      jitter: () => 0,
+    });
+
+    first = gateway.run({ ...request, threadKey: "retrying", purpose: "retrying" });
+    await firstAttemptStarted;
+    const secondPromise = gateway.run(
+      { ...request, threadKey: "queued", purpose: "queued" },
+      AbortSignal.timeout(1_000),
+    );
+    await queuedAcquireStarted;
+    failFirstAttempt();
+    await backoffStarted;
+    const second = await secondPromise;
+    assert.equal(second.text, JSON.stringify({ ok: true }));
+    assert.deepEqual(order, ["retrying", "queued"]);
+
+    finishBackoff();
+    await first;
+    assert.deepEqual(order, ["retrying", "queued", "retrying"]);
+    assert.equal(gateway.pool.snapshot().active, 0);
+  } finally {
+    failFirstAttempt?.();
+    finishBackoff?.();
+    await first?.catch(() => undefined);
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("an auth error opens a circuit so queued work never calls the backend", async () => {

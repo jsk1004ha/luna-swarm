@@ -8,16 +8,92 @@ import type {
 } from "./types.js";
 
 const strings: JsonValue = { type: "array", items: { type: "string" } };
+const optionalId: JsonValue = { type: "string" };
+
+export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "missionId", "objective", "assumptions", "requirements", "acceptanceTests",
+    "requirementMutations", "ambiguities", "conflicts", "requiredBoundaryKinds",
+    "boundaryConditions", "risks",
+  ],
+  properties: {
+    missionId: { type: "string" },
+    objective: { type: "string" },
+    assumptions: {
+      type: "array",
+      maxItems: 128,
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["statement", "classification", "falsification"],
+        properties: {
+          id: optionalId, statement: { type: "string" },
+          classification: { type: "string", enum: ["fact", "inference", "preference", "constraint"] },
+          evidence: { type: "string" }, falsification: { type: "string" },
+        },
+      },
+    },
+    requirements: {
+      type: "array",
+      maxItems: 256,
+      items: { type: "object", additionalProperties: false, required: ["id", "statement"], properties: { id: { type: "string" }, statement: { type: "string" } } },
+    },
+    acceptanceTests: {
+      type: "array",
+      maxItems: 512,
+      items: { type: "object", additionalProperties: false, required: ["id", "statement", "requirementIds"], properties: { id: { type: "string" }, statement: { type: "string" }, requirementIds: strings } },
+    },
+    requirementMutations: {
+      type: "array",
+      maxItems: 1024,
+      items: { type: "object", additionalProperties: false, required: ["requirementId", "mutation", "acceptanceTestIds"], properties: { id: optionalId, requirementId: { type: "string" }, mutation: { type: "string" }, acceptanceTestIds: strings } },
+    },
+    ambiguities: {
+      type: "array",
+      maxItems: 128,
+      items: { type: "object", additionalProperties: false, required: ["statement", "alternatives"], properties: { id: optionalId, statement: { type: "string" }, alternatives: strings, resolution: { type: "string" } } },
+    },
+    conflicts: {
+      type: "array",
+      maxItems: 128,
+      items: { type: "object", additionalProperties: false, required: ["statement", "requirementIds"], properties: { id: optionalId, statement: { type: "string" }, requirementIds: strings, resolution: { type: "string" } } },
+    },
+    requiredBoundaryKinds: { type: "array", maxItems: 128, items: { type: "string" } },
+    boundaryConditions: {
+      type: "array",
+      maxItems: 256,
+      items: { type: "object", additionalProperties: false, required: ["kind", "statement"], properties: { id: optionalId, kind: { type: "string" }, statement: { type: "string" } } },
+    },
+    risks: {
+      type: "array",
+      maxItems: 128,
+      items: { type: "object", additionalProperties: false, required: ["failureMode", "falsification", "ownerTeam"], properties: { id: optionalId, failureMode: { type: "string" }, falsification: { type: "string" }, ownerTeam: { type: "string" }, mitigation: { type: "string" } } },
+    },
+  },
+};
 const claim: JsonValue = {
   type: "object",
   additionalProperties: false,
-  required: ["statement", "support"],
+  required: ["statement", "support", "requirementIds", "evidenceRefs"],
   properties: {
     statement: { type: "string" },
     support: { type: "string" },
+    requirementIds: strings,
+    evidenceRefs: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["kind", "ordinal"],
+        properties: {
+          kind: { type: "string", enum: ["evidence", "check"] },
+          ordinal: { type: "integer", minimum: 0 },
+        },
+      },
+    },
   },
 };
-
 export const PLAN_SCHEMA: JsonValue = {
   type: "object",
   additionalProperties: false,
@@ -237,7 +313,9 @@ export const FINAL_SCHEMA: JsonValue = {
     "goal",
     "executiveSummary",
     "answer",
+    "supportedClaims",
     "requirementsCoverage",
+    "criticResolution",
     "conflicts",
     "caveats",
     "nextActions",
@@ -247,16 +325,47 @@ export const FINAL_SCHEMA: JsonValue = {
     goal: { type: "string" },
     executiveSummary: { type: "string" },
     answer: { type: "string" },
+    supportedClaims: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["claimId", "statement"],
+        properties: { claimId: { type: "string" }, statement: { type: "string" } },
+      },
+    },
     requirementsCoverage: {
       type: "array",
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["requirementId", "covered", "explanation"],
+        required: ["requirementId", "covered", "explanation", "supportingClaimIds", "supportingEvidenceIds"],
         properties: {
           requirementId: { type: "string" },
           covered: { type: "boolean" },
           explanation: { type: "string" },
+          supportingClaimIds: strings,
+          supportingEvidenceIds: strings,
+        },
+      },
+    },
+    criticResolution: {
+      type: "object",
+      additionalProperties: false,
+      required: ["verdict", "issueResolutions"],
+      properties: {
+        verdict: { type: "string", enum: ["accept", "revise", "reject"] },
+        issueResolutions: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["issue", "resolved", "explanation", "supportingClaimIds", "supportingEvidenceIds"],
+            properties: {
+              issue: { type: "string" }, resolved: { type: "boolean" }, explanation: { type: "string" },
+              supportingClaimIds: strings, supportingEvidenceIds: strings,
+            },
+          },
         },
       },
     },
@@ -278,12 +387,31 @@ export function assertPlan(value: SwarmPlan): void {
   }
 }
 
-export function assertResult(value: AgentResult, taskId: string): void {
-  if (!value || value.taskId !== taskId || !Array.isArray(value.claims)) {
+export function assertResult(value: AgentResult, taskId: string, allowedRequirementIds?: string[]): void {
+  if (!value || value.taskId !== taskId || !Array.isArray(value.claims) || value.claims.length === 0) {
     throw new Error(`Invalid worker result for ${taskId}`);
   }
   if (!(value.confidence >= 0 && value.confidence <= 1)) {
     throw new Error(`Invalid confidence for ${taskId}`);
+  }
+  for (const [index, claimValue] of value.claims.entries()) {
+    if (
+      !Array.isArray(claimValue.requirementIds) || claimValue.requirementIds.length === 0 ||
+      new Set(claimValue.requirementIds).size !== claimValue.requirementIds.length ||
+      !Array.isArray(claimValue.evidenceRefs) || claimValue.evidenceRefs.length === 0
+    ) {
+      throw new Error(`Claim ${index} for ${taskId} lacks unique requirement/evidence references`);
+    }
+    if (allowedRequirementIds && claimValue.requirementIds.some((id) => !allowedRequirementIds.includes(id))) {
+      throw new Error(`Claim ${index} for ${taskId} references an unrelated requirement`);
+    }
+    const refs = claimValue.evidenceRefs.map((ref) => `${ref.kind}:${ref.ordinal}`);
+    if (new Set(refs).size !== refs.length || claimValue.evidenceRefs.some((ref) =>
+      !Number.isInteger(ref.ordinal) || ref.ordinal < 0 ||
+      ref.ordinal >= (ref.kind === "evidence" ? value.evidence.length : value.checks.length),
+    )) {
+      throw new Error(`Claim ${index} for ${taskId} has invalid evidence references`);
+    }
   }
 }
 
@@ -297,13 +425,28 @@ export function assertVote(value: ValidationVote, validatorId: string): void {
 }
 
 export function assertSynthesis(value: SynthesisPacket): void {
-  if (!value || !Array.isArray(value.sourceTaskIds) || typeof value.summary !== "string") {
+  if (
+    !value ||
+    !Array.isArray(value.sourceTaskIds) ||
+    !Array.isArray(value.claims) ||
+    !Array.isArray(value.claimLineage) ||
+    !Array.isArray(value.evidenceLineage) ||
+    typeof value.summary !== "string"
+  ) {
     throw new Error("Invalid synthesis packet");
   }
 }
 
 export function assertFinal(value: FinalReport): void {
-  if (!value || typeof value.answer !== "string" || !Array.isArray(value.sourceTaskIds)) {
+  if (
+    !value ||
+    typeof value.answer !== "string" ||
+    !Array.isArray(value.sourceTaskIds) ||
+    !Array.isArray(value.supportedClaims) ||
+    !Array.isArray(value.requirementsCoverage) ||
+    !value.criticResolution ||
+    !Array.isArray(value.criticResolution.issueResolutions)
+  ) {
     throw new Error("Invalid final report");
   }
 }

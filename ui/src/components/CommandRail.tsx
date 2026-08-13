@@ -1,8 +1,20 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { refreshRuns, sendUiControl, type UiControlPayload } from "../api/client";
-import { useCompanyStore } from "../store/companyStore";
+import { companyRoster, useCompanyStore } from "../store/companyStore";
 
 type CommandAction = Exclude<UiControlPayload["action"], "cancel_task">;
+
+type RandomUuidSource = { randomUUID?: () => string };
+
+export function createStartRequestId(
+  source: RandomUuidSource | null | undefined = globalThis.crypto,
+): string | undefined {
+  try {
+    return source?.randomUUID?.();
+  } catch {
+    return undefined;
+  }
+}
 
 export function CommandRail() {
   const snapshot = useCompanyStore((state) => state.snapshot);
@@ -12,7 +24,7 @@ export function CommandRail() {
   const [text, setText] = useState("");
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
-  const selectedAgent = snapshot?.agents.find((agent) => agent.id === selectedAgentId);
+  const selectedAgent = companyRoster(snapshot).find((agent) => agent.id === selectedAgentId);
   const readOnly = snapshot?.observation?.readOnly ?? snapshot?.control?.readOnly ?? true;
   const mode = snapshot?.control?.mode;
   const startOnly = !snapshot || readOnly || mode === "idle";
@@ -52,7 +64,15 @@ export function CommandRail() {
     setFeedback("명령 전달 중");
     try {
       let payload: UiControlPayload;
-      if (effectiveAction === "start") payload = { action: effectiveAction, goal: text.trim(), mock: snapshot?.mode === "demo" };
+      if (effectiveAction === "start") {
+        const requestId = createStartRequestId();
+        payload = {
+          action: effectiveAction,
+          goal: text.trim(),
+          mock: snapshot?.mode === "demo",
+          ...(requestId ? { requestId } : {}),
+        };
+      }
       else {
         if (!snapshot) return;
         if (effectiveAction === "instruction") payload = { action: effectiveAction, runId: snapshot.run.id, text: text.trim(), trigger: "next_turn" };

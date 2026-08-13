@@ -84,16 +84,14 @@ export class AdaptiveHarness {
       return { request, block: "", skillIds: [], memoryIds: [], selectionReasons: [], gates: [] };
     }
     const input = capabilityInput(request);
-    const performance = this.config.learningEnabled && this.config.learningAutoApply
-      ? this.snapshot.performanceFor(input)
-      : new Map();
-    const policyState = this.policyView.state();
-    const policyAdjustments = this.config.learningEnabled && this.config.learningAutoApply
-      ? this.policyView.adjustmentsFor(input)
-      : new Map();
-    const effectivePolicyVersion = policyState.activeVersion === BASELINE_LEARNING_POLICY_VERSION
-      ? HARNESS_POLICY_VERSION
-      : `${HARNESS_POLICY_VERSION}+${policyState.activeVersion}`;
+    // Raw experience performance is advisory telemetry, not an auto-apply policy.
+    // Only role-keyed candidates that passed holdout promotion may affect ranking.
+    const performance = new Map();
+    // Evolution Harness v2 keeps legacy learning strictly observation-only.
+    // Stable routing changes are represented by an immutable Execution Bundle
+    // and can only become active through the manual Stable Pointer CAS.
+    const policyAdjustments = new Map<string, number>();
+    const effectivePolicyVersion = HARNESS_POLICY_VERSION;
     const selection = this.catalog.select(
       input,
       performance,
@@ -102,9 +100,7 @@ export class AdaptiveHarness {
       policyAdjustments,
       effectivePolicyVersion,
     );
-    const memories = this.config.learningEnabled && this.config.learningAutoApply
-      ? this.snapshot.retrieve(input, selection.skills.map((skill) => skill.id), this.config.maxMemoriesPerCall)
-      : [];
+    const memories: LearningMemory[] = [];
     const skillIds = selection.skills.map((skill) => skill.id);
     const memoryIds = memories.map((memory) => memory.id);
     this.selections += 1;
@@ -115,7 +111,15 @@ export class AdaptiveHarness {
     if (selection.gates.includes("independent-review")) this.independentReviewSelections += 1;
     this.specialistIds.add(selection.specialist.id);
     for (const skillId of skillIds) this.skillIds.add(skillId);
-    if (request.taskId) this.trace(request.taskId, selection.specialist.id, skillIds, memoryIds);
+    if (request.taskId) {
+      this.trace(
+        request.taskId,
+        request.role,
+        selection.specialist.id,
+        skillIds,
+        memoryIds,
+      );
+    }
     const augmented: AgentRequest = {
       ...request,
       specialistId: selection.specialist.id,
@@ -156,15 +160,7 @@ export class AdaptiveHarness {
         this.learnedExperiences += update.newExperiences;
         this.learningUpdatedAt = update.updatedAt;
       }
-      if (!["completed", "partial", "failed"].includes(state.status)) return update;
-      const freshSnapshot = await this.learningStore.loadSnapshot(this.config.learningHistoryRuns);
-      const policy = await this.policyStore.evaluateAndPromote(
-        freshSnapshot,
-        this.config.learningMinSamples,
-        state.updatedAt,
-      );
-      this.policyView = policy.view;
-      return { ...update, policy: policy.update };
+      return update;
     });
   }
 
@@ -204,6 +200,7 @@ export class AdaptiveHarness {
 
   private trace(
     taskId: string,
+    role: AgentRequest["role"],
     specialistId: string,
     skillIds: string[],
     memoryIds: string[],
@@ -212,10 +209,19 @@ export class AdaptiveHarness {
       specialistIds: [],
       skillIds: [],
       memoryIds: [],
+      skillIdsByRole: {},
     };
     current.specialistIds = unique([...current.specialistIds, specialistId]);
     current.skillIds = unique([...current.skillIds, ...skillIds]);
     current.memoryIds = unique([...current.memoryIds, ...memoryIds]);
+    if (["worker", "manager", "validator"].includes(role)) {
+      const rewardRole = role as "worker" | "manager" | "validator";
+      current.skillIdsByRole ??= {};
+      current.skillIdsByRole[rewardRole] = unique([
+        ...(current.skillIdsByRole[rewardRole] ?? []),
+        ...skillIds,
+      ]);
+    }
     this.traces.set(taskId, current);
   }
 }

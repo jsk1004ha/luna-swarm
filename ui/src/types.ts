@@ -63,6 +63,17 @@ export interface Agent {
   };
 }
 
+export interface LogicalAgent extends Agent {
+  logical: true;
+  logicalStatus: "available" | "assigned" | "working" | "reviewing" | "blocked" | "completed";
+  headquartersId: string;
+  divisionId: string;
+  cellId: string;
+  lineage: Array<{ id: string; name: string; kind: "headquarters" | "division" | "team" | "cell" }>;
+  workOrderId?: string;
+  workOrderIds: string[];
+}
+
 export interface Department {
   id: DepartmentId;
   name: string;
@@ -110,6 +121,44 @@ export interface OutputArtifact {
   agentId?: string;
 }
 
+export interface OrganizationV2Summary {
+  orgVersion: string;
+  totalAgents: number;
+  headquarters: Array<{ id: string; name: string; allocation: number }>;
+  units: Array<{
+    id: string;
+    name: string;
+    kind: "headquarters" | "division" | "team" | "cell";
+    headquartersId: string;
+    parentId: string | null;
+    declaredHeadcount: number;
+  }>;
+}
+
+export interface WorkOrderV2Summary {
+  id: string;
+  revision: number;
+  state: string;
+  objective: string;
+  owner: string;
+  reviewers: string[];
+  risk: string;
+  dependencies: string[];
+  gates: string[];
+  artifacts: string[];
+}
+
+export interface CouncilV2Summary {
+  id: string;
+  type: string;
+  state: string;
+  question: string;
+  round: number;
+  outcome?: string;
+  minorityCount: number;
+  blockingFindings: string[];
+}
+
 export interface CompanyEvent {
   id: string;
   seq?: number;
@@ -147,10 +196,16 @@ export interface Snapshot {
     lastActivityAt?: string;
   };
   agents: Agent[];
+  /** Fixed 128-person company roster; `agents` remains runtime/concurrency seats. */
+  logicalAgents: LogicalAgent[];
   departments: Department[];
   metrics: Metrics;
   events: CompanyEvent[];
   outputs?: OutputArtifact[];
+  organizationV2?: OrganizationV2Summary;
+  workOrders?: WorkOrderV2Summary[];
+  councils?: CouncilV2Summary[];
+  intelligenceV2?: IntelligenceV2Summary;
   harness?: {
     enabled: boolean;
     learningEnabled: boolean;
@@ -192,6 +247,14 @@ export interface Snapshot {
     };
     recent429?: number;
   };
+}
+
+export interface IntelligenceV2Summary {
+  preflight?: { status: "ready" | "attention_required"; assumptions: number; blockers: number; risks: number };
+  programKnowledge?: { status: "ready" | "unavailable"; nodes: number; edges: number; omittedFiles: number };
+  oracles: { suites: number; oracles: number; hidden: number };
+  experiments: { preregistered: number; observing: number; decided: number; observations: number };
+  capsules: { total: number; candidate: number; verified: number; stale: number; revoked: number; negative: number };
 }
 
 export interface RunSummary {

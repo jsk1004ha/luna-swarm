@@ -102,6 +102,7 @@ export class AgentGateway {
     request: AgentRequest,
     signal?: AbortSignal,
   ): Promise<AgentResponse> {
+    let totalQueueWaitMs = 0;
     for (let attempt = 1; attempt <= this.options.config.gatewayMaxAttempts; attempt += 1) {
       const callSequence = ++this.callSequence;
       const failureBeforeAcquire = this.getAuthFailure();
@@ -113,12 +114,24 @@ export class AgentGateway {
           { cause: failureBeforeAcquire },
         );
       }
-      const controlPermit = await this.acquireControlPermit(request, attempt, callSequence, signal);
-      let permit: Permit;
+      let controlPermit = await this.acquireControlPermit(request, attempt, callSequence, signal);
+      let permit: Permit | undefined;
+      const releasePermits = async (): Promise<void> => {
+        const acquiredPermit = permit;
+        const acquiredControlPermit = controlPermit;
+        permit = undefined;
+        controlPermit = undefined;
+        try {
+          acquiredPermit?.release();
+        } finally {
+          await acquiredControlPermit?.release();
+        }
+      };
       try {
         permit = await this.pool.acquire(signal, schedulerPriority(request));
+        totalQueueWaitMs += permit.queueWaitMs;
       } catch (error) {
-        await controlPermit?.release();
+        await releasePermits();
         throw error;
       }
       if (this.lastCooldownUntil > 0 && this.clock.now() >= this.lastCooldownUntil) {
@@ -131,8 +144,7 @@ export class AgentGateway {
       }
       const failureAfterAcquire = this.getAuthFailure();
       if (failureAfterAcquire) {
-        permit.release();
-        await controlPermit?.release();
+        await releasePermits();
         throw new AgentCallError(
           `Authentication circuit is open: ${failureAfterAcquire.message}`,
           "auth",
@@ -141,8 +153,7 @@ export class AgentGateway {
         );
       }
       if (this.modelCalls >= this.options.config.maxAgentTurns) {
-        permit.release();
-        await controlPermit?.release();
+        await releasePermits();
         throw new AgentCallError(
           `Agent turn budget exhausted at ${this.options.config.maxAgentTurns}`,
           "permanent",
@@ -190,7 +201,7 @@ export class AgentGateway {
           active: this.pool.snapshot().active,
           concurrency: this.pool.snapshot().target,
         });
-        return response;
+        return { ...response, queueWaitMs: totalQueueWaitMs, modelTurns: attempt };
       } catch (error) {
         const kind = classifyError(error, combined.signal, signal);
         this.pool.recordFailure();
@@ -242,11 +253,11 @@ export class AgentGateway {
           this.options.config.retryBaseMs * 2 ** (attempt - 1),
         );
         const waitMs = Math.round(exponential * (0.8 + this.jitter() * 0.4));
+        await releasePermits();
         await this.clock.sleep(waitMs, signal);
       } finally {
         combined.dispose();
-        permit.release();
-        await controlPermit?.release();
+        await releasePermits();
       }
     }
     throw new Error("Unreachable gateway state");
@@ -367,7 +378,7 @@ export function classifyError(
     return "rate_limit";
   }
   if (
-    /\b5\d\d\b|timeout|timed out|econn|epipe|network|connection|stream disconnected|internal server/.test(
+    /\b5\d\d\b|timeout|timed out|econn|epipe|network|connection|stream disconnected|internal server|app.?server (?:exited|closed)|app-server exited|stdin is unavailable|write after end|broken pipe/.test(
       message,
     )
   ) {

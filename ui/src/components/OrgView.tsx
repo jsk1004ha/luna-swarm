@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef } from "react";
 import { DEPARTMENT_META } from "../data/mock";
-import { standingAvatarIndex } from "../data/avatar";
-import { useCompanyStore } from "../store/companyStore";
-import type { Agent, DepartmentId } from "../types";
+import { avatarInitials, standingAvatarIndex } from "../data/avatar";
+import { companyRoster, useCompanyStore } from "../store/companyStore";
+import type { Agent, DepartmentId, OrganizationV2Summary } from "../types";
 import { OperationsLog } from "./OperationsLog";
 import { ResultRibbon } from "./ResultRibbon";
 
@@ -22,25 +22,40 @@ export function OrgView() {
   const selectedAgentId = useCompanyStore((state) => state.selectedAgentId);
   const selectAgent = useCompanyStore((state) => state.selectAgent);
   const autoSelectedRun = useRef<string | null>(null);
-  const rankedAgents = useMemo(() => [...(snapshot?.agents ?? [])].sort(compareAgents), [snapshot?.agents]);
+  const rankedAgents = useMemo(() => [...companyRoster(snapshot)].sort(compareAgents), [snapshot]);
   const executive = rankedAgents.find((agent) => agent.department === "executive") ?? rankedAgents[0];
   const operationsLead = rankedAgents.find((agent) => agent.id !== executive?.id && agent.department !== "executive") ?? rankedAgents[1];
 
   useEffect(() => {
     if (!snapshot || selectedAgentId || autoSelectedRun.current === snapshot.run.id) return;
-    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1500px)").matches) return;
+    if (typeof window !== "undefined" && !window.matchMedia("(min-width: 1360px)").matches) return;
     autoSelectedRun.current = snapshot.run.id;
-    const initial = executive ?? snapshot.agents[0];
+    const initial = executive ?? companyRoster(snapshot)[0];
     if (initial) selectAgent(initial.id);
   }, [snapshot, selectedAgentId, executive, selectAgent]);
 
   return <section className="organization-console" aria-labelledby="org-view-title">
     <header className="org-console-head">
-      <span><small>ORGANIZATION</small><h1 id="org-view-title">조직도</h1><i title="실제 실행 상태에서 생성된 책임 구조">i</i></span>
+      <span><small>PROJECT WORKSPACE</small><h1 id="org-view-title">Luna Swarm command center</h1><p>실시간 조직, 업무 흐름, 검증 결과를 한 화면에서 운영합니다.</p></span>
       <div className="org-view-tools" aria-label="조직도 보기 도구"><button className="is-active" aria-label="카드 보기">▦</button><button aria-label="목록 보기">☷</button><button aria-label="화면 맞춤">⌗</button></div>
     </header>
+    <section className="project-summary" aria-label="현재 실행 요약">
+      <div className="summary-cover" aria-hidden="true"><span className="brand-moon" /></div>
+      <div className="summary-content">
+        <span className="summary-title"><i aria-hidden="true">◇</i><span><small>CURRENT RUN</small><strong>{snapshot?.run.id ?? "대기 중"}</strong></span></span>
+        <p>{snapshot?.run.goal ?? "새 목표를 입력하면 조직이 구성되고 작업이 시작됩니다."}</p>
+        <div className="summary-meta"><span>♙ {snapshot?.logicalAgents.length ?? snapshot?.agents.length ?? 0} logical employees</span><span>⚡ {snapshot?.metrics.totalAgents ?? 0} runtime seats</span><span>☷ {snapshot?.metrics.totalTasks ?? 0} tasks</span><span>◷ {snapshot?.run.updatedAt ? new Date(snapshot.run.updatedAt).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }) : "—"}</span><span className={`run-state state-${snapshot?.run.status ?? "idle"}`}>{snapshot?.run.status ?? "idle"}</span></div>
+      </div>
+      <div className="summary-progress">
+        <span><small>OVERALL PROGRESS</small><strong>{snapshot?.metrics.progress ?? 0}%</strong></span>
+        <i><b style={{ width: `${snapshot?.metrics.progress ?? 0}%` }} /></i>
+        <small>{snapshot?.metrics.completedTasks ?? 0} of {snapshot?.metrics.totalTasks ?? 0} tasks completed</small>
+      </div>
+    </section>
+    <div className="section-heading"><span><small>EXECUTION TEAM</small><h2>Organization</h2></span><p>책임선과 현재 작업 상태</p></div>
     <div className="org-console-body">
       <div className="organization-tree">
+        {snapshot?.organizationV2 && <HarnessOrganizationReadout organization={snapshot.organizationV2} />}
         <LeadershipNode agent={executive} label="회장실" code="EXECUTIVE" active={Boolean(executive?.isActive)} selected={selectedAgentId === executive?.id} onSelect={selectAgent} primary />
         <span className="tree-stem" aria-hidden="true" />
         <LeadershipNode agent={operationsLead} label="프로젝트 운영본부" code="OPERATIONS" active={Boolean(operationsLead?.isActive)} selected={selectedAgentId === operationsLead?.id} onSelect={selectAgent} />
@@ -70,9 +85,26 @@ export function OrgView() {
   </section>;
 }
 
+export function HarnessOrganizationReadout({ organization }: { organization: OrganizationV2Summary }) {
+  return <section aria-labelledby="harness-v2-org-title" style={{ marginBottom: 16, padding: 12, border: "1px solid var(--line-soft)", borderRadius: 8, background: "var(--surface-2)" }}>
+    <header style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline", marginBottom: 10 }}>
+      <span><small style={{ color: "var(--quiet)" }}>HARNESS V2 · {organization.orgVersion}</small><h3 id="harness-v2-org-title">고정 128명 지휘 체계</h3></span>
+      <strong aria-label={`총 ${organization.totalAgents}명`}>{organization.totalAgents} agents</strong>
+    </header>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 8 }}>
+      {organization.headquarters.map((headquarters) => <article key={headquarters.id} className="department-node" style={{ padding: 10 }}>
+        <small style={{ display: "block", color: "var(--quiet)", textTransform: "uppercase" }}>{headquarters.id}</small>
+        <strong style={{ display: "block", marginTop: 3 }}>{headquarters.name}</strong>
+        <span style={{ display: "block", marginTop: 6, color: "var(--muted)" }}>{headquarters.allocation}명 배정</span>
+      </article>)}
+    </div>
+    <p style={{ marginTop: 9, color: "var(--muted)" }}>본부 {organization.headquarters.length}개 · 등록 조직 단위 {organization.units.length}개</p>
+  </section>;
+}
+
 function LeadershipNode({ agent, label, code, active, selected, onSelect, primary = false }: { agent?: Agent; label: string; code: string; active: boolean; selected: boolean; onSelect: (id: string) => void; primary?: boolean }) {
   return <button className={`leadership-node ${primary ? "is-primary" : ""} ${selected ? "is-selected" : ""}`} onClick={() => agent && onSelect(agent.id)} disabled={!agent}>
-    {agent ? <span className={`org-avatar avatar-${standingAvatarIndex(agent)}`} aria-hidden="true" /> : <span className="org-avatar placeholder" aria-hidden="true">◯</span>}
+    {agent ? <span className={`org-avatar avatar-${standingAvatarIndex(agent)}`} aria-hidden="true">{avatarInitials(agent)}</span> : <span className="org-avatar placeholder" aria-hidden="true">—</span>}
     <span><small>{code}</small><strong>{label}</strong><em>ID: {agent?.id ?? "unassigned"}</em></span>
     <span className={`node-state ${active ? "active" : "idle"}`}><i />{active ? "활성" : "대기"}</span>
     <span className="node-count">♙ {agent ? 1 : 0}</span>
@@ -95,7 +127,7 @@ function DepartmentNode({ departmentId, agents, selectedAgentId, onSelect }: { d
     </button>
     <div className="department-agents">
       {agents.filter((agent) => agent.id !== leader?.id).slice(0, 3).map((agent) => <button key={agent.id} className={selectedAgentId === agent.id ? "is-selected" : ""} onClick={() => onSelect(agent.id)}>
-        <span className={`tiny-avatar avatar-${standingAvatarIndex(agent)}`} aria-hidden="true" />
+        <span className={`tiny-avatar avatar-${standingAvatarIndex(agent)}`} aria-hidden="true">{avatarInitials(agent)}</span>
         <span><strong>{agent.name}</strong><small>{agent.taskTitle}</small></span>
         <em className={agent.activity}>{agent.activity === "done" ? "▤ 결과" : activityLabel(agent.activity)}</em>
       </button>)}

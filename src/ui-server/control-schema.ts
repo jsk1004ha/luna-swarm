@@ -3,6 +3,10 @@ import { z } from "zod";
 const safeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 const runId = safeId;
 const taskId = safeId;
+const requestId = z.string().regex(
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  "requestId must be a UUID",
+);
 
 export const uiControlCommandSchema = z.discriminatedUnion("action", [
   z.object({
@@ -10,6 +14,7 @@ export const uiControlCommandSchema = z.discriminatedUnion("action", [
     goal: z.string().trim().min(1).max(16_000),
     mock: z.boolean().optional(),
     maxConcurrency: z.number().int().min(1).max(1_024).optional(),
+    requestId: requestId.optional(),
   }).strict(),
   z.object({ action: z.literal("pause"), runId }).strict(),
   z.object({ action: z.literal("resume"), runId }).strict(),

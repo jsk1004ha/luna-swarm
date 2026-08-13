@@ -243,8 +243,12 @@ export class DurableControlStore {
         await handle.close();
         break;
       } catch (error) {
-        if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-        await this.removeExpiredLock(now);
+        if (!isControlLockContention(error)) throw error;
+        try {
+          await this.removeExpiredLock(now);
+        } catch (inspectionError) {
+          if (!isControlLockContention(inspectionError)) throw inspectionError;
+        }
         if (Date.now() >= deadline) throw new Error(`Timed out acquiring ${this.lockPath}`);
         await delay(5);
       }
@@ -372,6 +376,15 @@ function assertConcurrencyCap(cap: number): void {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function isControlLockContention(error: unknown): boolean {
+  if (!isNodeError(error)) return false;
+  if (error.code === "EEXIST") return true;
+  // On Windows an existing file can transiently report EPERM while another
+  // process is creating, scanning, or removing it. Treat that as contention;
+  // the bounded acquisition deadline still prevents an infinite wait.
+  return process.platform === "win32" && error.code === "EPERM";
 }
 
 function isUnsupportedSyncError(error: unknown): boolean {

@@ -6,14 +6,16 @@ ChatGPT 로그인으로 `gpt-5.6-luna`를 사용하는 **수직 조직형 다중
 
 ## 5분 시작
 
-필요 조건은 Node.js 20 이상과 ChatGPT 계정입니다.
+필요 조건은 Node.js 20.19.x 또는 22.12 이상과 ChatGPT 계정입니다.
 
 ```bash
-npm install
+npm ci
 npx codex login
 npm run build
 npm start -- doctor
 ```
+
+루트의 단일 `package-lock.json`이 서버와 `ui` workspace 의존성을 함께 고정하므로 별도의 UI 설치는 필요하지 않습니다.
 
 먼저 비용 없는 결정론적 모의 실행으로 설치를 확인합니다.
 
@@ -40,15 +42,17 @@ npm start -- ui --workspace . --open
 npm start -- ui --workspace . --mock --open
 ```
 
-기본 주소는 `http://127.0.0.1:4310`입니다. 새 UI는 React가 메뉴·명부·제어·조직도·DAG를, PixiJS가 구조화된 tile map·벽·가구·좌석·직원 entity·A* 이동·보고 애니메이션을 렌더링합니다. 참고 이미지를 배경 한 장으로 사용하지 않습니다. REST 초기 snapshot 이후 `/api/ui/events` WebSocket에서 실행별 `seq`를 이어받고, 재연결 시 마지막 `seq` 이후 사건을 replay합니다.
+기본 주소는 `http://127.0.0.1:4310`입니다. UI 구조와 시각 기준은 제공된 `luna-swarm-command-center.zip`의 `Home.tsx`와 `index.css`입니다. Luna는 그 단일 workspace shell의 값과 handler만 실제 실행 데이터로 연결하며, 새 기능도 같은 내비게이션·카드·조직도·drawer·directive 문법 안에서 확장합니다. 기존 대시보드 셸을 겹쳐 렌더링하지 않습니다. REST 초기 snapshot 이후 `/api/ui/events` WebSocket에서 실행별 `seq`를 이어받고, 재연결 시 마지막 `seq` 이후 사건을 replay합니다.
+
+저장소와 런타임 UI에는 사람 사진, 캐릭터 sprite, HQ 배경을 포함한 래스터 이미지 에셋을 두지 않습니다. 로고와 summary 장식은 CSS로, 직원은 이니셜 배지로, 선택형 Pixi 본사는 구조화된 tile map·벽·가구·좌석·기하학적 직원 entity로 렌더링합니다.
 
 본사 층은 Pixel Agents의 “런타임 상태를 실제 공간 행동으로 번역한다”는 원칙을 Luna의 대규모 실행에 맞게 확장합니다. 조사 직원은 근거 서가, 회의 직원은 공유 회의실, 차단 직원은 incident room, 대기 직원은 라운지, 승인·보고 직원은 report lift로 제한된 인원만 이동합니다. 부서 내부에는 방향이 있는 좌석과 모니터·의자·4~6인 포드가 남아 있어 직원이 이동해도 빈 상자가 아니라 회사로 읽힙니다. Pixel Agents의 코드나 에셋은 복제하지 않았습니다.
 
-144명 화면에서도 타일·벽·가구는 정적 Pixi 레이어로 한 번만 만들고, 상태·선택이 바뀐 경우에만 직원 레이어를 교체합니다. 진행률 숫자만 갱신되는 1초 snapshot은 지도 전체를 다시 만들지 않습니다. 동시에 이동하는 직원은 최대 24명, 말풍선은 기본 최대 20개로 제한하고 렌더러는 DPR 1.25·30fps 상한을 사용합니다. 네 방향 직원 atlas는 초기 preload 후 파일별로 독립 재시도하며, 일부 방향 이미지가 실패하면 정상 시트로 대체하고 마지막 정상 장면을 유지합니다. 오류 배너의 `이미지 다시 불러오기`는 실패한 Pixi 캐시까지 우회합니다.
+144명 화면에서도 타일·벽·가구는 정적 Pixi 레이어로 한 번만 만들고, 상태·선택이 바뀐 경우에만 직원 레이어를 교체합니다. 진행률 숫자만 갱신되는 1초 snapshot은 지도 전체를 다시 만들지 않습니다. 동시에 이동하는 직원은 최대 24명, 말풍선은 기본 최대 20개로 제한하고 렌더러는 DPR 1.25·30fps 상한을 사용합니다. 직원은 외부 이미지 없이 부서색·상태색·방향을 조합한 Pixi 도형 마커로 그립니다.
 
 UI 서버가 시작한 실행은 `소유 실행`으로 표시되어 일시정지·재개·전체 취소·동시성 cap·다음 turn 지시·시작 전 작업 우선순위/취소를 제어할 수 있습니다. 별도 CLI에서 시작한 실행은 동일한 상태와 사건을 관찰하되 `외부 실행 · 관찰 전용`으로 표시합니다. 제어 API는 loopback Host/Origin을 확인하며, 비-loopback bind에는 `--token`이 필요합니다.
 
-본사 지도는 직원 ID로 좌석을 결정하고 동서남북 착석 atlas를 좌석 방향에 맞춰 사용합니다. 이동 중인 직원은 16개 전신 sprite를 사용합니다. 생성 과정에서 잘렸던 원본 4번째 행은 `employee-atlas-v2.png`에서 투명 192×192 셀 안으로 복원했고, 각 셀의 여백을 자동 검증했습니다. 144명까지 개별 entity를 동시에 표시하고, 더 큰 조직은 선택 부서를 개별 표시하면서 현재 층/전체 인원을 분리해 알립니다.
+본사 지도는 직원 ID로 좌석과 안정적인 도형 변형을 결정합니다. DOM 명부와 조직도는 이니셜·색상 배지를, Pixi 본사 화면은 방향 노치가 있는 기하학적 마커를 사용합니다. 144명까지 개별 entity를 동시에 표시하고, 더 큰 조직은 선택 부서를 개별 표시하면서 현재 층/전체 인원을 분리해 알립니다.
 
 기존 Canvas 2D 대시보드는 호환 경로로 `npm start -- dashboard --workspace .`에서 계속 실행할 수 있습니다. **회장 명령석**에서는 세 가지 작업을 할 수 있습니다.
 
@@ -58,7 +62,7 @@ UI 서버가 시작한 실행은 `소유 실행`으로 표시되어 일시정지
 
 종료된 실행에는 새 지시를 넣을 수 없으며, 이미 승인된 결과는 소급해 다시 실행하지 않습니다. 중간에 프로세스를 재개해도 적용된 회장 지시는 유지됩니다.
 
-이 프로젝트는 자식 Codex 프로세스에서 `OPENAI_API_KEY`와 `CODEX_API_KEY`를 제거합니다. 즉 API 과금 경로를 선택하지 않고, `codex login`으로 저장된 ChatGPT 인증만 사용합니다.
+이 프로젝트는 자식 Codex 프로세스에 운영체제 기본 경로와 `CODEX_HOME`만 allowlist로 전달합니다. API 키, ChatGPT access/refresh token, 클라우드·데이터베이스 자격증명은 전달하지 않으며, `codex login`이 `CODEX_HOME`에 저장한 ChatGPT 인증만 사용합니다.
 
 > 계정 화면의 “무료/무제한” 표시는 ChatGPT 사용 권한을 뜻합니다. 100개 이상의 동시 요청을 서버가 항상 수용하거나 정책이 영구히 유지된다는 보장은 아닙니다. 그래서 숫자를 고정하지 않고 실제 동시성을 자동 조절합니다.
 
@@ -130,9 +134,9 @@ Luna Swarm은 SDK를 모델 실행에 직접 사용하지 않습니다. SDK 패�
 | 전문 역량 라우팅 | 기획·조사·구현·레드팀·감사·통합·최종심의 호출마다 목적에 맞는 specialist contract를 배정 |
 | 필요 시 스킬 로딩 | 내장 runbook과 workspace `SKILL.md` 중 관련성이 높은 최대 3개만 제한된 context로 주입 |
 | 이질적 감사 렌즈 | 독립 감사자에게 근거 무결성·완료 기준·실패 모드 렌즈를 서로 다르게 배정 |
-| 실행 경험 학습 | 검증 결과와 재작업 신호만 로컬에 축적하고 다음 실행의 스킬 순위와 절차 힌트에 반영 |
-| 검증형 정책 승격 | 과거 실행으로 만든 개선 후보를 최신 실행 holdout에서 재검증하고, 통과 버전만 bounded 점수 보정으로 적용 |
-| 즉시 롤백 | 활성 개선 버전이 나빠지면 직전 검증 버전 또는 보정 없는 기준선으로 원자 복구 |
+| 관찰 전용 경험 ledger | 기존 학습 기록은 `weak_observation`으로만 보존하며 실행 라우팅이나 자동 승격에 사용하지 않음 |
+| 고정 실행 Bundle | 실행 시작 시 workload별 Stable Pointer를 snapshot하여 retry·resume 동안 같은 Bundle identity를 유지 |
+| 객관적 수동 승격 | L3/L4 Trace·Outcome Receipt에 결합된 paired evaluation만 수동 CAS 승격을 허용하고 rollback 시 실패 Bundle을 격리 |
 
 동일 모델의 판단 오류는 완전히 독립적이지 않습니다. 따라서 코드·계산·DAG·출처 합집합처럼 프로그램으로 검사할 수 있는 것은 다수결보다 결정론적 검사기를 우선합니다.
 
@@ -163,8 +167,20 @@ npm start -- skills -- --workspace .
 # 누적된 안전한 학습 메타데이터와 최근 경험
 npm start -- learning -- --workspace . --recent
 
-# 현재 검증 정책이 성능을 낮추면 직전 버전 또는 안전 기준선으로 롤백
+# 레거시 정책 ledger 롤백(런타임 라우팅에는 적용되지 않음)
 npm start -- learning -- --workspace . --rollback
+
+# Evolution Harness v2 기준 Bundle 생성 및 현재 상태 확인
+npm start -- evolve bootstrap -- --workspace .
+npm start -- evolve status -- --workspace .
+
+# 객관적 paired evaluation receipt로 Challenger를 수동 승격
+npm start -- evolve promote <bundle-id> -- --workload <class> --expected-generation <n> \
+  --evaluation <receipt-id> --evaluation-hash <sha256:...> --actor <name> --reason <text>
+
+# 직전 Stable로 원자 rollback하고 방금 내린 Bundle을 quarantine
+npm start -- evolve rollback <workload-class> -- --expected-generation <n> \
+  --actor <name> --reason <text>
 
 # Ctrl-C 등으로 중단된 실행 재개
 npm start -- resume <run-id> -- --workspace .
@@ -211,6 +227,14 @@ npm start -- ui --workspace . --port 4310 --mock --open
 
 <workspace>/.luna-swarm/learning/runs/<run-id>.json
 <workspace>/.luna-swarm/learning/policy.json
+<workspace>/.luna-swarm/evolution/
+  genomes/
+  bundles/
+  traces/
+  outcomes/
+  failures/
+  evaluations/
+  stable-pointers.json
 <workspace>/.luna-swarm/skills/<skill-id>/SKILL.md
 ```
 
@@ -218,9 +242,9 @@ npm start -- ui --workspace . --port 4310 --mock --open
 
 `commands.jsonl`은 대시보드에서 보낸 회장 지시의 append-only 원본이고, `commands.applied`는 실제 모델 프롬프트에 포함된 지시 ID를 기록합니다. `commands.closed`는 종료 barrier가 명령 접수를 원자적으로 닫는 표식입니다. 명령 append와 종료는 실행별 파일 락으로 직렬화되므로, 종료가 먼저면 API가 지시를 거부하고 명령이 먼저면 마지막 judge가 반드시 읽습니다. 잠금에는 PID·시각·고유 토큰을 기록하며 강제 종료로 남은 잠금만 자동 회수하고 살아 있는 소유자는 시간만으로 탈취하지 않습니다. 쓰다 끊긴 마지막 명령 레코드와 누락된 `directive_queued` 이벤트는 재개 시 원본 로그에서 복구합니다. 웹 서버는 `state.json`을 직접 수정하지 않습니다.
 
-`learning/runs/*.json`은 모델 가중치가 아니라 실행 경험의 작은 로컬 ledger입니다. 원문 목표, 프롬프트, 응답, 코드, URL, 인증정보를 저장하지 않고 task kind·부서·위험도·사용한 specialist/skill ID·시도 횟수·manager/독립 감사 결과·고정된 품질 신호만 남깁니다. 실행 시작 때 과거 경험을 한 번 읽어 frozen snapshot으로 사용하고, 현재 실행 중 새로 기록된 경험은 다음 실행부터 반영합니다. 실패 결과의 내용은 재사용하지 않으며 “더 이른 반증과 증거 확인이 필요했다”는 일반화된 절차 신호만 남깁니다.
+`learning/runs/*.json`은 모델 가중치가 아니라 과거 실행의 작은 로컬 ledger입니다. 원문 목표, 프롬프트, 응답, 코드, URL, 인증정보를 저장하지 않으며 모든 현재·과거 레코드를 `weak_observation`으로 취급합니다. 이 데이터는 진단과 표시에는 남지만 specialist/skill 순위, memory recall, Stable Pointer 승격에는 영향을 주지 않습니다. `learningAutoApply=true`는 설정 검증 단계에서 거부됩니다.
 
-`learning/policy.json`은 지속 개선의 버전 ledger입니다. 이전 실행으로 만든 후보를 시간상 분리된 최신 실행 holdout에서 다시 평가하고, 최소 표본·비회귀·최소 개선폭을 모두 통과한 경우에만 다음 실행의 skill 순위 보정으로 승격합니다. 거부 후보와 롤백 버전도 남기며 `learning --rollback`은 직전 검증 버전 또는 보정 없는 안전 기준선으로 원자적으로 복구합니다. 이 정책은 프롬프트 원문이나 모델 가중치를 바꾸지 않고 최대 ±3점의 bounded routing 보정만 적용합니다.
+실행에 영향을 주는 유일한 진화 경로는 `.luna-swarm/evolution`입니다. 새 실행은 workload별 Stable Pointer를 한 번 snapshot하고, 각 Work Order의 retry·validation·resume은 저장된 `bundleId`와 `bundleHash`를 계속 사용합니다. Decision Trace는 원시 채팅 대신 입력·컴포넌트·도구·출력·검증 reference와 실제 측정 가능한 timing만 기록하며 secret·PII·환경변수 값은 제거합니다. Objective Outcome은 원본 Trace와 실제 G0/G2/G3 증거를 역참조하고, paired evaluation 점수는 보호된 benchmark evaluator의 quality receipt까지 검증합니다. Git이 아닌 작업공간은 `sourceIdentity`를 설정할 수 있고, 없으면 본 작업은 관찰 전용으로 계속되지만 승격 근거에는 포함되지 않습니다. 승격은 actor·reason·expected generation·검증 receipt를 모두 요구하는 명시적 `evolve promote`에서만 가능하며, 현재 실행에는 영향을 주지 않고 다음 실행부터 적용됩니다. 자세한 계약은 [Evolution Harness v2](docs/EVOLUTION_HARNESS_V2.ko.md)를 참고하세요.
 
 Workspace 스킬은 `.luna-swarm/skills/<id>/SKILL.md` 또는 `.codex/skills/<id>/SKILL.md`에서 읽습니다. 추가 디렉터리는 `LUNA_SWARM_SKILL_DIRS`에 OS path delimiter로 지정할 수 있습니다. 스킬 본문은 실행하지 않고 프롬프트의 untrusted procedural playbook으로만 넣으며, 역할 헌장·회장 지시·안전 경계·도구 권한·JSON schema를 덮을 수 없습니다.
 
@@ -237,8 +261,9 @@ stateDiagram-v2
   retry_wait --> ready
   running --> failed: permanent error
   failed --> blocked: descendants only
-  running --> cancelled: abort
-  cancelled --> ready: resume
+  running --> interrupted: SIGINT / SIGTERM
+  interrupted --> ready: resume
+  running --> cancelled: operator cancel
 ```
 
 ## 주요 설정
@@ -261,12 +286,14 @@ stateDiagram-v2
 | `maxContextChars` | 80,000 | 역할 프롬프트와 회장 지시를 합친 최대 문자 수; 최소 1,024 |
 | `callTimeoutMs` | 1,200,000 | 한 모델 호출 제한 시간 |
 | `schedulerAgingMs` | 5,000 | 대기 요청을 한 역할 우선순위 단계만큼 승격하는 주기 |
-| `allowNetwork` | true | read-only agent의 네트워크 사용 |
+| `allowNetwork` | false | read-only agent의 네트워크 사용(명시적 opt-in) |
 | `harnessEnabled` | true | 전문 역량 라우팅과 bounded skill prompt 사용 |
 | `maxSkillsPerCall` | 3 | 한 호출에 선택하는 스킬 상한 |
 | `maxSkillChars` | 6,000 | 스킬 블록 문자 예산 |
 | `learningEnabled` | true | 검증된 실행 경험의 workspace 로컬 기록 |
-| `learningAutoApply` | true | 다음 실행에서 경험 기반 순위와 절차 힌트 사용 |
+| `learningAutoApply` | false | Evolution Harness v2에서 비활성. 학습 기록은 관찰 전용이며 Bundle 승격은 수동 CAS만 허용 |
+| `sourceIdentity` | 생략 | 비Git 배포의 구체적인 빌드 identity. 없으면 본 작업은 계속하되 해당 run은 승격 증거에서 제외 |
+| `evolutionBenchmarkAuthorities` | `{}` | 보호된 benchmark evaluator의 공개키·버전·suite hash allowlist. 개인키 저장 금지 |
 | `maxMemoriesPerCall` | 4 | 한 호출에 회수하는 과거 경험 상한 |
 | `maxMemoryChars` | 3,000 | 경험 회수 블록 문자 예산 |
 | `learningHistoryRuns` | 200 | 시작 시 읽는 과거 실행 record 상한 |
@@ -286,13 +313,27 @@ stateDiagram-v2
 
 실제 파일 쓰기를 병렬 허용하려면 작업별 Git worktree와 단일 committer가 추가되어야 합니다. 현재 버전은 파일 충돌과 중복 side effect를 막기 위해 그 기능을 의도적으로 켜지 않았습니다.
 
+## Harness v2
+
+실행 계획은 고유 이름을 가진 `lab-128@2` 고정 조직의 revisioned Work Order로 투영됩니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, bounded AST 기반 Program Knowledge Graph가 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급합니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, 고정 reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다.
+
+SQLite WAL, App Server sharding, 실제 쓰기 Tool Broker, Git worktree/Single Committer, G1 command receipt, runtime trace 자동 수집, arbitrary experiment runner는 아직 구현됐다고 주장하지 않습니다. 현재 범위와 남은 안전 경계는 [Harness v2 설계 문서](docs/HARNESS_V2.ko.md)에 명시했습니다.
+
 ## 개발 및 검증
+
+의존성은 저장소 루트에서 한 번 설치합니다.
+
+```bash
+npm ci
+```
 
 ```bash
 npm run check
 npm test
 npm run build
 ```
+
+GitHub Actions도 지원되는 Node.js 22에서 같은 순서로 clean install, 타입 검사, 테스트, 빌드를 실행합니다.
 
 UI만 개발할 때는 터미널 두 개에서 서버와 Vite를 나눠 실행할 수 있습니다.
 
@@ -321,10 +362,10 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 - UI 이벤트 Zod 검증, 실행별 seq 중복 제거와 WebSocket replay
 - durable pause/resume/cancel/concurrency와 다음 turn `OperatorInstruction` 주입
 - 고정 좌석·동서남북 착석·A* 경로·tile reservation·144/256명 밀도 정책
-- 진행률-only snapshot의 Pixi 장면 재생성 방지, 정적 회사 레이어 1회 mount, 이미지 transient failure 재시도
+- 진행률-only snapshot의 Pixi 장면 재생성 방지, 정적 회사 레이어 1회 mount, 에셋 없는 도형 마커의 안정적 변형
 - 10,000건 사건 가상 목록과 외부 실행 관찰 전용 제어 거부
 
-현재 제한사항: 브라우저는 한 서버 프로세스가 동시에 소유한 실행 하나만 직접 제어합니다. 257명 이상은 지도에서 전원을 동시에 그리지 않고 부서/층 집계와 검색으로 접근합니다. 취소는 진행 중 모델 호출에 AbortSignal을 전달하지만 이미 승인된 결과를 삭제하거나 재실행하지 않습니다. 픽셀 에셋은 프로젝트용으로 생성한 자체 에셋이며 외부 에셋 라이선스 의존성이 없습니다.
+현재 제한사항: 브라우저는 한 서버 프로세스가 동시에 소유한 실행 하나만 직접 제어합니다. 257명 이상은 지도에서 전원을 동시에 그리지 않고 부서/층 집계와 검색으로 접근합니다. 취소는 진행 중 모델 호출에 AbortSignal을 전달하지만 이미 승인된 결과를 삭제하거나 재실행하지 않습니다. React/Pixi 운영 UI의 직원 표시는 사람 이미지 에셋에 의존하지 않습니다.
 
 더 자세한 설계와 불변식은 [docs/ARCHITECTURE.ko.md](docs/ARCHITECTURE.ko.md)를 참고하세요.
 

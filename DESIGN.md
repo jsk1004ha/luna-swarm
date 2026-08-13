@@ -3,15 +3,15 @@
 ## Source of truth
 
 - Status: Active
-- Last refreshed: 2026-08-12
+- Last refreshed: 2026-08-13
 - Primary product surfaces: 웹 기반 회사 운영 대시보드, 회장 명령석, 에이전트 상세 인스펙터, 전문 역량·스킬·학습 근거, 실시간 이벤트 스트림
-- Evidence reviewed: `README.md`, `docs/ARCHITECTURE.ko.md`, `src/types.ts`, `src/organization.ts`, `src/store.ts`, `ui/src/App.tsx`, `ui/src/styles.css`, `ui/src/components/OrgView.tsx`, `ui/src/pixi/HQCanvas.tsx`, Pixel Agents 공개 저장소, Threads `SecondBrain OS` 게시물의 공개 썸네일, 사용자가 제공한 `LUNA SWARM HQ` 픽셀 아트 회사 화면과 2026-08-12 다크 조직 운영 콘솔 참고 이미지, 1280×720 실제 mock 운영 화면
+- Evidence reviewed: `README.md`, `docs/ARCHITECTURE.ko.md`, `src/types.ts`, `src/organization.ts`, `src/store.ts`, `ui/src/App.tsx`, `ui/src/styles.css`, `ui/src/components/OrgView.tsx`, `ui/src/pixi/HQCanvas.tsx`, 사용자가 제공한 `luna-swarm-command-center.zip`의 `client/src/pages/Home.tsx`와 `client/src/index.css`, 기존 mock 운영 화면
 
 ## Brand
 
-- Personality: 차분한 엔터프라이즈 관제실, 책임선이 보이는 회사, 고밀도이지만 빠르게 판독되는 운영 도구
+- Personality: Linear/Notion 계열의 밝고 차분한 생산성 워크스페이스, 책임선이 보이는 회사, 고밀도이지만 빠르게 판독되는 운영 도구
 - Trust signals: 실제 상태와 행동의 일관된 매핑, 마지막 동기화 시각, 실데이터/데모 모드 표시, 명확한 차단 신호
-- Avoid: 참고 화면의 직접 복제, 의미 없는 랜덤 이동, 과도한 네온/유리 효과, 100명을 동일한 DOM 카드로 나열하는 화면, 픽셀 사무실을 유일한 정보 구조로 삼는 것
+- Avoid: ZIP 커맨드센터와 별개의 앱 셸이나 중첩 레이아웃, 기존 UI를 위에 덮는 cascade overlay, 의미 없는 랜덤 이동, 과도한 네온/유리 효과, 강한 그림자, 100명을 동일한 DOM 카드로 나열하는 화면, 픽셀 사무실을 유일한 정보 구조로 삼는 것, 사람 사진·캐릭터 스프라이트·HQ 배경을 포함한 래스터 이미지 에셋
 
 ## Product goals
 
@@ -27,7 +27,7 @@
 
 ## Information architecture
 
-- Primary navigation: 상단 실행 상태·전체 진행률 → 좌측 조직/업무/본사/감사 내비게이션 → 중앙 책임 조직도 또는 보조 본사 지도 → 우측 선택 에이전트 상세 → 하단 실시간 실행 기록
+- Primary navigation: ZIP의 `workspace-shell` 안에서 좌측 내비게이션(Overview/Organization/Task board/Activity/Headquarters) → `app-topbar`의 실행 선택·검색·일시정지 → `content-area`의 실행 요약·책임 조직도·업무·사건 또는 보조 본사 지도 → 같은 셸의 에이전트 상세 drawer와 operator directive 순서를 유지한다.
 - Core routes/screens: 기본은 `조직` 운영 콘솔이며 `업무 DAG`와 `본사` 픽셀 공간은 같은 실행을 보는 보조 뷰다. `/api/snapshot`, `/api/stream`, `/health`는 읽기 전용 데이터 표면이며 명시적 제어 API만 사용자 명령을 받는다.
 - Content hierarchy: 실행 상태와 전체 진행률 → 회장실/운영본부/3개 기능 디비전의 책임선 → 부서와 실제 직원 → 선택 에이전트의 업무·의존성·검증·하네스 근거 → 실행 기록
 
@@ -36,33 +36,35 @@
 - 상태를 행동으로 번역한다: `working`은 타이핑, `researching`은 문서 탐색, `reviewing`은 검토, `waiting`은 대기, `blocked`는 구조 신호, `done`은 완료로 보인다.
 - 밀도는 계층으로 푼다: 멀리서는 부서의 색과 활동량, 가까이서는 좌석과 개별 직원, 선택 시에만 상세 텍스트를 드러낸다.
 - 장식보다 신뢰를 우선한다: 에이전트는 실제 상태 변화에 반응하며 의미 없는 이동을 하지 않는다.
+- ZIP 원본을 확장한다: 새 기능은 제공된 `Home.tsx`의 DOM 계층과 `index.css`의 클래스·토큰·밀도·카드·drawer 문법 안에 추가한다. 별도 앱 셸, 평행한 내비게이션, 전역 스타일 덮어쓰기 레이어를 만들지 않는다.
+- 모든 제어는 상태를 드러낸다: 새 버튼과 입력에는 기본·호버·포커스·비활성·로딩·성공·오류 상태를 같은 컴포넌트 문법으로 제공한다.
 - Tradeoffs: 조직 책임과 검증 흐름은 가벼운 DOM으로, 공간 행동은 Pixi 2D로 분리한다. 기본 화면은 조직 운영 콘솔로 두고, 100명 이상의 개별 이동이 필요한 경우에만 본사 뷰를 연다.
 
 ## Visual language
 
-- Color: `#080d12` 앱 셸, `#10171e` 패널, `#25313b` 경계, 청록 `#35d6e5` 선택선, 초록 `#35d27f` 진행 신호를 중심으로 한다. 상태는 초록(작업), 청록(조사), 호박(검토/대기), 빨강(차단), 회색(유휴)을 사용하고 광원은 선택·경고·실시간 연결에만 제한한다.
-- Typography: 외부 폰트 없이 시스템 산세리프. KPI와 식별자는 좁은 자간의 대문자/숫자, 설명은 읽기 좋은 한국어 본문. 상시 표시되는 운영 메타데이터는 10px, 본문과 제어는 11px 이상을 기본으로 하고 9px 이하는 장식적 코드 라벨에만 제한한다.
-- Spacing/layout rhythm: 4/8px 기반. 1500px 이상은 58px 헤더 + 210px 좌측 내비게이션 + 유연한 중앙 조직도 + 380px 고정 인스펙터다. 1121~1499px에서는 68px 아이콘 내비게이션과 오버레이 인스펙터를 사용해 중앙 작업면을 최소 900px 이상 확보한다. 중앙 하단에는 220px 이하 실행 기록 표를 붙인다. 본사/DAG에서는 228~248px 명부를 보조 열로 사용한다.
-- Shape/radius/elevation: 4~8px의 작은 라운드, 1px 경계, 거의 없는 그림자. 선택 카드만 청록 외곽선과 약한 내부 광원을 갖는다.
+- Color: `#f7f7f5` 앱 셸, `#ffffff` 패널, `#d9d9d5` 경계, 보라 `#6466d9` 선택·주요 동작, 초록 `#22865f` 성공·진행을 중심으로 한다. 상태는 초록(작업/완료), 파랑(조사), 호박(검토/대기), 빨강(차단), 회색(유휴)을 사용하며 색과 텍스트 라벨을 함께 제공한다. Pixi 본사 캔버스 내부만 어두운 공간 표현을 유지한다.
+- Typography: ZIP 스타일의 `Space Grotesk`/`Manrope`/`IBM Plex Mono` 스택과 크기 계층을 유지한다. 네트워크 폰트가 없을 때는 같은 선언의 산세리프·모노 fallback으로 읽을 수 있어야 한다.
+- Spacing/layout rhythm: ZIP의 240px sidebar, 상단 `app-topbar`, 최대 1440px `content-area`, 16px 카드 gap과 6–9px radius를 기준으로 한다. 선택 상세는 동일 페이지 위의 `agent-drawer`로 열며 중앙에 기존 Inspector 셸을 다시 삽입하지 않는다.
+- Shape/radius/elevation: 입력과 작은 제어는 4~6px, 주요 카드는 8~9px 라운드와 1px 중립 경계를 쓴다. 상시 카드에는 그림자를 거의 쓰지 않고 오버레이·드로어에만 낮은 중립 그림자를 사용한다. 선택 카드는 연한 보라 배경과 보라 경계로 표시한다.
 - Motion: 180~260ms 인터페이스 전환, 캐릭터의 작업 상태는 낮은 진폭의 루프. 차단 펄스는 느리고 제한적. `prefers-reduced-motion`에서는 루프를 정지한다.
 - Result arrival: 새 작업 산출물은 문서 아이콘과 `결과 생성됨` 라벨로 한 번만 도착 애니메이션을 실행한다. 검증 중은 청록, 승인된 결과는 민트, 부분 결과는 호박, 최종 보고서는 밝은 민트와 별도 `FINAL` 배지로 구분하며 색만으로 상태를 전달하지 않는다.
-- Imagery/iconography: Luna HQ 전용으로 생성한 4×4 전신·동서남북 착석 아틀라스를 직원 정체성의 원형으로 사용한다. 방·복도·문·포드·책상·모니터·의자·회의실·서가·incident room·카페는 구조화된 Pixi 오브젝트로 렌더링하며 baked 배경 이미지를 런타임 충돌·배치의 원본으로 사용하지 않는다.
+- Imagery/iconography: 래스터 이미지 에셋을 사용하지 않는다. ZIP의 로고와 summary cover도 CSS 도형으로 표현하고, DOM은 안정적인 이니셜·색상 배지, Pixi는 부서색·상태색·방향 노치로 구성한 기하학적 마커를 사용한다. 방·복도·문·포드·책상·모니터·의자·회의실·서가·incident room·카페는 배경 이미지 없이 구조화된 Pixi 오브젝트로 렌더링한다.
 
 ## Office world and employee identity
 
 - Aesthetic direction: `Luna Headquarters — 살아 있는 운영 본부`. 부서별 상태 상자가 아니라 고정 좌석, 팀 포드, 회의실, 로비, 카페, 서가, incident room, review booth, mail room이 연결된 실제 회사 층으로 읽혀야 한다.
 - Spatial grammar: 전체 면적의 10–15%는 공용 공간과 복도다. 주 통로는 32 world px, 보조 통로는 24 world px 이상이며 각 부서는 고유한 가구 문법과 최소 한 개의 기능적 랜드마크를 갖는다.
 - Stable identity: `agent.id`에서 이름과 외형을 결정한다. snapshot 순서, 상태 변화, 페이지 재접속이 이름·좌석·외형을 바꾸지 않는다.
-- Avatar system: 16개 생성 원형 × 피부 6 × 헤어/색 8 × 의상 8 × 액세서리/직무 소품 조합으로 최소 100개의 구분 가능한 appearance signature를 제공한다. 부서색은 명찰·책상 트림에만 사용하고 상태색은 링·모니터에만 사용한다.
+- Avatar system: `agent.id`에서 16개 안정적 색상·도형 변형을 선택한다. DOM 배지는 이니셜과 색상, Pixi 마커는 중심 기호와 방향 노치로 구분한다. 부서색은 정체성에, 상태색은 링·중심 기호·모니터에만 사용하며 사진형 외형을 만들지 않는다.
 - Density hierarchy: 전체 줌에서는 방·활동량·실루엣, 중간 줌에서는 팀 포드·개인 포즈, 상세 줌에서는 이름·역할 소품을 보여준다. 선택·호버된 직원 이름은 줌과 무관하게 표시한다.
 - Motion budget: 모든 직원에게 무한 이동을 주지 않는다. 선택/최근 상태 변경 직원과 보고 캡슐을 합쳐 최대 24개만 이동 애니메이션하고, routine 말풍선은 최대 20개로 제한하며 나머지는 정적 상태 포즈로 둔다.
 
 ## Components
 
-- Existing components to reuse: 없음. 기존 `RunState`, `RunEvent`, 부서/직급 타입과 저장 포맷을 디자인 데이터 계약으로 재사용한다.
-- New/changed components: `OrganizationConsole`, `OrganizationNode`, `DivisionLane`, `ResultRibbon`, `ResultCard`, `OperationsLog`, enterprise top progress rail, grouped side navigation, tabbed agent inspector의 `결과` 탭, `하네스 근거` card. 기존 `CompanyCanvas`, `EmployeeSprite`, 회의실·서가·incident room은 보조 본사 뷰에서 유지한다.
+- Existing components to reuse: 화면 구조의 기준은 ZIP에서 옮긴 `ui/src/pages/Home.tsx`와 `ui/src/styles.css`다. 기존 `HQCanvas`와 API/store/schema 로직은 그 셸 안에서 기능 단위로 재사용하되, 과거 `TopBar`·`ViewNav`·`DirectoryPanel`·`InspectorPanel`을 두 번째 레이아웃으로 중첩하지 않는다.
+- New/changed components: 전역 검색, 현재 실행 summary, 조직도, task queue, live activity, operator directive, agent drawer는 ZIP의 기존 DOM/class 계약을 유지한다. Luna 연결은 그 요소의 값과 handler만 실제 REST/WebSocket/control API로 교체한다.
 - Variants and states: 실데이터/데모, 연결/재연결, 선택/호버, 전체/부서 집중, 상태 필터, 검색 결과, 현재 프로젝트 지시/새 실제 실행/새 모의 실행
-- Token/component ownership: `ui/src/styles.css`가 시각 토큰을, `ui/src/pixi/renderScene.ts`와 `ui/src/map/officeMap.ts`가 Pixi 장면과 구조화된 공간 데이터를 소유한다.
+- Token/component ownership: ZIP `index.css`를 옮긴 `ui/src/styles.css`가 모든 DOM 시각 토큰과 클래스 계약을 소유한다. `ui/src/pages/Home.tsx`가 단일 UI 셸을, `ui/src/pixi/renderScene.ts`와 `ui/src/map/officeMap.ts`가 이미지 없는 Pixi 장면만 소유한다. 이후 UI도 기존 selector/token을 우선 확장하며 별도 전역 테마를 만들지 않는다.
 
 ## Accessibility
 
@@ -75,7 +77,7 @@
 ## Responsive behavior
 
 - Supported breakpoints/devices: 1440px 이상 최적, 1024~1439px 지원, 720~1023px 축약, 719px 이하 관찰용 모바일
-- Layout adaptations: 조직 콘솔의 직원 상세는 1500px 이상에서만 고정 열이며, 그 아래에서는 중앙 화면을 줄이지 않는 오버레이/sheet다. 1380px 아래에서 좌측 내비게이션은 아이콘 레일로 축약한다. 본사/DAG의 상세는 오버레이를 유지한다. 900px 아래에서 좌측 내비게이션은 하단 탭, 명부와 상세는 sheet가 되며, 조직도는 수평 책임선을 제거하고 단일 열로 접힌다.
+- Layout adaptations: ZIP 계약대로 820px 이하에서는 sidebar를 감추고 콘텐츠·상단 바를 축약하며, 560px 이하에서는 summary cover를 감추고 조직도·업무 표·directive를 모바일 밀도로 바꾼다. 상세는 모든 크기에서 `agent-drawer`가 담당하고 본사도 같은 `content-area` 안에서만 열린다.
 - Touch/hover differences: 터치에서는 첫 탭이 선택과 툴팁을 함께 수행하며, 캔버스 드래그/휠로 팬·줌한다.
 
 ## Interaction states
@@ -114,11 +116,11 @@
 
 ## Implementation constraints
 
-- Framework/styling system: Node HTTP/API 서버 + React/TypeScript/Vite DOM shell + PixiJS 구조화 오피스
-- Design-token constraints: 새 UI 토큰은 CSS custom properties에만 정의한다.
-- Performance constraints: DPR 최대 1.25, ticker 최대 30fps, 한 층 개별 에이전트 최대 144, 애니메이션 최대 24, routine bubble 최대 20, 정적 오피스 레이어 1회 mount, 진행률-only snapshot에서 동적 장면 재생성 금지, 이미지 atlas 파일별 bounded retry/fallback. Capability summary는 task별 최신 `harness_selected` event만 사용한다. 결과 계약은 최신 60개로 제한하고 요약·항목 문자열을 서버에서 길이 제한하며, 결과 도착 애니메이션은 새 ID에 한 번만 실행한다.
+- Framework/styling system: Node HTTP/API 서버 + React/TypeScript/Vite + ZIP 기반 단일 `Home` DOM shell + 선택형 PixiJS 구조화 오피스
+- Design-token constraints: 새 UI 토큰은 `ui/src/styles.css`의 ZIP custom properties에만 정의한다. 새 기능 UI는 ZIP의 밝은 surface, primary, semantic status 색, spacing, radius 계약을 따르고 기존 UI 스타일 파일을 다시 합치거나 덮어쓰지 않는다.
+- Performance constraints: DPR 최대 1.25, ticker 최대 30fps, 한 층 개별 에이전트 최대 144, 애니메이션 최대 24, routine bubble 최대 20, 정적 오피스 레이어 1회 mount, 진행률-only snapshot에서 동적 장면 재생성 금지. 직원 마커는 런타임 이미지 로드 없이 Graphics로 만든다. Capability summary는 task별 최신 `harness_selected` event만 사용한다. 결과 계약은 최신 60개로 제한하고 요약·항목 문자열을 서버에서 길이 제한하며, 결과 도착 애니메이션은 새 ID에 한 번만 실행한다.
 - Compatibility constraints: Node.js 20+, 최신 Chromium/Edge/Firefox/Safari. 명령 활성 서버는 loopback에만 bind하고 Host/Origin 및 안전한 run ID를 검증한다. 회장 지시는 append-only `commands.jsonl`에 기록하고 실행 상태 snapshot을 직접 수정하지 않는다. 현재 모델 호출은 시작 시 캡처한 지시 snapshot을 끝까지 사용하며 새 지시는 다음 planning/DAG/validation/synthesis/judge 체크포인트부터 적용한다. 마지막 judge 중 도착한 지시는 종료 barrier가 새 judge checkpoint를 만든다. 명령 append와 `commands.closed` 전환은 PID·시각·고유 토큰을 가진 실행별 파일 락으로 직렬화하며 죽은 소유자의 락만 자동 회수한다. 브라우저 요청 ID는 idempotency key로 사용하고, 재개 시 끊긴 마지막 명령 레코드와 누락된 `directive_queued` 감사 이벤트를 복원한다. 지시를 한 건도 담을 수 없는 context 설정은 시작 전에 거부한다.
-- Test/screenshot expectations: 타입체크, 서버 단위 테스트, 128명 이상 assertion, 144명 이름 uniqueness, 최소 100개 appearance signature, 동일 agent id의 이름·외형 안정성, `render_game_to_text` 상태 검증, 실제 브라우저 데스크톱/축소 화면 육안 검사. 1280×720에서 문서 수평 overflow 0, 조직 작업면 900px 이상, 선택 상세가 조직 작업면을 재축소하지 않음, 브랜드 1줄, 주요 제어 잘림 0을 확인한다.
+- Test/screenshot expectations: 타입체크, 서버 단위 테스트, 128명 이상 assertion, 144명 이름 uniqueness, 동일 agent id의 이니셜·색상·도형 변형 안정성, 저장소 래스터 이미지 0건, `Home`의 ZIP 핵심 class 계약, `render_game_to_text` 상태 검증, 실제 브라우저 데스크톱/축소 화면 육안 검사. 1440×1000과 390×844에서 문서 수평 overflow 0, 단일 app shell, 상단 제어 및 directive/drawer 겹침 0을 확인한다.
 
 ## Open questions
 

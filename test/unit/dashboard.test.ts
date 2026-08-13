@@ -22,6 +22,10 @@ test("demo snapshot deterministically presents a 144-person, seven-department co
   assert.equal(first.agents.length, 144);
   assert.equal(first.departments.length, 7);
   assert.equal(first.metrics.totalAgents, 144);
+  assert.equal(first.logicalAgents.length, 128);
+  assert.equal(new Set(first.logicalAgents.map((agent) => agent.id)).size, 128);
+  assert.equal(new Set(first.logicalAgents.map((agent) => agent.name)).size, 128);
+  assert.ok(first.logicalAgents.every((agent) => agent.logical && agent.lineage.length === 4));
   assert.equal(new Set(first.agents.map((agent) => agent.name)).size, 144);
   assert.ok(first.agents.every((agent) => /^[가-힣]{3}$/.test(agent.name)));
   assert.ok(new Set(first.agents.map(appearanceSignature)).size >= 100);
@@ -55,7 +59,7 @@ test("snapshot exposes bounded task, team, and final outputs with verification s
   task.result = {
     taskId: task.id,
     summary: "완료 요약 ".repeat(80),
-    claims: [{ statement: "구현 완료", support: "검증 로그" }],
+    claims: [{ statement: "구현 완료", support: "검증 로그", requirementIds: ["R1"], evidenceRefs: [{ kind: "evidence", ordinal: 0 }] }],
     evidence: ["테스트", "빌드"],
     deliverables: ["대시보드 서버", "운영 문서"],
     checks: ["unit", "build"],
@@ -79,7 +83,15 @@ test("snapshot exposes bounded task, team, and final outputs with verification s
     completedAt: "2026-08-11T00:00:03.000Z",
     packet: {
       summary: "팀 결과를 통합했습니다.",
-      claims: [{ statement: "통합 완료", support: "task-1" }],
+      claims: [{ statement: "통합 완료", support: "task-1", requirementIds: ["R1"], evidenceRefs: [{ kind: "check", ordinal: 0 }] }],
+      claimLineage: [{
+        id: "claim-1", hash: "hash-1", taskId: "task-1", requirementIds: ["R1"],
+        ordinal: 0, statement: "통합 완료", support: "task-1", evidenceIds: ["evidence-1"],
+      }],
+      evidenceLineage: [{
+        id: "evidence-1", hash: "hash-2", taskId: "task-1", requirementIds: ["R1"],
+        kind: "check", ordinal: 0, content: "unit",
+      }],
       conflicts: [],
       gaps: [],
       recommendations: ["운영 배포"],
@@ -92,7 +104,12 @@ test("snapshot exposes bounded task, team, and final outputs with verification s
     goal: state.goal,
     executiveSummary: "최종 결과가 확정되었습니다.",
     answer: "최종 답변",
-    requirementsCoverage: [{ requirementId: "R1", covered: true, explanation: "task-1" }],
+    supportedClaims: [{ claimId: "claim-1", statement: "통합 완료" }],
+    requirementsCoverage: [{
+      requirementId: "R1", covered: true, explanation: "task-1 verification evidence",
+      supportingClaimIds: ["claim-1"], supportingEvidenceIds: ["evidence-1"],
+    }],
+    criticResolution: { verdict: "accept", issueResolutions: [] },
     conflicts: [],
     caveats: [],
     nextActions: ["배포"],
@@ -113,6 +130,124 @@ test("snapshot exposes bounded task, team, and final outputs with verification s
     assert.equal(snapshot.metrics.threadLocks, 0);
     assert.ok((snapshot.outputs[2]?.summary.length ?? 0) <= 280);
     assert.match(snapshot.outputs[2]?.summary ?? "", /…$/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("real snapshot projects Harness v2 organization, work orders, and council outcomes", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-v2-"));
+  const runId = "run-harness-v2";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  const state = realState(workspace, runId);
+  state.harnessV2 = {
+    orgVersion: "lab-128@2",
+    workOrders: {
+      "task-1": {
+        order: {
+          id: "task-1", revision: 2, missionId: "mission-1", requirementIds: ["R1"], objective: "검증 가능한 API 구현",
+          constraints: [], nonGoals: [], ownerTeam: "team-core", reviewerPool: ["team-qa"], risk: "high", dependencies: [],
+          inputArtifactIds: [], deliverables: ["API"], acceptanceTests: ["unit"], requiredGateIds: ["G0", "G1"],
+          toolPolicy: { allowedTools: ["shell"], network: "off", allowedDomains: [], readScopes: ["src"], writeScopes: ["src"] },
+          maxExecutionAttempts: 2, maxValidationAttempts: 2, priority: 1,
+        },
+        state: "VALIDATING", assignedAgentId: "luna-001", reviewerAgentIds: ["luna-105"],
+        executionRevision: 2, executionAttempts: 1, validationAttempts: 1,
+        artifactIds: ["artifact-api"], updatedAt: "2026-08-11T00:00:02.000Z",
+      },
+    },
+    artifactHeads: {},
+    councils: {
+      "council-sealed": {
+        agenda: {
+          councilId: "council-sealed", type: "research-evidence", question: "봉인 근거를 공개할까?", options: ["예", "아니오"],
+          criteria: { independence: 1 }, requiredEvidence: [], participantIds: ["agent-secret"], artifactAuthorIds: [],
+          maxRounds: 1, createdAt: "2026-08-11T00:00:00.000Z",
+        },
+        state: "SEALED_SUBMISSION", round: 0,
+        sealedMemos: {
+          "agent-secret": {
+            participantId: "agent-secret", position: "SEALED POSITION MUST NOT LEAK", claimIds: [], evidenceIds: [],
+            sourceGroupIds: [], risks: [], falsification: "secret", confidence: 0.8, submittedAt: "2026-08-11T00:00:00.500Z",
+          },
+        },
+        challenges: [], revisions: {}, evidenceAddedThisRound: [],
+      },
+      "council-1": {
+        agenda: {
+          councilId: "council-1", type: "architecture-review", question: "API 설계를 채택할까?", options: ["채택", "기각"],
+          criteria: { reliability: 1 }, requiredEvidence: ["test"], participantIds: ["agent-a"], artifactAuthorIds: [],
+          maxRounds: 1, createdAt: "2026-08-11T00:00:01.000Z",
+        },
+        state: "CLOSED", round: 1, sealedMemos: {}, challenges: [], revisions: {}, evidenceAddedThisRound: [],
+        decision: {
+          councilId: "council-1", outcome: "ADOPTED", evidenceClusterCount: 1, supportingParticipants: ["agent-a"],
+          minorityReports: [{ participantId: "agent-b", position: "기각", claimIds: ["claim-b"], evidenceIds: [], reason: "추가 부하 검증 필요" }],
+          blockingFindingIds: ["finding-1"], followUpWorkOrderIds: [], decidedAt: "2026-08-11T00:00:02.000Z",
+        },
+      },
+    },
+    missionCells: {},
+    messages: [],
+    missionPreflight: {
+      schemaVersion: 1, missionId: "mission-1", objective: "검증 가능한 API 구현", assumptions: [], findings: [],
+      sensitivity: [], risks: [], blockers: [], ready: true,
+    },
+    programKnowledge: {
+      status: "ready", graphHash: "a".repeat(64), nodeCount: 42, edgeCount: 77,
+      indexedAt: "2026-08-11T00:00:00.000Z", omittedFiles: 3,
+    },
+    oracleSuites: {
+      "task-1": {
+        suiteId: "oracle-task-1", suiteHash: "b".repeat(64), sourceHash: "c".repeat(64),
+        oracleCount: 6, kinds: ["example", "invariant"], hiddenCount: 1, sealedAt: "2026-08-11T00:00:00.000Z",
+      },
+    },
+    experiments: {
+      "experiment-task-1": {
+        experimentId: "experiment-task-1", workOrderId: "task-1", specDigest: "d".repeat(64),
+        status: "PREREGISTERED", observationCount: 0,
+      },
+    },
+    knowledgeCapsules: {
+      "capsule-task-1": {
+        capsuleId: "capsule-task-1", revision: 1, contentHash: "e".repeat(64),
+        kind: "success-pattern", lifecycle: "candidate",
+      },
+    },
+  };
+  await writeStateEnvelope(runDirectory, state);
+
+  try {
+    const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
+    assert.equal(snapshot.organizationV2?.totalAgents, 128);
+    assert.equal(snapshot.logicalAgents.length, 128);
+    assert.equal(new Set(snapshot.logicalAgents.map((agent) => agent.name)).size, 128);
+    assert.ok(snapshot.logicalAgents.every((agent) => agent.lineage.map(({ kind }) => kind).join("/") === "headquarters/division/team/cell"));
+    const assigned = snapshot.logicalAgents.find((agent) => agent.id === "luna-001");
+    assert.equal(assigned?.workOrderId, "task-1");
+    assert.equal(assigned?.runtime?.taskStatus, "running");
+    assert.equal(snapshot.logicalAgents.find((agent) => agent.id === "luna-105")?.logicalStatus, "reviewing");
+    assert.deepEqual(snapshot.organizationV2?.headquarters.map(({ id, allocation }) => [id, allocation]), [
+      ["command", 8], ["research", 40], ["engineering", 48], ["quality", 24], ["integration", 8],
+    ]);
+    assert.deepEqual(snapshot.workOrders?.[0], {
+      id: "task-1", revision: 2, state: "VALIDATING", objective: "검증 가능한 API 구현", owner: "luna-001",
+      reviewers: ["luna-105"], risk: "high", dependencies: [], gates: ["G0", "G1"], artifacts: ["artifact-api"],
+    });
+    const decidedCouncil = snapshot.councils?.find((council) => council.id === "council-1");
+    assert.equal(decidedCouncil?.outcome, "ADOPTED");
+    assert.equal(decidedCouncil?.minorityCount, 1);
+    assert.deepEqual(decidedCouncil?.blockingFindings, ["finding-1"]);
+    assert.doesNotMatch(JSON.stringify(snapshot.councils), /SEALED POSITION MUST NOT LEAK|sealedMemos/);
+    assert.deepEqual(snapshot.intelligenceV2, {
+      preflight: { status: "ready", assumptions: 0, blockers: 0, risks: 0 },
+      programKnowledge: { status: "ready", nodes: 42, edges: 77, omittedFiles: 3 },
+      oracles: { suites: 1, oracles: 6, hidden: 1 },
+      experiments: { preregistered: 1, observing: 0, decided: 0, observations: 0 },
+      capsules: { total: 1, candidate: 1, verified: 0, stale: 0, revoked: 0, negative: 0 },
+    });
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { ControlConflictError, type ExecutionLease } from "./types.js";
+import {
+  ControlConflictError,
+  ProcessInterruptedError,
+  type ExecutionLease,
+} from "./types.js";
 import { DurableControlStore } from "./store.js";
 
 export interface ExecutionControllerOptions {
@@ -36,6 +40,7 @@ export class ExecutionController {
   private readonly pollMs: number;
   private readonly abortController: AbortController | undefined;
   private readonly now: () => Date;
+  private launchBlockedReason: unknown;
 
   constructor(
     readonly store: DurableControlStore,
@@ -59,11 +64,24 @@ export class ExecutionController {
 
   async resume(): Promise<void> {
     await this.store.setMode("running");
+    this.launchBlockedReason = undefined;
   }
 
   async cancel(reason: unknown = new Error("Run cancelled by operator")): Promise<void> {
+    this.launchBlockedReason = new ControlConflictError("Run is cancelled", "CONTROL_CANCELLED");
     await this.store.setMode("cancelled");
     this.abortController?.abort(reason);
+  }
+
+  async interrupt(signal: "SIGINT" | "SIGTERM"): Promise<void> {
+    const reason = new ProcessInterruptedError(signal);
+    // Block this process synchronously, then durably pause before aborting active calls.
+    this.launchBlockedReason = reason;
+    try {
+      await this.store.setMode("paused");
+    } finally {
+      this.abortController?.abort(reason);
+    }
   }
 
   async updateConcurrencyCap(cap: number): Promise<void> {
@@ -81,6 +99,7 @@ export class ExecutionController {
     }
     const leaseId = randomUUID();
     while (true) {
+      if (this.launchBlockedReason) throw this.launchBlockedReason;
       throwIfAborted(signal);
       const now = this.now();
       const lease: ExecutionLease = {

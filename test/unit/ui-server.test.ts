@@ -62,9 +62,15 @@ test("UI server exposes mock runs and applies durable-style pause, resume, concu
     assert.equal((mock.status() as { mode: string }).mode, "idle");
     assert.equal(mock.snapshot().events.length, 0);
 
+    const startRequest = {
+      action: "start",
+      goal: "사용자가 승인한 Mock 목표",
+      mock: true,
+      requestId: "11111111-1111-4111-8111-111111111111",
+    };
     const start = await fetch(`${address.url}/api/ui/control`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action: "start", goal: "사용자가 승인한 Mock 목표", mock: true }),
+      body: JSON.stringify(startRequest),
     });
     assert.equal(start.status, 202);
     assert.equal((mock.status() as { mode: string }).mode, "running");

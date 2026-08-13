@@ -43,6 +43,19 @@ export const agentSchema = z.object({
   }).optional(),
 });
 
+export const logicalAgentSchema = agentSchema.extend({
+  logical: z.literal(true),
+  logicalStatus: z.enum(["available", "assigned", "working", "reviewing", "blocked", "completed"]),
+  headquartersId: z.string(),
+  divisionId: z.string(),
+  cellId: z.string(),
+  lineage: z.array(z.object({
+    id: z.string(), name: z.string(), kind: z.enum(["headquarters", "division", "team", "cell"]),
+  })).length(4),
+  workOrderId: z.string().optional(),
+  workOrderIds: z.array(z.string()),
+});
+
 export const departmentSchema = z.object({
   id: departmentId,
   name: z.string(),
@@ -80,6 +93,50 @@ export const outputArtifactSchema = z.object({
   agentId: z.string().optional(),
 });
 
+const organizationV2Schema = z.object({
+  orgVersion: z.string(),
+  totalAgents: z.number().int().nonnegative(),
+  headquarters: z.array(z.object({
+    id: z.string(), name: z.string(), allocation: z.number().int().nonnegative(),
+  })),
+  units: z.array(z.object({
+    id: z.string(), name: z.string(), kind: z.enum(["headquarters", "division", "team", "cell"]),
+    headquartersId: z.string(), parentId: z.string().nullable(), declaredHeadcount: z.number().int().nonnegative(),
+  })),
+});
+
+const workOrderV2Schema = z.object({
+  id: z.string(), revision: z.number().int().positive(), state: z.string(), objective: z.string(), owner: z.string(),
+  reviewers: z.array(z.string()), risk: z.string(), dependencies: z.array(z.string()), gates: z.array(z.string()),
+  artifacts: z.array(z.string()),
+});
+
+const councilV2Schema = z.object({
+  id: z.string(), type: z.string(), state: z.string(), question: z.string(), round: z.number().int().nonnegative(),
+  outcome: z.string().optional(), minorityCount: z.number().int().nonnegative(), blockingFindings: z.array(z.string()),
+});
+
+const intelligenceV2Schema = z.object({
+  preflight: z.object({
+    status: z.enum(["ready", "attention_required"]), assumptions: z.number().int().nonnegative(),
+    blockers: z.number().int().nonnegative(), risks: z.number().int().nonnegative(),
+  }).optional(),
+  programKnowledge: z.object({
+    status: z.enum(["ready", "unavailable"]), nodes: z.number().int().nonnegative(),
+    edges: z.number().int().nonnegative(), omittedFiles: z.number().int().nonnegative(),
+  }).optional(),
+  oracles: z.object({ suites: z.number().int().nonnegative(), oracles: z.number().int().nonnegative(), hidden: z.number().int().nonnegative() }),
+  experiments: z.object({
+    preregistered: z.number().int().nonnegative(), observing: z.number().int().nonnegative(),
+    decided: z.number().int().nonnegative(), observations: z.number().int().nonnegative(),
+  }),
+  capsules: z.object({
+    total: z.number().int().nonnegative(), candidate: z.number().int().nonnegative(),
+    verified: z.number().int().nonnegative(), stale: z.number().int().nonnegative(),
+    revoked: z.number().int().nonnegative(), negative: z.number().int().nonnegative(),
+  }),
+});
+
 const runSchema = z.object({
   id: z.string(), status: z.string(), goal: z.string(), updatedAt: z.string(),
   isStale: z.boolean().optional(), lastActivityAt: z.string().optional(),
@@ -107,6 +164,7 @@ export const snapshotSchema = z.object({
   mode: z.enum(["real", "demo"]),
   run: runSchema,
   agents: z.array(agentSchema),
+  logicalAgents: z.array(logicalAgentSchema).length(128),
   departments: z.array(departmentSchema),
   metrics: z.object({
     totalAgents: z.number(), activeAgents: z.number(), workingAgents: z.number(),
@@ -117,6 +175,10 @@ export const snapshotSchema = z.object({
   }),
   events: z.array(companyEventSchema),
   outputs: z.array(outputArtifactSchema).optional(),
+  organizationV2: organizationV2Schema.optional(),
+  workOrders: z.array(workOrderV2Schema).optional(),
+  councils: z.array(councilV2Schema).optional(),
+  intelligenceV2: intelligenceV2Schema.optional(),
   harness: z.object({
     enabled: z.boolean(), learningEnabled: z.boolean(), catalogSkills: z.number(), selections: z.number(),
     specialistCount: z.number(), skillUses: z.number(), memoriesRecalled: z.number(), learnedExperiences: z.number(),

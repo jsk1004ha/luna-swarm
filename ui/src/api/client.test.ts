@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectInitialRunId } from "./client";
+import { selectBootstrapRunId, selectInitialRunId } from "./client";
 import type { RunSummary } from "../types";
 
 function run(id: string, ownership: RunSummary["ownership"], readOnly: boolean): RunSummary {
@@ -20,5 +20,11 @@ describe("initial run selection", () => {
 
   it("resumes presentation only for a runtime owned by this UI process", () => {
     expect(selectInitialRunId([run("history", "external", true), run("current", "owned", false)])).toBe("current");
+  });
+
+  it("opens an explicitly linked historical run without changing the safe default", () => {
+    const runs = [run("history", "external", true), run("current", "owned", false)];
+    expect(selectBootstrapRunId(runs, "?runId=history")).toBe("history");
+    expect(selectBootstrapRunId(runs, "?runId=missing")).toBe("current");
   });
 });

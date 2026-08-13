@@ -167,31 +167,31 @@ Prompt budget 우선순위는 다음과 같습니다.
 3. 남은 범위 안에서 specialist/skill/experience 블록을 자른다.
 4. 전체 길이는 항상 `maxContextChars` 이하이다.
 
-## Hermes식 로컬 학습 루프
+## 관찰 전용 레거시 학습과 Evolution Harness v2
 
-여기서 학습은 모델 파라미터 업데이트가 아닙니다. 완료된 실행의 검증 신호가 다음 실행의 routing과 procedural recall을 개선하는 폐루프입니다.
+여기서 학습은 모델 파라미터 업데이트가 아닙니다. 기존 learning ledger는 진단을 위한 약한 관찰 데이터이며 실행 routing이나 자동 승격에 사용하지 않습니다. 운영 설정에서 `learningAutoApply=true`는 거부됩니다.
 
 ```text
 durable run state/events
-  → terminal task metadata only
-  → per-run atomic learning record
-  → next-run frozen snapshot
-  → train/holdout 분리 정책 후보 평가
-  → versioned promotion 또는 rollback
-  → scoped skill performance + experience retrieval
-  → bounded, explicitly untrusted prompt hints
+  → workload별 Stable Bundle snapshot
+  → immutable Decision Trace
+  → Trace에 결합된 L3/L4 Objective Outcome Receipt
+  → 동일 case/environment/budget의 paired evaluation
+  → operator-only generation-CAS promotion
+  → 다음 run부터 새 Stable 사용
+  → 이상 시 이전 Stable rollback + 실패 Bundle quarantine
 ```
 
 - 저장: task kind, 부서, 위험도, 시도 수, manager/감사 결과, specialist/skill/memory ID, 고정된 품질 신호
 - 비저장: 원문 목표, 프롬프트, 응답, 코드, URL, credential, chain-of-thought
 - positive memory: accepted 결과가 몇 번의 시도와 어떤 감사 합의로 통과했는지에 대한 일반화된 절차 교훈
 - negative memory: 실패 내용 자체가 아니라 더 이른 반증·증거 확인·escalation이 필요했다는 고정된 경고
-- 적용: 동일 부서/작업 종류/skill overlap에만 제한하고 `learningMinSamples` 전에는 관측 성과가 skill 순위를 바꾸지 않음
-- 승격: 과거 실행으로 만든 후보가 최신 실행 holdout에서 비회귀와 최소 개선폭을 통과해야 `policy.json`의 새 활성 버전이 됨
-- 드리프트 방지: 실행 시작의 snapshot은 실행 중 바뀌지 않으며 새 경험은 다음 실행부터 사용
-- rollback: `learning --rollback`으로 직전 검증 버전 또는 보정 없는 기준선으로 복구하고, 같은 버전은 새 증거 없이 자동 재승격하지 않음. `learningEnabled`/`learningAutoApply`로 기록과 적용도 각각 중단할 수 있음
+- 적용: 레거시 경험과 `policy.json`은 관찰·감사 전용이며 실행 skill 순위를 바꾸지 않음
+- 승격: L3/L4 Outcome Receipt에 결합된 paired evaluation이 hard gate·비회귀·최소 개선 조건을 통과한 경우에만 operator가 수동 승격
+- 드리프트 방지: run 시작의 workload별 Bundle snapshot은 실행 중 바뀌지 않으며 새 Stable은 다음 run부터 사용
+- rollback: expected generation을 요구하는 CAS로 이전 Stable을 복구하고 내려간 Bundle은 quarantine하여 자동 재승격을 차단
 
-학습 쓰기 실패는 본 업무의 완료 상태를 실패로 바꾸지 않고 `learning_failed` advisory event로 남깁니다. 실행 상태가 유일한 사실 원본이며 learning record는 언제든 그 상태에서 다시 만들 수 있는 파생 데이터입니다.
+레거시 학습 쓰기 실패는 본 업무의 완료 상태를 실패로 바꾸지 않고 `learning_failed` advisory event로 남깁니다. 반면 새 run의 Bundle pin 무결성, Trace/Outcome identity, 승격 receipt 검증은 실행·승격의 fail-closed 경계입니다.
 
 ## 적응형 동시성
 

@@ -65,6 +65,34 @@ function agentAt(index: number): Agent {
 
 export function createMockSnapshot(count = 30): Snapshot {
   const agents = Array.from({ length: count }, (_, index) => agentAt(index));
+  const logicalAgents = Array.from({ length: 128 }, (_, index) => {
+    const agent = agentAt(index);
+    const headquartersId = agent.department === "executive" || agent.department === "strategy"
+      ? "command"
+      : agent.department === "risk" || agent.department === "quality"
+        ? "quality"
+        : agent.department;
+    const divisionId = `hq:${headquartersId}/division:${agent.department}`;
+    const teamId = `${divisionId}/team:${Math.floor(index / 4) + 1}`;
+    const cellId = `${teamId}/cell:01`;
+    return {
+      ...agent,
+      id: `luna-${String(index + 1).padStart(3, "0")}`,
+      logical: true as const,
+      logicalStatus: agent.activity === "done" ? "completed" as const : agent.activity === "blocked" ? "blocked" as const : agent.isActive ? "working" as const : "available" as const,
+      headquartersId,
+      divisionId,
+      teamId,
+      cellId,
+      lineage: [
+        { id: `hq:${headquartersId}`, name: `${headquartersId} HQ`, kind: "headquarters" as const },
+        { id: divisionId, name: agent.department, kind: "division" as const },
+        { id: teamId, name: `Team ${Math.floor(index / 4) + 1}`, kind: "team" as const },
+        { id: cellId, name: "Cell 01", kind: "cell" as const },
+      ],
+      workOrderIds: agent.taskId ? [agent.taskId] : [],
+    };
+  });
   const departmentRows: Department[] = departments.map((id) => {
     const members = agents.filter((agent) => agent.department === id);
     return {
@@ -123,6 +151,7 @@ export function createMockSnapshot(count = 30): Snapshot {
       updatedAt: now.toISOString(),
     },
     agents,
+    logicalAgents,
     departments: departmentRows,
     metrics: {
       totalAgents: agents.length,

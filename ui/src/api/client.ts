@@ -8,7 +8,7 @@ const SNAPSHOT_RETRY_DELAYS_MS = [0, 80, 180, 360] as const;
 let disconnectCurrent: (() => void) | null = null;
 
 export type UiControlPayload =
-  | { action: "start"; goal: string; mock?: boolean; maxConcurrency?: number }
+  | { action: "start"; goal: string; mock?: boolean; maxConcurrency?: number; requestId?: string }
   | { action: "pause" | "resume" | "cancel"; runId: string }
   | { action: "concurrency"; runId: string; value: number }
   | { action: "instruction"; runId: string; text: string; taskId?: string; trigger?: "next_turn" | "next_retry" }
@@ -65,6 +65,12 @@ export function selectInitialRunId(runs: RunSummary[]): string | null {
   return runs.find((run) => run.ownership === "owned" && run.readOnly !== true)?.id ?? null;
 }
 
+export function selectBootstrapRunId(runs: RunSummary[], search: string): string | null {
+  const requestedRunId = new URLSearchParams(search).get("runId");
+  if (requestedRunId && runs.some((run) => run.id === requestedRunId)) return requestedRunId;
+  return selectInitialRunId(runs);
+}
+
 export async function sendUiControl(payload: UiControlPayload): Promise<UiControlResponse> {
   const response = await fetch(apiUrl("/api/ui/control"), {
     method: "POST",
@@ -93,7 +99,7 @@ export async function bootstrapCompany(): Promise<() => void> {
   try {
     const runs = await loadRuns();
     store.setRuns(runs);
-    const runId = selectInitialRunId(runs);
+    const runId = selectBootstrapRunId(runs, window.location.search);
     if (!runId) {
       store.setError(null);
       store.setConnection("live");

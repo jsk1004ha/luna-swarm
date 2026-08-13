@@ -72,7 +72,7 @@ export class AtomicRunStore {
 
   constructor(
     workspace: string,
-    stateDirectory: string,
+    readonly stateDirectory: string,
     readonly runId: string,
   ) {
     if (!isValidRunId(runId)) {

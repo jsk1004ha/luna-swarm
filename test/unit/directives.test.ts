@@ -12,6 +12,9 @@ import {
 import { DEFAULT_CONFIG, validateConfig } from "../../src/config.js";
 import { recordsFromPlan, teamRecordsFromPlan } from "../../src/dag.js";
 import { SwarmOrchestrator } from "../../src/orchestrator.js";
+import { organizationRegistryV2 } from "../../src/harness-v2/organization-registry.js";
+import { forgeOracleSuite } from "../../src/harness-v2/oracle-forge.js";
+import { createWorkOrderRecord, workOrderFromTask } from "../../src/harness-v2/work-orders.js";
 import { companySnapshot } from "../../src/organization.js";
 import { AgentGateway } from "../../src/runtime/gateway.js";
 import { AtomicRunStore } from "../../src/store.js";
@@ -204,6 +207,40 @@ test("resume keeps acknowledged directives active without duplicating applied ev
       threadIds: {},
       metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
     };
+    const registry = organizationRegistryV2();
+    initial.harnessV2 = {
+      orgVersion: "lab-128@2",
+      workOrders: {},
+      artifactHeads: {},
+      councils: {},
+      missionCells: {},
+      messages: [],
+      oracleSuites: {},
+      experiments: {},
+      knowledgeCapsules: {},
+    };
+    for (const task of Object.values(initial.tasks)) {
+      const order = workOrderFromTask(task, { missionId: `mission:${initial.runId}`, registry });
+      initial.harnessV2.workOrders[task.id] = createWorkOrderRecord(
+        order,
+        task.dependencies.length > 0 ? "BLOCKED" : "READY",
+        now,
+        registry,
+      );
+      const forged = forgeOracleSuite({
+        workOrder: order,
+        preflight: { phase: "pre-implementation", implementationRevision: 0 },
+      });
+      initial.harnessV2.oracleSuites![task.id] = {
+        suiteId: forged.suite.id,
+        suiteHash: forged.suite.suiteHash,
+        sourceHash: forged.suite.sourceHash,
+        oracleCount: forged.suite.oracles.length,
+        kinds: [...new Set(forged.suite.oracles.map((oracle) => oracle.kind))].sort(),
+        hiddenCount: forged.suite.oracles.filter((oracle) => oracle.kind === "hidden").length,
+        sealedAt: now,
+      };
+    }
     await store.save(initial);
     const backend = new MockAgentBackend(demoHandler);
     const gateway = new AgentGateway({ backend, config: cfg });
@@ -407,7 +444,7 @@ test("directive contexts have a validated minimum and fail fast when bypassed", 
   }
 });
 
-test("every model prompt stays within maxContextChars even without chairman directives", async () => {
+test("model prompts stay bounded and required structured context fails closed instead of truncating", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-context-bound-"));
   try {
     const cfg = {
@@ -430,7 +467,15 @@ test("every model prompt stays within maxContextChars even without chairman dire
       workspace,
     });
     const state = await orchestrator.start(`long goal ${"x".repeat(8_000)}`);
-    assert.equal(state.status, "completed");
+    assert.equal(state.status, "failed");
+    assert.equal(
+      backend.calls.filter((request) => request.purpose === "execute_task").length,
+      0,
+      "required structured frames must fail before a worker model receives truncated context",
+    );
+    assert.ok(Object.values(state.tasks).some((task) =>
+      task.status === "failed" && /cannot fit without truncation/i.test(task.error ?? ""),
+    ));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

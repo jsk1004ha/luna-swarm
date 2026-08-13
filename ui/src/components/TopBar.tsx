@@ -3,12 +3,21 @@ import { sendUiControl, switchRun } from "../api/client";
 import { useCompanyStore } from "../store/companyStore";
 
 const CONNECTION_LABEL = { connecting: "연결 중", live: "실시간", stale: "실행 정체", offline: "오프라인", mock: "로컬 데모" };
-const RUN_STATUS_LABEL: Record<string, string> = { idle: "명령 대기", running: "실행 중", paused: "일시 정지", cancelled: "취소됨", completed: "완료" };
+const RUN_STATUS_LABEL: Record<string, string> = {
+  idle: "명령 대기",
+  running: "실행 중",
+  paused: "일시 정지",
+  interrupted: "중단됨 · 재개 가능",
+  cancelled: "취소됨",
+  completed: "완료",
+};
 
 export function TopBar() {
   const snapshot = useCompanyStore((state) => state.snapshot);
   const runs = useCompanyStore((state) => state.runs);
   const connection = useCompanyStore((state) => state.connection);
+  const search = useCompanyStore((state) => state.search);
+  const setSearch = useCompanyStore((state) => state.setSearch);
   const setEventOpen = useCompanyStore((state) => state.setEventOpen);
   const [busy, setBusy] = useState(false);
   const [controlMessage, setControlMessage] = useState("");
@@ -36,14 +45,18 @@ export function TopBar() {
   };
 
   return <header className="topbar">
-    <div className="brand" aria-label="Luna Swarm">
-      <span className="brand-moon" aria-hidden="true" />
-      <span><strong>LUNA SWARM</strong><small>{RUN_STATUS_LABEL[snapshot?.run.status ?? ""] ?? "OPERATIONS"}</small></span>
+    <div className="top-context" aria-label="현재 실행">
+      <span>Luna</span><i aria-hidden="true">/</i><span>Projects</span><i aria-hidden="true">/</i>
+      <strong>{snapshot?.run.id ?? "Command center"}</strong>
     </div>
-    <div className="active-overview"><span>활성</span><strong>{metrics?.activeAgents ?? 0}</strong><em>/ {metrics?.totalAgents ?? 0}</em></div>
+    <label className="top-search">
+      <span aria-hidden="true">⌕</span><span className="sr-only">에이전트와 업무 검색</span>
+      <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search agents, tasks, roles…" />
+      <kbd>⌘ K</kbd>
+    </label>
     <div className="global-progress" title={snapshot?.run.goal}>
       <i><b style={{ width: `${metrics?.progress ?? 0}%` }} /></i>
-      <span>전체 진행률 <strong>{metrics?.progress ?? 0}%</strong></span>
+      <span><small>{RUN_STATUS_LABEL[snapshot?.run.status ?? ""] ?? "OPERATIONS"}</small><strong>{metrics?.progress ?? 0}%</strong></span>
       <svg viewBox="0 0 100 28" role="img" aria-label="부서별 진행 분포"><polyline points={points} /></svg>
     </div>
     <div className="run-selector">
@@ -51,6 +64,7 @@ export function TopBar() {
       <select id="run-picker" value={snapshot?.run.id ?? ""} onChange={(event) => event.target.value && void switchRun(event.target.value)}><option value="">실행 기록 선택</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.id}</option>)}</select>
     </div>
     <div className="top-actions">
+      <span className="active-overview"><span>ACTIVE</span><strong>{metrics?.activeAgents ?? 0}</strong><em>/ {metrics?.totalAgents ?? 0}</em></span>
       <button className="pause-control" disabled={!canPause || busy} onClick={() => void togglePause()} title={controlMessage || (mode === "paused" ? "실행 재개" : "신규 호출 일시 정지")}><span aria-hidden="true">{mode === "paused" ? "▶" : "Ⅱ"}</span>{busy ? "처리 중" : mode === "paused" ? "재개" : "일시정지"}</button>
       <button onClick={() => setEventOpen(true)} aria-label="실행 기록 열기">◉</button>
       <button onClick={() => setEventOpen(true)} aria-label="알림 열기">♧</button>

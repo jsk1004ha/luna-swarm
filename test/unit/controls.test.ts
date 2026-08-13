@@ -5,9 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { demoPlan } from "../../src/backend/mock-backend.js";
 import {
+  AtomicStartGate,
   ControlConflictError,
   DurableControlStore,
   ExecutionController,
+  ProcessInterruptedError,
   changeTaskPriority,
   type OperatorInstruction,
 } from "../../src/controls/index.js";
@@ -124,6 +126,95 @@ test("cancel aborts active calls, blocks new leases, and is terminal", async () 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("process interruption durably pauses, aborts active calls, and can resume", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "luna-controls-interrupt-"));
+  try {
+    const abortController = new AbortController();
+    const store = new DurableControlStore(directory, "run-interrupt", {
+      initialConcurrencyCap: 2,
+    });
+    const controls = new ExecutionController(store, { abortController });
+    await controls.init();
+    const active = await controls.acquire("active-call");
+    const interruption = controls.interrupt("SIGTERM");
+    await assert.rejects(
+      controls.acquire("new-call"),
+      (error) => error instanceof ProcessInterruptedError && error.signal === "SIGTERM",
+    );
+    await interruption;
+    assert.equal((await store.load()).mode, "paused");
+    assert.equal(abortController.signal.reason instanceof ProcessInterruptedError, true);
+    await active.release();
+
+    const resumed = new ExecutionController(store);
+    await resumed.init();
+    await resumed.resume();
+    const permit = await resumed.acquire("resumed-call");
+    await permit.release();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("atomic start gate launches once, replays request IDs, and releases failed reservations", async () => {
+  const gate = new AtomicStartGate<{ accepted: boolean; runId?: string; code?: string }>();
+  let launches = 0;
+  let finish!: (value: { accepted: boolean; runId: string }) => void;
+  const starter = () => {
+    launches += 1;
+    return new Promise<{ accepted: boolean; runId: string }>((resolve) => { finish = resolve; });
+  };
+  const requests = Array.from({ length: 100 }, (_, index) => gate.start(
+    `request-${index}`,
+    () => ({ accepted: false, code: "RUN_ALREADY_ACTIVE" }),
+    starter,
+  ));
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(launches, 1);
+  finish({ accepted: true, runId: "run-once" });
+  const results = await Promise.all(requests);
+  assert.equal(results.filter((result) => result.accepted).length, 1);
+  assert.equal(results.filter((result) => result.code === "RUN_ALREADY_ACTIVE").length, 99);
+
+  const replay = await gate.start(
+    "request-0",
+    () => ({ accepted: false, code: "RUN_ALREADY_ACTIVE" }),
+    starter,
+  );
+  assert.equal(replay.runId, "run-once");
+
+  for (let index = 100; index < 1_200; index += 1) {
+    await gate.start(
+      `request-${index}`,
+      () => ({ accepted: false, code: "RUN_ALREADY_ACTIVE" }),
+      starter,
+    );
+  }
+  const activeReplay = await gate.start(
+    "request-0",
+    () => ({ accepted: false, code: "RUN_ALREADY_ACTIVE" }),
+    starter,
+  );
+  assert.equal(activeReplay.runId, "run-once", "cache pressure retains the active request replay");
+
+  const competing = await gate.start(
+    "22222222-2222-4222-8222-222222222222",
+    () => ({ accepted: false, code: "RUN_ALREADY_ACTIVE" }),
+    starter,
+  );
+  assert.equal(competing.code, "RUN_ALREADY_ACTIVE");
+  assert.equal(launches, 1);
+
+  gate.release();
+  const failed = await gate.start(undefined, () => ({ accepted: false }), async () => ({ accepted: false }));
+  assert.equal(failed.accepted, false);
+  const retry = gate.start(undefined, () => ({ accepted: false }), starter);
+  await new Promise<void>((resolve) => queueMicrotask(resolve));
+  assert.equal(launches, 2);
+  finish({ accepted: true, runId: "run-after-failure" });
+  assert.equal((await retry).runId, "run-after-failure");
 });
 
 test("operator instructions are delivered only to their next trigger and replay safely by consumer", async () => {

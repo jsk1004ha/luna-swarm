@@ -1,6 +1,6 @@
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { DEPARTMENT_META } from "../data/mock";
-import { standingAvatarIndex } from "../data/avatar";
+import { avatarInitials, standingAvatarIndex } from "../data/avatar";
 import { filteredAgents, useCompanyStore } from "../store/companyStore";
 import type { Activity, Agent } from "../types";
 
@@ -24,15 +24,19 @@ export function DirectoryPanel() {
   const setSearch = useCompanyStore((state) => state.setSearch);
   const selectAgent = useCompanyStore((state) => state.selectAgent);
   const setMobilePanel = useCompanyStore((state) => state.setMobilePanel);
+  const [visibleCount, setVisibleCount] = useState(40);
   const agents = useMemo(
     () => filteredAgents({ snapshot, selectedDepartment, activityFilter, search }),
     [snapshot, selectedDepartment, activityFilter, search],
   );
+  useEffect(() => setVisibleCount(40), [selectedDepartment, activityFilter, search, snapshot?.run.id]);
+  const rosterSize = snapshot?.logicalAgents.length ?? snapshot?.agents.length ?? 0;
+  const visibleAgents = agents.slice(0, visibleCount);
   return (
     <aside className={`directory-panel ${mobilePanel === "directory" ? "is-mobile-open" : ""}`} aria-label="회사 명부와 필터">
       <header className="panel-head">
         <span><small>DIRECTORY</small><strong>조직 명부</strong></span>
-        <span className="count-chip">{agents.length}/{snapshot?.agents.length ?? 0}</span>
+        <span className="count-chip">{agents.length}/{rosterSize}</span>
         <button className="close-panel mobile-only" onClick={() => setMobilePanel(null)} aria-label="명부 닫기">×</button>
       </header>
       <label className="search-field">
@@ -63,7 +67,8 @@ export function DirectoryPanel() {
       <section className="roster-section" aria-labelledby="employees-title">
         <div className="section-title"><h2 id="employees-title">직원</h2><small>{agents.length}명</small></div>
         <div className="roster" role="list">
-          {agents.map((agent) => <RosterRow key={agent.id} agent={agent} selected={selectedAgentId === agent.id} onSelect={selectAgent} />)}
+          {visibleAgents.map((agent) => <RosterRow key={agent.id} agent={agent} selected={selectedAgentId === agent.id} onSelect={selectAgent} />)}
+          {visibleCount < agents.length && <button className="roster-more" onClick={() => setVisibleCount((count) => Math.min(agents.length, count + 40))}>직원 {Math.min(40, agents.length - visibleCount)}명 더 보기</button>}
           {!agents.length && <p className="empty-copy">조건에 맞는 직원이 없습니다.<br />필터를 초기화해 보세요.</p>}
         </div>
       </section>
@@ -73,7 +78,7 @@ export function DirectoryPanel() {
 
 const RosterRow = memo(function RosterRow({ agent, selected, onSelect }: { agent: Agent; selected: boolean; onSelect: (id: string) => void }) {
   return <button role="listitem" className={`roster-row ${selected ? "is-selected" : ""}`} onClick={() => onSelect(agent.id)}>
-    <span className={`mini-avatar avatar-${standingAvatarIndex(agent)}`} aria-hidden="true"><i style={{ background: DEPARTMENT_META[agent.department].css }} /></span>
+    <span className={`mini-avatar avatar-${standingAvatarIndex(agent)}`} aria-hidden="true">{avatarInitials(agent)}<i style={{ background: DEPARTMENT_META[agent.department].css }} /></span>
     <span><strong>{agent.name}</strong><small>{agent.taskTitle}</small></span>
     <em>{rankLabel(agent.rank)}</em>
   </button>;

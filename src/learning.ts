@@ -5,11 +5,49 @@ import type { CapabilityInput, SkillPerformance } from "./capabilities.js";
 import type { Department, RunState, TaskRecord, TaskRisk } from "./types.js";
 
 export type LearningOutcome = "accepted" | "failed";
+export type LearningRewardRole = "worker" | "manager" | "validator";
+export type LearningEvidenceClass =
+  | "weak_observation"
+  | "evolution_objective_receipt_l3"
+  | "evolution_objective_receipt_l4";
+
+export interface EvolutionObjectiveReceipt {
+  level: "L3" | "L4";
+  promotionEligible: true;
+  receiptRef: {
+    id: `outcome-receipt:${string}`;
+    revision: number;
+    contentHash: string;
+  };
+}
+
+export interface RoleSkillAttribution {
+  worker: string[];
+  manager: string[];
+  validator: string[];
+}
+
+export interface RoleRewards {
+  worker: {
+    accepted: boolean;
+    quality: number;
+  };
+  manager: {
+    accepted: boolean;
+    quality: number;
+  };
+  validator: {
+    accepted: boolean;
+    quality: number;
+  };
+}
 
 export interface HarnessTrace {
   specialistIds: string[];
+  /** @deprecated Unscoped skill IDs are never rewarded because they may mix agent roles. */
   skillIds: string[];
   memoryIds: string[];
+  skillIdsByRole?: Partial<Record<LearningRewardRole, string[]>>;
 }
 
 export interface LearningExperience {
@@ -21,6 +59,8 @@ export interface LearningExperience {
   taskKind: string;
   risk: TaskRisk;
   outcome: LearningOutcome;
+  evidenceClass: LearningEvidenceClass;
+  objectiveReceipt?: EvolutionObjectiveReceipt;
   attempts: number;
   quality: number;
   managerAccepted: boolean;
@@ -28,6 +68,8 @@ export interface LearningExperience {
   auditTotal: number;
   specialistIds: string[];
   skillIds: string[];
+  skillAttribution?: RoleSkillAttribution;
+  roleRewards?: RoleRewards;
   memoryIds: string[];
   signals: string[];
   lesson: string;
@@ -87,13 +129,25 @@ const MAX_LEARNING_RECORD_BYTES = 4 * 1024 * 1024;
 
 export class LearningSnapshot {
   private readonly experiences: LearningExperience[];
+  readonly records: LearningRunRecord[];
 
-  constructor(readonly records: LearningRunRecord[]) {
-    this.experiences = records.flatMap((record) => record.experiences);
+  constructor(records: LearningRunRecord[]) {
+    // Pre-classification records remain readable, but omission can never imply
+    // verification. Historical experience is observation-only by default.
+    this.records = records.map((record) => ({
+      ...record,
+      experiences: record.experiences.map((experience) => ({
+        ...experience,
+        evidenceClass: experience.evidenceClass ?? "weak_observation",
+      })),
+    }));
+    this.experiences = this.records.flatMap((record) => record.experiences);
   }
 
   performanceFor(input: CapabilityInput): Map<string, SkillPerformance> {
-    const matched = this.experiences.filter((experience) => relevanceScope(experience, input));
+    const matched = this.experiences.filter(
+      (experience) => isVerifiedEvolutionObjectiveReceipt(experience) && relevanceScope(experience, input),
+    );
     const buckets = new Map<string, {
       uses: number;
       accepted: number;
@@ -102,7 +156,8 @@ export class LearningSnapshot {
       quality: number;
     }>();
     for (const experience of matched) {
-      for (const skillId of experience.skillIds) {
+      const reward = rewardForRole(experience, input.role);
+      for (const skillId of skillIdsForRole(experience, input.role)) {
         const bucket = buckets.get(skillId) ?? {
           uses: 0,
           accepted: 0,
@@ -111,10 +166,10 @@ export class LearningSnapshot {
           quality: 0,
         };
         bucket.uses += 1;
-        bucket.accepted += experience.outcome === "accepted" ? 1 : 0;
-        bucket.failed += experience.outcome === "failed" ? 1 : 0;
-        bucket.reworked += experience.attempts > 1 ? 1 : 0;
-        bucket.quality += experience.quality;
+        bucket.accepted += reward.accepted ? 1 : 0;
+        bucket.failed += reward.accepted ? 0 : 1;
+        bucket.reworked += input.role === "worker" && experience.attempts > 1 ? 1 : 0;
+        bucket.quality += reward.quality;
         buckets.set(skillId, bucket);
       }
     }
@@ -140,12 +195,14 @@ export class LearningSnapshot {
     if (limit <= 0) return [];
     const selectedSkills = new Set(skillIds);
     return this.experiences
+      .filter(isVerifiedEvolutionObjectiveReceipt)
       .map((experience, index) => {
         let score = 0;
         if (input.department === experience.department) score += 6;
         if (input.taskKind && normalizedIncludes(input.taskKind, experience.taskKind)) score += 7;
         if (input.taskRisk === experience.risk) score += 1;
-        score += experience.skillIds.filter((id) => selectedSkills.has(id)).length * 3;
+        score += skillIdsForRole(experience, input.role)
+          .filter((id) => selectedSkills.has(id)).length * 3;
         score += experience.outcome === "accepted" ? 1 : 0;
         score += experience.quality * 2;
         score += Math.max(0, 1 - index / Math.max(1, this.experiences.length));
@@ -168,7 +225,11 @@ export class LearningSnapshot {
   }
 
   summary(minSamples: number): LearningSummary {
-    const skills = new Set(this.experiences.flatMap((experience) => experience.skillIds));
+    const skills = new Set(this.experiences.flatMap((experience) => [
+      ...skillIdsForRole(experience, "worker"),
+      ...skillIdsForRole(experience, "manager"),
+      ...skillIdsForRole(experience, "validator"),
+    ]));
     const patterns = new Map<string, { uses: number; accepted: number }>();
     for (const experience of this.experiences) {
       const key = `${experience.department}:${experience.taskKind}`;
@@ -278,6 +339,9 @@ export class LearningStore {
               specialistIds: old.specialistIds,
               skillIds: old.skillIds,
               memoryIds: old.memoryIds,
+              ...(old.skillAttribution
+                ? { skillIdsByRole: structuredClone(old.skillAttribution) }
+                : {}),
             }
           : undefined;
         return experienceFromTask(
@@ -338,18 +402,60 @@ function experienceFromTask(
   const confidence = task.result?.confidence ?? 0;
   const auditRatio = audits.length > 0 ? auditAccepted / audits.length : 0;
   const attemptPenalty = Math.min(0.25, Math.max(0, task.attempts - 1) * 0.08);
+  const evidencePresent = (task.result?.evidence.length ?? 0) > 0;
+  const checksPresent = (task.result?.checks.length ?? 0) > 0;
+  const managerAccepted = manager?.verdict === "accept";
   const quality = clamp(
-    (outcome === "accepted" ? 0.55 : 0.05) + auditRatio * 0.25 + confidence * 0.2 - attemptPenalty,
+    (outcome === "accepted" ? 0.4 : 0.05) +
+      (managerAccepted ? 0.25 : 0) +
+      auditRatio * 0.3 +
+      (evidencePresent ? 0.025 : 0) +
+      (checksPresent ? 0.025 : 0) -
+      attemptPenalty,
     0,
     1,
   );
+  const skillAttribution: RoleSkillAttribution = {
+    worker: unique(trace?.skillIdsByRole?.worker ?? []),
+    manager: unique(trace?.skillIdsByRole?.manager ?? []),
+    validator: unique(trace?.skillIdsByRole?.validator ?? []),
+  };
+  const roleRewards: RoleRewards = {
+    worker: {
+      accepted: outcome === "accepted",
+      quality,
+    },
+    // A manager never learns from its own vote. Independent validators plus
+    // observable artifact gates are the manager's reward authority.
+    manager: {
+      accepted: outcome === "accepted" && auditRatio >= 2 / 3 && evidencePresent && checksPresent,
+      quality: clamp(
+        (outcome === "accepted" ? 0.4 : 0.05) + auditRatio * 0.5 +
+          (evidencePresent ? 0.05 : 0) + (checksPresent ? 0.05 : 0) - attemptPenalty,
+        0,
+        1,
+      ),
+    },
+    // Validators are recorded as a cohort because current traces do not identify
+    // individual validators. Their own consensus cannot reward them; the manager's
+    // independent decision and observable artifact gates do.
+    validator: {
+      accepted: outcome === "accepted" && managerAccepted && evidencePresent && checksPresent,
+      quality: clamp(
+        (outcome === "accepted" ? 0.4 : 0.05) + (managerAccepted ? 0.5 : 0) +
+          (evidencePresent ? 0.05 : 0) + (checksPresent ? 0.05 : 0) - attemptPenalty,
+        0,
+        1,
+      ),
+    },
+  };
   const signals: string[] = [];
   if (task.attempts > 1 && outcome === "accepted") signals.push("rework-recovered");
   if (task.attempts > 1) signals.push("multiple-attempts");
   if (manager?.verdict === "reject") signals.push("manager-rejected");
   if (auditAccepted < audits.length) signals.push("audit-disagreement");
-  if ((task.result?.evidence.length ?? 0) === 0) signals.push("evidence-empty");
-  if ((task.result?.checks.length ?? 0) === 0) signals.push("checks-empty");
+  if (!evidencePresent) signals.push("evidence-empty");
+  if (!checksPresent) signals.push("checks-empty");
   if ((task.result?.uncertainties.length ?? 0) > 0) signals.push("uncertainty-declared");
   if (confidence < 0.6) signals.push("low-confidence");
   if (outcome === "failed") signals.push("terminal-failure");
@@ -362,13 +468,18 @@ function experienceFromTask(
     taskKind: normalizeLabel(task.kind),
     risk: task.risk,
     outcome,
+    evidenceClass: "weak_observation",
     attempts: task.attempts,
     quality,
-    managerAccepted: manager?.verdict === "accept",
+    managerAccepted,
     auditAccepted,
     auditTotal: audits.length,
     specialistIds: unique(trace?.specialistIds ?? []),
+    // Retained only for record/display compatibility. Reward attribution reads the
+    // role-scoped field below and deliberately ignores this legacy merged list.
     skillIds: unique(trace?.skillIds ?? []),
+    skillAttribution,
+    roleRewards,
     memoryIds: unique(trace?.memoryIds ?? []),
     signals: unique(signals),
     lesson: learningLesson(outcome, task.attempts, signals),
@@ -393,6 +504,48 @@ function relevanceScope(experience: LearningExperience, input: CapabilityInput):
   if (input.department === experience.department) return true;
   if (input.taskKind && normalizedIncludes(input.taskKind, experience.taskKind)) return true;
   return input.role === "planner" || input.role === "architect" || input.role === "judge";
+}
+
+function skillIdsForRole(
+  experience: LearningExperience,
+  role: CapabilityInput["role"],
+): string[] {
+  // Historical records predate role-aware tracing. They remain available as memories,
+  // but cannot safely update skill performance because their role is unknowable.
+  if (role === "worker" || role === "manager" || role === "validator") {
+    return experience.skillAttribution?.[role] ?? [];
+  }
+  return [];
+}
+
+function rewardForRole(
+  experience: LearningExperience,
+  role: CapabilityInput["role"],
+): { accepted: boolean; quality: number } {
+  const rewards = experience.roleRewards;
+  if (!rewards) return { accepted: false, quality: 0 };
+  if (role === "worker") {
+    return rewards.worker;
+  }
+  if (role === "manager") {
+    return rewards.manager;
+  }
+  if (role === "validator") {
+    return rewards.validator;
+  }
+  return { accepted: false, quality: 0 };
+}
+
+export function isVerifiedEvolutionObjectiveReceipt(
+  experience: Pick<LearningExperience, "evidenceClass" | "objectiveReceipt">,
+): boolean {
+  const receipt = experience.objectiveReceipt;
+  if (!receipt || receipt.promotionEligible !== true) return false;
+  if (!/^outcome-receipt:[0-9a-f]{32}$/.test(receipt.receiptRef.id)) return false;
+  if (!Number.isInteger(receipt.receiptRef.revision) || receipt.receiptRef.revision < 1) return false;
+  if (!SHA256.test(receipt.receiptRef.contentHash)) return false;
+  return (experience.evidenceClass === "evolution_objective_receipt_l3" && receipt.level === "L3") ||
+    (experience.evidenceClass === "evolution_objective_receipt_l4" && receipt.level === "L4");
 }
 
 function normalizedIncludes(left: string, right: string): boolean {
@@ -450,6 +603,8 @@ function isLearningExperience(value: unknown, recordRunId: string): value is Lea
     !SAFE_LABEL.test(value.taskKind) ||
     !["low", "medium", "high"].includes(String(value.risk)) ||
     (value.outcome !== "accepted" && value.outcome !== "failed") ||
+    !validEvidenceClass(value.evidenceClass) ||
+    !validObjectiveReceipt(value.evidenceClass, value.objectiveReceipt) ||
     !Number.isInteger(value.attempts) ||
     (value.attempts as number) < 0 ||
     (value.attempts as number) > 10 ||
@@ -465,6 +620,9 @@ function isLearningExperience(value: unknown, recordRunId: string): value is Lea
     (value.auditTotal as number) > 7 ||
     !safeStringArray(value.specialistIds, SAFE_REFERENCE, 64) ||
     !safeStringArray(value.skillIds, SAFE_REFERENCE, 64) ||
+    !validSkillAttribution(value.skillAttribution) ||
+    !validRoleRewards(value.roleRewards) ||
+    !roleRewardsMatchExperience(value) ||
     !safeStringArray(value.memoryIds, SAFE_REFERENCE, 64) ||
     !safeStringArray(value.signals, SAFE_REFERENCE, LEARNING_SIGNALS.size) ||
     !(value.signals as string[]).every((signal) => LEARNING_SIGNALS.has(signal)) ||
@@ -477,6 +635,91 @@ function isLearningExperience(value: unknown, recordRunId: string): value is Lea
     value.attempts as number,
     value.signals as string[],
   );
+}
+
+function validEvidenceClass(value: unknown): value is LearningEvidenceClass | undefined {
+  return value === undefined || [
+    "weak_observation",
+    "evolution_objective_receipt_l3",
+    "evolution_objective_receipt_l4",
+  ].includes(String(value));
+}
+
+function validObjectiveReceipt(evidenceClass: unknown, value: unknown): boolean {
+  if (evidenceClass === undefined || evidenceClass === "weak_observation") return value === undefined;
+  if (!isRecord(value) || !isRecord(value.receiptRef)) return false;
+  const expectedLevel = evidenceClass === "evolution_objective_receipt_l3" ? "L3" : "L4";
+  return value.level === expectedLevel &&
+    value.promotionEligible === true &&
+    typeof value.receiptRef.id === "string" &&
+    /^outcome-receipt:[0-9a-f]{32}$/.test(value.receiptRef.id) &&
+    Number.isInteger(value.receiptRef.revision) &&
+    (value.receiptRef.revision as number) >= 1 &&
+    typeof value.receiptRef.contentHash === "string" &&
+    SHA256.test(value.receiptRef.contentHash);
+}
+
+function validSkillAttribution(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  return safeStringArray(value.worker, SAFE_REFERENCE, 64) &&
+    safeStringArray(value.manager, SAFE_REFERENCE, 64) &&
+    safeStringArray(value.validator, SAFE_REFERENCE, 64);
+}
+
+function validRoleRewards(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value) || !isRecord(value.worker) || !isRecord(value.manager) || !isRecord(value.validator)) {
+    return false;
+  }
+  return typeof value.worker.accepted === "boolean" &&
+    finiteUnit(value.worker.quality) &&
+    typeof value.manager.accepted === "boolean" &&
+    finiteUnit(value.manager.quality) &&
+    typeof value.validator.accepted === "boolean" &&
+    finiteUnit(value.validator.quality);
+}
+
+function roleRewardsMatchExperience(value: Record<string, unknown>): boolean {
+  if (value.roleRewards === undefined) return true;
+  if (!Array.isArray(value.signals)) return false;
+  const rewards = value.roleRewards as RoleRewards;
+  const outcome = value.outcome as LearningOutcome;
+  const attempts = value.attempts as number;
+  const managerAccepted = value.managerAccepted as boolean;
+  const auditAccepted = value.auditAccepted as number;
+  const auditTotal = value.auditTotal as number;
+  const signals = value.signals as string[];
+  const evidencePresent = !signals.includes("evidence-empty");
+  const checksPresent = !signals.includes("checks-empty");
+  const auditRatio = auditTotal > 0 ? auditAccepted / auditTotal : 0;
+  const attemptPenalty = Math.min(0.25, Math.max(0, attempts - 1) * 0.08);
+  const expected: RoleRewards = {
+    worker: { accepted: outcome === "accepted", quality: value.quality as number },
+    manager: {
+      accepted: outcome === "accepted" && auditRatio >= 2 / 3 && evidencePresent && checksPresent,
+      quality: clamp(
+        (outcome === "accepted" ? 0.4 : 0.05) + auditRatio * 0.5 +
+          (evidencePresent ? 0.05 : 0) + (checksPresent ? 0.05 : 0) - attemptPenalty,
+        0,
+        1,
+      ),
+    },
+    validator: {
+      accepted: outcome === "accepted" && managerAccepted && evidencePresent && checksPresent,
+      quality: clamp(
+        (outcome === "accepted" ? 0.4 : 0.05) + (managerAccepted ? 0.5 : 0) +
+          (evidencePresent ? 0.05 : 0) + (checksPresent ? 0.05 : 0) - attemptPenalty,
+        0,
+        1,
+      ),
+    },
+  };
+  return JSON.stringify(rewards) === JSON.stringify(expected);
+}
+
+function finiteUnit(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 async function readBoundedUtf8File(path: string, maxBytes: number): Promise<string> {

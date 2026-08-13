@@ -3,59 +3,6 @@ const canvasWrap = document.querySelector("#canvas-wrap");
 const ctx = canvas.getContext("2d", { alpha: false });
 ctx.imageSmoothingEnabled = false;
 
-const ASSET_VERSION = "luna-hq-20260812-12";
-
-const employeeAtlas = new Image();
-employeeAtlas.decoding = "async";
-employeeAtlas.src = `/assets/employee-atlas.png?v=${ASSET_VERSION}`;
-const atlasState = { ready: false };
-employeeAtlas.addEventListener("load", () => {
-  atlasState.ready = true;
-});
-
-const seatedWorkerAtlas = new Image();
-seatedWorkerAtlas.decoding = "async";
-seatedWorkerAtlas.src = `/assets/hq/seated-workers-v1.png?v=${ASSET_VERSION}`;
-const seatedWorkerState = { ready: false };
-seatedWorkerAtlas.addEventListener("load", () => {
-  seatedWorkerState.ready = true;
-  updateCanvasDiagnostics();
-});
-
-const northSeatedWorkerAtlas = new Image();
-northSeatedWorkerAtlas.decoding = "async";
-northSeatedWorkerAtlas.src = `/assets/hq/seated-workers-north-v1.png?v=${ASSET_VERSION}`;
-const northSeatedWorkerState = { ready: false };
-northSeatedWorkerAtlas.addEventListener("load", () => {
-  northSeatedWorkerState.ready = true;
-  updateCanvasDiagnostics();
-});
-
-const eastSeatedWorkerAtlas = new Image();
-eastSeatedWorkerAtlas.decoding = "async";
-eastSeatedWorkerAtlas.src = `/assets/hq/seated-workers-east-v1.png?v=${ASSET_VERSION}`;
-const eastSeatedWorkerState = { ready: false };
-eastSeatedWorkerAtlas.addEventListener("load", () => {
-  eastSeatedWorkerState.ready = true;
-  updateCanvasDiagnostics();
-});
-
-const DIRECTIONAL_WORKER_ATLASES = {
-  south: { image: seatedWorkerAtlas, state: seatedWorkerState, flipX: false },
-  north: { image: northSeatedWorkerAtlas, state: northSeatedWorkerState, flipX: false },
-  east: { image: eastSeatedWorkerAtlas, state: eastSeatedWorkerState, flipX: false },
-  west: { image: eastSeatedWorkerAtlas, state: eastSeatedWorkerState, flipX: true },
-};
-
-const officeEnvironment = new Image();
-officeEnvironment.decoding = "async";
-officeEnvironment.src = `/assets/hq/luna-hq-environment-v2.png?v=${ASSET_VERSION}`;
-const environmentState = { ready: false };
-officeEnvironment.addEventListener("load", () => {
-  prepareEnvironmentLayer();
-  environmentState.ready = true;
-});
-
 const elements = Object.fromEntries(
   [
     "app",
@@ -144,21 +91,6 @@ const elements = Object.fromEntries(
 );
 
 const WORLD = { width: 1800, height: 1100 };
-const environmentLayer = document.createElement("canvas");
-environmentLayer.width = WORLD.width;
-environmentLayer.height = WORLD.height;
-
-function prepareEnvironmentLayer() {
-  const environmentContext = environmentLayer.getContext("2d", { alpha: false });
-  environmentContext.imageSmoothingEnabled = true;
-  environmentContext.drawImage(officeEnvironment, 0, 0, WORLD.width, WORLD.height);
-  const veil = environmentContext.createLinearGradient(0, 0, 0, WORLD.height);
-  veil.addColorStop(0, "rgba(3, 9, 19, 0.08)");
-  veil.addColorStop(0.58, "rgba(4, 10, 18, 0.2)");
-  veil.addColorStop(1, "rgba(2, 7, 13, 0.28)");
-  environmentContext.fillStyle = veil;
-  environmentContext.fillRect(0, 0, WORLD.width, WORLD.height);
-}
 const ROOM_LAYOUT = [
   { id: "strategy", x: 92, y: 34, width: 532, height: 326 },
   { id: "executive", x: 638, y: 34, width: 334, height: 326 },
@@ -325,9 +257,7 @@ function updateCanvasDiagnostics() {
   }
   canvas.dataset.seatCount = String(state.positions.size);
   canvas.dataset.facingCounts = JSON.stringify(facingCounts);
-  canvas.dataset.directionalAssetsReady = String(
-    seatedWorkerState.ready && northSeatedWorkerState.ready && eastSeatedWorkerState.ready,
-  );
+  canvas.dataset.agentMarkerMode = "procedural";
 }
 
 function officeSeatPositions(room, count) {
@@ -757,21 +687,11 @@ function drawWorld(now) {
   roundedRect(ctx, 0, 0, WORLD.width, WORLD.height, 18);
   ctx.fillStyle = "#0a1422";
   ctx.fill();
-  ctx.save();
-  roundedRect(ctx, 0, 0, WORLD.width, WORLD.height, 18);
-  ctx.clip();
-  if (environmentState.ready) {
-    ctx.globalAlpha = 0.92;
-    ctx.drawImage(environmentLayer, 0, 0);
-    ctx.globalAlpha = 1;
-  }
-  ctx.restore();
   ctx.strokeStyle = "rgba(138, 180, 232, 0.2)";
   ctx.lineWidth = 1.5;
   ctx.stroke();
   drawWorldGrid();
-  if (environmentState.ready) drawCommonAreaLabels();
-  else drawOfficeCommons();
+  drawOfficeCommons();
   drawAmbientLighting(now);
   drawCampusHeader();
   for (const room of ROOM_LAYOUT) drawRoom(room, now);
@@ -779,27 +699,6 @@ function drawWorld(now) {
   const agents = state.snapshot?.agents ?? [];
   for (const agent of agents) drawAgent(agent, now);
   ctx.restore();
-}
-
-function drawCommonAreaLabels() {
-  for (const area of COMMON_AREAS) {
-    const labelFontSize = Math.max(12, 9 / state.view.scale);
-    const labelHeight = Math.max(24, 16 / state.view.scale);
-    ctx.save();
-    roundedRect(ctx, area.x, area.y, area.width, area.height, 9);
-    ctx.fillStyle = "rgba(5, 12, 23, 0.22)";
-    ctx.fill();
-    ctx.strokeStyle = hexToRgba(area.color, 0.26);
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    roundedRect(ctx, area.x + 10, area.y + 9, Math.min(230, area.width - 20), labelHeight, 6);
-    ctx.fillStyle = "rgba(5, 12, 23, 0.78)";
-    ctx.fill();
-    ctx.fillStyle = "rgba(218, 230, 246, 0.78)";
-    ctx.font = `700 ${labelFontSize}px ui-monospace, monospace`;
-    ctx.fillText(area.label, area.x + 20, area.y + 9 + labelHeight * 0.68);
-    ctx.restore();
-  }
 }
 
 function drawAmbientLighting(now) {
@@ -947,9 +846,7 @@ function drawRoom(room, now) {
   ctx.save();
   ctx.globalAlpha = dimmed ? 0.24 : 1;
   roundedRect(ctx, room.x, room.y, room.width, room.height, 12);
-  ctx.fillStyle = environmentState.ready
-    ? "rgba(4, 10, 19, 0.08)"
-    : hexToRgba(department.color, 0.055);
+  ctx.fillStyle = hexToRgba(department.color, 0.055);
   ctx.fill();
   ctx.strokeStyle = hexToRgba(department.color, focused ? 0.9 : 0.38);
   ctx.lineWidth = focused ? 2.5 : 1.15;
@@ -1005,7 +902,6 @@ function drawRoom(room, now) {
 }
 
 function drawRoomArchitecture(room, color) {
-  if (environmentState.ready) return;
   ctx.save();
   ctx.globalAlpha = 0.78;
   if (room.id === "strategy") drawStrategyWarRoom(room, color);
@@ -1232,37 +1128,16 @@ function drawAgent(agent, now) {
 
   ctx.save();
   ctx.translate(workShiftX, workShiftY);
-  const workerAtlas = DIRECTIONAL_WORKER_ATLASES[facing] ?? DIRECTIONAL_WORKER_ATLASES.south;
-  if (workerAtlas.state.ready) {
-    const cellWidth = workerAtlas.image.naturalWidth / 4;
-    const cellHeight = workerAtlas.image.naturalHeight / 4;
-    const destinationSize = 92 * s;
-    ctx.save();
-    if (workerAtlas.flipX) ctx.scale(-1, 1);
-    ctx.drawImage(
-      workerAtlas.image,
-      avatar.column * cellWidth,
-      avatar.row * cellHeight,
-      cellWidth,
-      cellHeight,
-      -destinationSize / 2,
-      -destinationSize / 2,
-      destinationSize,
-      destinationSize,
-    );
-    ctx.restore();
-  } else {
-    const fallbackRotation = facing === "north"
-      ? Math.PI
-      : facing === "east"
-        ? -Math.PI / 2
-        : facing === "west"
-          ? Math.PI / 2
-          : 0;
-    ctx.rotate(fallbackRotation);
-    drawAgentDesk(agent, avatar, activity, s);
-    drawFallbackAvatar(department.color, avatar, s);
-  }
+  const markerRotation = facing === "north"
+    ? Math.PI
+    : facing === "east"
+      ? -Math.PI / 2
+      : facing === "west"
+        ? Math.PI / 2
+        : 0;
+  ctx.rotate(markerRotation);
+  drawAgentDesk(agent, avatar, activity, s);
+  drawGeometricAgentMarker(department.color, avatar, activity, s);
   ctx.restore();
 
   drawWorkstationIdentity(agent, avatar, activity, now, s, facing);
@@ -1423,18 +1298,26 @@ function drawAvatarAccessory(agent, avatar, activity, s) {
   ctx.restore();
 }
 
-function drawFallbackAvatar(color, avatar, s) {
-  ctx.fillStyle = avatar.accent;
-  roundedRect(ctx, -7 * s, -4 * s, 14 * s, 18 * s, 5 * s);
+function drawGeometricAgentMarker(color, avatar, activity, s) {
+  ctx.fillStyle = mixHex(color, "#111815", 0.18);
+  roundedRect(ctx, -10 * s, -11 * s, 20 * s, 22 * s, (avatar.base % 3 + 4) * s);
   ctx.fill();
-  ctx.fillStyle = ["#f0c2a0", "#d99c76", "#b87a56", "#8f5b42", "#694337", "#4c3029"][avatar.skin];
-  ctx.beginPath();
-  ctx.arc(0, -9 * s, 5.6 * s, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = mixHex(color, "#111815", 0.62);
-  ctx.beginPath();
-  ctx.arc(0, -11 * s, 5.8 * s, Math.PI, 0);
-  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5 * s;
+  ctx.stroke();
+  ctx.fillStyle = activity.color;
+  if (avatar.base % 3 === 0) {
+    ctx.beginPath();
+    ctx.arc(0, 0, 4 * s, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (avatar.base % 3 === 1) {
+    ctx.fillRect(-5 * s, -2 * s, 10 * s, 4 * s);
+  } else {
+    ctx.save();
+    ctx.rotate(Math.PI / 4);
+    ctx.fillRect(-3.5 * s, -3.5 * s, 7 * s, 7 * s);
+    ctx.restore();
+  }
 }
 
 function drawActivityGlyph(agent, activity, now, s, facing) {
@@ -2310,21 +2193,10 @@ window.render_game_to_text = () => {
       enabled: !state.commandBusy,
     },
     environment: {
-      asset: "/assets/hq/luna-hq-environment-v2.png",
-      ready: environmentState.ready,
-      furnitureLayer: environmentState.ready ? "generated" : "procedural-fallback",
-      seatedWorkerAssets: {
-        south: "/assets/hq/seated-workers-v1.png",
-        north: "/assets/hq/seated-workers-north-v1.png",
-        east: "/assets/hq/seated-workers-east-v1.png",
-        west: "/assets/hq/seated-workers-east-v1.png#flipped",
-      },
-      seatedWorkerAssetsReady: {
-        south: seatedWorkerState.ready,
-        north: northSeatedWorkerState.ready,
-        east: eastSeatedWorkerState.ready,
-        west: eastSeatedWorkerState.ready,
-      },
+      asset: null,
+      ready: true,
+      furnitureLayer: "procedural",
+      agentMarkers: "procedural-geometric",
       seatedWorkstations: state.positions.size,
       anchoredWorkstations: [...state.positions.values()]
         .filter((position) => position.anchor === "workstation-center").length,

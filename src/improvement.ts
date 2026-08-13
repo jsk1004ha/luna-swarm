@@ -2,7 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { CapabilityInput } from "./capabilities.js";
-import type { LearningExperience, LearningSnapshot } from "./learning.js";
+import type {
+  LearningExperience,
+  LearningRewardRole,
+  LearningSnapshot,
+} from "./learning.js";
+import { isVerifiedEvolutionObjectiveReceipt } from "./learning.js";
 import type { Department } from "./types.js";
 import { Mutex } from "./util.js";
 
@@ -32,6 +37,7 @@ export interface LearningPolicyUpdate extends LearningPolicyState {
 
 interface LearningPolicySkill {
   skillId: string;
+  role: LearningRewardRole;
   department: Department;
   taskKind: string;
   uses: number;
@@ -48,6 +54,7 @@ interface LearningPolicyVersion {
   version: string;
   createdAt: string;
   status: StoredPolicyStatus;
+  evidenceBasis?: "evolution_objective_receipts_l3_l4";
   sourceRunIds: string[];
   skills: LearningPolicySkill[];
   evaluation: {
@@ -70,6 +77,7 @@ interface LearningPolicyLedger {
 
 interface SkillAccumulator {
   skillId: string;
+  role: LearningRewardRole;
   department: Department;
   taskKind: string;
   uses: number;
@@ -127,8 +135,12 @@ export class LearningPolicyView {
       (version) => version.version === this.ledger.activeVersion && version.status === "active",
     );
     if (!active) return new Map();
+    // Policies persisted before objective-receipt evidence existed are retained
+    // for telemetry/history, but cannot influence routing.
+    if (active.evidenceBasis !== "evolution_objective_receipts_l3_l4") return new Map();
     const buckets = new Map<string, { total: number; count: number }>();
     for (const skill of active.skills) {
+      if (skill.role !== input.role) continue;
       const departmentMatch = input.department === skill.department;
       const taskKindMatch = Boolean(
         input.taskKind && normalizedIncludes(input.taskKind, skill.taskKind),
@@ -339,6 +351,8 @@ function proposePolicy(
   minSamples: number,
   evaluatedAt: string,
 ): { candidate?: LearningPolicyVersion; evaluation: LearningPolicyLedger["lastEvaluation"] } {
+  const observedSamples = experiences.length;
+  experiences = experiences.filter(isVerifiedEvolutionObjectiveReceipt);
   const runTimes = new Map<string, number>();
   for (const experience of experiences) {
     runTimes.set(
@@ -353,7 +367,7 @@ function proposePolicy(
     return {
       evaluation: {
         status: "collecting",
-        evaluatedSamples: experiences.length,
+        evaluatedSamples: observedSamples,
         holdoutSamples: 0,
         improvement: 0,
       },
@@ -365,26 +379,31 @@ function proposePolicy(
   const holdout = experiences.filter((experience) => holdoutRunIds.has(experience.runId));
   const accumulators = new Map<string, SkillAccumulator>();
   for (const experience of training) {
-    for (const skillId of experience.skillIds) {
-      const key = policySkillKey(experience.department, experience.taskKind, skillId);
-      const bucket = accumulators.get(key) ?? {
-        skillId,
-        department: experience.department,
-        taskKind: experience.taskKind,
-        uses: 0,
-        accepted: 0,
-        failed: 0,
-        reworked: 0,
-        quality: 0,
-        runIds: new Set<string>(),
-      };
-      bucket.uses += 1;
-      bucket.accepted += experience.outcome === "accepted" ? 1 : 0;
-      bucket.failed += experience.outcome === "failed" ? 1 : 0;
-      bucket.reworked += experience.attempts > 1 ? 1 : 0;
-      bucket.quality += experience.quality;
-      bucket.runIds.add(experience.runId);
-      accumulators.set(key, bucket);
+    for (const role of REWARD_ROLES) {
+      for (const skillId of experience.skillAttribution?.[role] ?? []) {
+        const key = policySkillKey(role, experience.department, experience.taskKind, skillId);
+        const reward = experience.roleRewards?.[role];
+        if (!reward) continue;
+        const bucket = accumulators.get(key) ?? {
+          skillId,
+          role,
+          department: experience.department,
+          taskKind: experience.taskKind,
+          uses: 0,
+          accepted: 0,
+          failed: 0,
+          reworked: 0,
+          quality: 0,
+          runIds: new Set<string>(),
+        };
+        bucket.uses += 1;
+        bucket.accepted += reward.accepted ? 1 : 0;
+        bucket.failed += reward.accepted ? 0 : 1;
+        bucket.reworked += role === "worker" && experience.attempts > 1 ? 1 : 0;
+        bucket.quality += reward.quality;
+        bucket.runIds.add(experience.runId);
+        accumulators.set(key, bucket);
+      }
     }
   }
   const skills = [...accumulators.values()]
@@ -395,6 +414,7 @@ function proposePolicy(
       const reworkRate = bucket.reworked / bucket.uses;
       return {
         skillId: bucket.skillId,
+        role: bucket.role,
         department: bucket.department,
         taskKind: bucket.taskKind,
         uses: bucket.uses,
@@ -410,8 +430,8 @@ function proposePolicy(
       };
     })
     .filter((skill) => Math.abs(skill.scoreDelta) >= 0.25)
-    .sort((left, right) => policySkillKey(left.department, left.taskKind, left.skillId)
-      .localeCompare(policySkillKey(right.department, right.taskKind, right.skillId)));
+    .sort((left, right) => policySkillKey(left.role, left.department, left.taskKind, left.skillId)
+      .localeCompare(policySkillKey(right.role, right.department, right.taskKind, right.skillId)));
   if (skills.length === 0) {
     return {
       evaluation: {
@@ -429,13 +449,14 @@ function proposePolicy(
       (experience) =>
         experience.department === skill.department &&
         normalizedIncludes(experience.taskKind, skill.taskKind) &&
-        experience.skillIds.includes(skill.skillId),
+        experience.skillAttribution?.[skill.role]?.includes(skill.skillId) &&
+        experience.roleRewards?.[skill.role],
     );
     if (matching.length === 0) continue;
     evaluatedSkills += 1;
     const direction = Math.sign(skill.scoreDelta);
     for (const experience of matching) {
-      alignments.push(direction * (experienceUtility(experience) - QUALITY_BASELINE));
+      alignments.push(direction * (experienceUtility(experience, skill.role) - QUALITY_BASELINE));
     }
   }
   if (alignments.length < minSamples || evaluatedSkills !== skills.length) {
@@ -465,6 +486,7 @@ function proposePolicy(
       version,
       createdAt: evaluatedAt,
       status: passed ? "active" : "rejected",
+      evidenceBasis: "evolution_objective_receipts_l3_l4",
       sourceRunIds,
       skills,
       evaluation: {
@@ -479,11 +501,12 @@ function proposePolicy(
   };
 }
 
-function experienceUtility(experience: LearningExperience): number {
+function experienceUtility(experience: LearningExperience, role: LearningRewardRole): number {
+  const reward = experience.roleRewards?.[role];
+  if (!reward) return 0;
   return clamp(
-    (experience.outcome === "accepted" ? 0.55 : 0) +
-      experience.quality * 0.35 +
-      (experience.attempts <= 1 ? 0.1 : 0),
+    (reward.accepted ? 0.55 : 0) + reward.quality * 0.35 +
+      (role !== "worker" || experience.attempts <= 1 ? 0.1 : 0),
     0,
     1,
   );
@@ -553,6 +576,7 @@ function isLearningPolicyVersion(value: unknown): value is LearningPolicyVersion
     typeof value.createdAt !== "string" ||
     !isIsoTimestamp(value.createdAt) ||
     !["active", "superseded", "rejected", "rolled_back"].includes(String(value.status)) ||
+    (value.evidenceBasis !== undefined && value.evidenceBasis !== "evolution_objective_receipts_l3_l4") ||
     !Array.isArray(value.sourceRunIds) ||
     value.sourceRunIds.length > MAX_SOURCE_RUNS ||
     !value.sourceRunIds.every((runId) => typeof runId === "string" && SAFE_REFERENCE.test(runId)) ||
@@ -567,7 +591,7 @@ function isLearningPolicyVersion(value: unknown): value is LearningPolicyVersion
   const skills = value.skills as LearningPolicySkill[];
   if (
     new Set(sourceRunIds).size !== sourceRunIds.length ||
-    new Set(skills.map((skill) => policySkillKey(skill.department, skill.taskKind, skill.skillId))).size !== skills.length
+    new Set(skills.map((skill) => policySkillKey(skill.role, skill.department, skill.taskKind, skill.skillId))).size !== skills.length
   ) {
     return false;
   }
@@ -583,6 +607,7 @@ function isLearningPolicyVersion(value: unknown): value is LearningPolicyVersion
 function isLearningPolicySkill(value: unknown): value is LearningPolicySkill {
   if (!isRecord(value)) return false;
   return typeof value.skillId === "string" && SAFE_REFERENCE.test(value.skillId) &&
+    REWARD_ROLES.includes(value.role as LearningRewardRole) &&
     ["executive", "strategy", "research", "engineering", "risk", "quality", "integration"].includes(String(value.department)) &&
     typeof value.taskKind === "string" && SAFE_LABEL.test(value.taskKind) &&
     finiteRange(value.uses, 1, 1_000_000, true) &&
@@ -658,8 +683,15 @@ async function readBoundedUtf8File(path: string, maxBytes: number): Promise<stri
   }
 }
 
-function policySkillKey(department: Department, taskKind: string, skillId: string): string {
-  return `${department}\0${taskKind}\0${skillId}`;
+const REWARD_ROLES: readonly LearningRewardRole[] = ["worker", "manager", "validator"];
+
+function policySkillKey(
+  role: LearningRewardRole,
+  department: Department,
+  taskKind: string,
+  skillId: string,
+): string {
+  return `${role}\0${department}\0${taskKind}\0${skillId}`;
 }
 
 function normalizedIncludes(left: string, right: string): boolean {

@@ -51,7 +51,7 @@ export function agentsForFloor(agents: Agent[], selectedAgentId: string | null):
 }
 
 export function sceneVisualRevision(snapshot: Snapshot, visibleAgentIds?: Set<string>): number {
-  const agents = snapshot.agents
+  const agents = sceneRoster(snapshot)
     .filter((agent) => !visibleAgentIds || visibleAgentIds.has(agent.id))
     .slice()
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -77,7 +77,8 @@ export function buildSceneModel(snapshot: Snapshot, visibleAgentIds?: Set<string
   const size = mapPixelSize();
   const grid = createOfficeCollisionGrid();
   const reservations = new TileReservationTable(grid.width);
-  const assignments = assignSeats(snapshot.agents);
+  const roster = sceneRoster(snapshot);
+  const assignments = assignSeats(roster);
   const visibleAssignments = visibleAgentIds
     ? assignments.filter(({ agent }) => visibleAgentIds.has(agent.id))
     : assignments;
@@ -116,7 +117,7 @@ export function buildSceneModel(snapshot: Snapshot, visibleAgentIds?: Set<string
     reportPath: reportPath.map((point) => ({ x: centerPixel(point.x), y: centerPixel(point.y) })),
     agents: sceneAgents,
     zoneSummaries: zones.map((zone) => {
-      const all = snapshot.agents.filter((agent) => agent.department === zone.id);
+      const all = roster.filter((agent) => agent.department === zone.id);
       return {
         id: zone.id,
         total: all.length,
@@ -126,6 +127,15 @@ export function buildSceneModel(snapshot: Snapshot, visibleAgentIds?: Set<string
       };
     }),
   };
+}
+
+/**
+ * HQ is a company view, so it renders the fixed logical roster. Runtime seats
+ * remain available on the snapshot for concurrency metrics, but their IDs are
+ * intentionally not used as floor identities.
+ */
+function sceneRoster(snapshot: Snapshot): Agent[] {
+  return snapshot.logicalAgents.length > 0 ? snapshot.logicalAgents : snapshot.agents;
 }
 
 export function resolveVisualState(agent: Agent): AgentVisualState {
@@ -215,13 +225,7 @@ function centerPixel(tile: number) { return tile * TILE_SIZE + TILE_SIZE / 2; }
 
 export function hashString(value: string): number { return stableHash(value); }
 
-export function atlasCell(agent: Agent): number {
+export function agentVisualVariant(agent: Agent): number {
   const numeric = Number(agent.avatar?.base);
   return Number.isFinite(numeric) ? Math.abs(Math.trunc(numeric)) % 16 : hashString(agent.id) % 16;
-}
-
-// Standing and directional seated atlases are both validated 4x4 sheets. Keep
-// this named boundary so the standing asset can evolve independently later.
-export function standingAtlasCell(agent: Agent): number {
-  return atlasCell(agent);
 }

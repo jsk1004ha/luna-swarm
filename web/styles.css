@@ -640,20 +640,16 @@ kbd {
 }
 
 .roster-avatar {
-  --atlas-x: 0%;
-  --atlas-y: 0%;
   position: relative;
+  display: grid;
+  place-items: center;
   width: 32px;
   height: 32px;
   border: 1px solid color-mix(in srgb, var(--department-color, var(--muted)) 45%, var(--line));
   border-radius: var(--avatar-radius, 9px);
   background-color: color-mix(in srgb, var(--department-color, var(--muted)) 10%, var(--surface));
-  background-image: url("/assets/employee-atlas.png?v=luna-hq-20260812-12");
-  background-repeat: no-repeat;
-  background-position: var(--atlas-x) var(--atlas-y);
-  background-size: 400% 400%;
+  background-image: linear-gradient(145deg, color-mix(in srgb, var(--department-color, var(--muted)) 18%, #fff), color-mix(in srgb, var(--department-color, var(--muted)) 7%, var(--surface)));
   box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--avatar-accent, var(--accent)) 72%, transparent);
-  image-rendering: pixelated;
 }
 
 .roster-avatar::before,
@@ -1179,8 +1175,6 @@ kbd {
 
 .agent-avatar {
   --avatar-color: var(--engineering);
-  --atlas-x: 0%;
-  --atlas-y: 0%;
   position: relative;
   flex: 0 0 70px;
   width: 70px;
@@ -1189,14 +1183,10 @@ kbd {
   border: 1px solid color-mix(in srgb, var(--avatar-color) 48%, var(--line));
   border-radius: var(--avatar-radius-large, 17px);
   background-color: color-mix(in srgb, var(--avatar-color) 12%, var(--surface));
-  background-image: url("/assets/employee-atlas.png?v=luna-hq-20260812-12");
-  background-repeat: no-repeat;
-  background-position: var(--atlas-x) var(--atlas-y);
-  background-size: 400% 400%;
+  background-image: linear-gradient(145deg, color-mix(in srgb, var(--avatar-color) 18%, #fff), color-mix(in srgb, var(--avatar-color) 7%, var(--surface)));
   box-shadow:
     inset 0 -3px 0 var(--avatar-accent, var(--accent)),
     0 10px 24px rgba(0, 0, 0, 0.16);
-  image-rendering: pixelated;
 }
 
 .agent-avatar::after {

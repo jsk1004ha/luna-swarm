@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { createMockSnapshot } from "../data/mock";
 import { assignSeats, MAP_COLS, MAP_ROWS, seatSlots, TILE_SIZE, zones } from "../map/officeMap";
 import { createOfficeCollisionGrid, findGridPath, TileReservationTable } from "./pathfinding";
-import { agentsForFloor, atlasCell, buildSceneModel, MAX_FLOOR_AGENTS, resolveVisualState, sceneVisualRevision, standingAtlasCell } from "./sceneModel";
+import { agentsForFloor, agentVisualVariant, buildSceneModel, MAX_FLOOR_AGENTS, resolveVisualState, sceneVisualRevision } from "./sceneModel";
 
 describe("Pixi scene model", () => {
   it("maps every visible employee to a structured department seat", () => {
     const snapshot = createMockSnapshot(30);
-    const visible = new Set(snapshot.agents.filter((agent) => agent.department === "engineering").map((agent) => agent.id));
+    const visible = new Set(snapshot.logicalAgents.filter((agent) => agent.department === "engineering").map((agent) => agent.id));
     const model = buildSceneModel(snapshot, visible);
     expect(model.width).toBe(MAP_COLS * TILE_SIZE);
     expect(model.height).toBe(MAP_ROWS * TILE_SIZE);
@@ -16,16 +16,25 @@ describe("Pixi scene model", () => {
     expect(model.agents.every(({ agent, x, y }) => agent.department === "engineering" && x > 0 && y > 0)).toBe(true);
   });
 
-  it("keeps generated avatar frames inside the 4x4 directional atlas", () => {
-    const snapshot = createMockSnapshot(144);
-    expect(snapshot.agents.map(atlasCell).every((cell) => cell >= 0 && cell < 16)).toBe(true);
+  it("renders all 128 logical employees when runtime and company IDs are disjoint", () => {
+    const snapshot = createMockSnapshot(4);
+    expect(snapshot.agents.every((agent) => agent.id.startsWith("mock-agent-"))).toBe(true);
+    expect(snapshot.logicalAgents.every((agent) => agent.id.startsWith("luna-"))).toBe(true);
+    const visible = new Set(snapshot.logicalAgents.map((agent) => agent.id));
+
+    const model = buildSceneModel(snapshot, visible);
+
+    expect(model.agents).toHaveLength(128);
+    expect(model.agents).not.toHaveLength(0);
+    expect(new Set(model.agents.map(({ agent }) => agent.id))).toEqual(visible);
+    expect(model.agents.some(({ agent }) => agent.runtime?.taskStatus === "running")).toBe(true);
   });
 
-  it("uses every repaired 4x4 standing-atlas cell without exceeding its bounds", () => {
-    const snapshot = createMockSnapshot(256);
-    const cells = snapshot.agents.map(standingAtlasCell);
-    expect(cells.every((cell) => cell >= 0 && cell < 16)).toBe(true);
-    expect(new Set(cells)).toEqual(new Set(Array.from({ length: 16 }, (_, index) => index)));
+  it("assigns every employee a bounded geometric marker variant", () => {
+    const snapshot = createMockSnapshot(144);
+    const variants = snapshot.agents.map(agentVisualVariant);
+    expect(variants.every((variant) => variant >= 0 && variant < 16)).toBe(true);
+    expect(new Set(variants).size).toBeGreaterThan(8);
   });
 
   it("renders more than one hundred employees on the company floor", () => {
@@ -74,11 +83,11 @@ describe("Pixi scene model", () => {
 
   it("does not rebuild the Pixi floor for progress-only snapshots", () => {
     const snapshot = createMockSnapshot(144);
-    const visible = new Set(snapshot.agents.map((agent) => agent.id));
+    const visible = new Set(snapshot.logicalAgents.map((agent) => agent.id));
     const initial = sceneVisualRevision(snapshot, visible);
-    snapshot.agents[0]!.progress += 1;
+    snapshot.logicalAgents[0]!.progress += 1;
     expect(sceneVisualRevision(snapshot, visible)).toBe(initial);
-    snapshot.agents[0]!.activity = "blocked";
+    snapshot.logicalAgents[0]!.activity = "blocked";
     expect(sceneVisualRevision(snapshot, visible)).not.toBe(initial);
   });
 

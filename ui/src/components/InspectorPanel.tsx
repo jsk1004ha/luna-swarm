@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { sendUiControl } from "../api/client";
-import { standingAvatarIndex } from "../data/avatar";
+import { avatarInitials, standingAvatarIndex } from "../data/avatar";
 import { DEPARTMENT_META } from "../data/mock";
-import { useCompanyStore } from "../store/companyStore";
+import { companyRoster, useCompanyStore } from "../store/companyStore";
 
 type InspectorTab = "overview" | "task" | "result" | "dependencies" | "harness" | "log";
 const TABS: Array<[InspectorTab, string]> = [["overview", "개요"], ["task", "작업"], ["result", "결과"], ["dependencies", "의존성"], ["harness", "하네스"], ["log", "로그"]];
@@ -12,7 +12,7 @@ export function InspectorPanel({ initialTab = "overview" }: { initialTab?: Inspe
   const view = useCompanyStore((state) => state.view);
   const selectedAgentId = useCompanyStore((state) => state.selectedAgentId);
   const selectAgent = useCompanyStore((state) => state.selectAgent);
-  const agent = snapshot?.agents.find((candidate) => candidate.id === selectedAgentId);
+  const agent = companyRoster(snapshot).find((candidate) => candidate.id === selectedAgentId);
   const [tab, setTab] = useState<InspectorTab>(initialTab);
   const [instruction, setInstruction] = useState("");
   const [priority, setPriority] = useState("");
@@ -31,7 +31,7 @@ export function InspectorPanel({ initialTab = "overview" }: { initialTab?: Inspe
   </aside> : null;
   const events = snapshot.events.filter((event) => event.agentId === agent.id).slice(0, 12);
   const outputs = (snapshot.outputs ?? []).filter((output) => output.agentId === agent.id || Boolean(agent.taskId && output.taskId === agent.taskId));
-  const departmentMembers = snapshot.agents.filter((candidate) => candidate.department === agent.department);
+  const departmentMembers = companyRoster(snapshot).filter((candidate) => candidate.department === agent.department);
   const readOnly = snapshot.observation?.readOnly ?? snapshot.control?.readOnly ?? true;
   const runControl = async (payload: Parameters<typeof sendUiControl>[0]) => {
     setBusy(true); setFeedback("제어 요청 중");
@@ -46,7 +46,7 @@ export function InspectorPanel({ initialTab = "overview" }: { initialTab?: Inspe
   return <aside className="inspector-panel" aria-label="선택한 직원 상세">
     <header className="panel-head"><span><small>AGENT INSPECTOR</small><strong>에이전트 정보</strong></span><button className="close-panel" onClick={() => selectAgent(null)} aria-label="직원 상세 닫기">×</button></header>
     <div className="identity-card">
-      <span className={`portrait avatar-${standingAvatarIndex(agent)}`} aria-hidden="true" />
+      <span className={`portrait avatar-${standingAvatarIndex(agent)}`} aria-hidden="true">{avatarInitials(agent)}</span>
       <span><h2>{agent.name}</h2><p><span className={`identity-status ${agent.activity}`}><i />{activityLabel(agent.activity)}</span>{outputs.length > 0 && <button className="identity-output-badge" onClick={() => setTab("result")}>▤ 결과 {outputs.length}</button>}</p><small>ID: {agent.id}</small></span>
       <button className="copy-id" onClick={() => void navigator.clipboard?.writeText(agent.id)} aria-label="에이전트 ID 복사">▢</button>
     </div>
