@@ -43,7 +43,7 @@ Stable Pointer 변경 ─────> 다음 run
 
 Evolution 상태가 없는 legacy run은 `legacy_unpinned`으로 표시하며 과거 실행에 Bundle identity나 객관적 Trace를 소급 생성하지 않습니다. 이 run의 결과는 승격 근거로 사용할 수 없습니다.
 
-Git 작업공간은 HEAD와 dirty/untracked 내용까지 포함한 source identity를 자동 계산합니다. Git이 아닌 작업공간은 설정의 `sourceIdentity` 또는 `LUNA_SOURCE_COMMIT`/`GITHUB_SHA`로 구체적인 빌드 identity를 제공할 수 있습니다. identity가 없더라도 본 작업은 중단하지 않고 `legacy_unpinned` 관찰 전용으로 실행하며, 해당 run만 승격 근거에서 제외합니다.
+Git 작업공간은 HEAD와 dirty/untracked 내용까지 포함한 source identity를 자동 계산합니다. Git이 아닌 작업공간은 설정의 `sourceIdentity`, Luna 전용 `LUNA_SOURCE_COMMIT`, 또는 검증된 빌드 매니페스트로 구체적인 빌드 identity를 제공할 수 있습니다. ambient CI 변수인 `GITHUB_SHA`는 작업공간 provenance로 인정하지 않습니다. identity가 없더라도 본 작업은 중단하지 않고 `legacy_unpinned` 관찰 전용으로 실행하며, 해당 run만 승격 근거에서 제외합니다.
 
 ### 4. Flight Recorder와 객관적 Outcome
 

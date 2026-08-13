@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { MockAgentBackend } from "./backend/mock-backend.js";
 import { CodexAppServerBackend } from "./backend/codex-app-server.js";
+import { AppServerSupervisor } from "./backend/app-server-supervisor.js";
 import {
   AppServerClient,
   chatGptOnlyEnvironment,
@@ -22,6 +23,7 @@ import {
   DirectiveGateClosedError,
   DirectiveLimitError,
   RunExecutionLockedError,
+  RunIdExistsError,
 } from "./store.js";
 import {
   createDashboardServer,
@@ -51,6 +53,7 @@ import {
   initializeEvolutionRuntime,
   resolveLocalSourceIdentity,
   verifyRunnableEvolutionBundle,
+  type ExplicitSourceIdentity,
   type EvolutionRuntimeFingerprintInput,
 } from "./evolution/runtime.js";
 import { ExecutionBundleStore } from "./evolution/registry/bundle-store.js";
@@ -126,6 +129,14 @@ async function ui(args: string[]): Promise<void> {
     };
     validateConfig(runConfig);
     const store = new AtomicRunStore(workspace, runConfig.stateDirectory, runId);
+    try {
+      await store.create();
+    } catch (error) {
+      if (error instanceof RunIdExistsError) {
+        return { accepted: false, runId, code: error.code, message: error.message };
+      }
+      throw error;
+    }
     const releaseExecutionLease = await store.acquireExecutionLease();
     let resolveReady!: () => void;
     let rejectReady!: (error: unknown) => void;
@@ -359,6 +370,14 @@ async function dashboard(args: string[]): Promise<void> {
       };
       validateConfig(runConfig);
       const store = new AtomicRunStore(workspace, runConfig.stateDirectory, runId);
+      try {
+        await store.create();
+      } catch (error) {
+        if (error instanceof RunIdExistsError) {
+          return { accepted: false, runId, message: error.message };
+        }
+        throw error;
+      }
       const releaseExecutionLease = await store.acquireExecutionLease();
       const execution = launch({
         goal: command.text ?? "",
@@ -541,6 +560,7 @@ async function runNew(args: string[]): Promise<void> {
   const config = await loadConfig(option(args, "--config"), overrides);
   const runId = option(args, "--run-id") ?? makeRunId();
   const store = new AtomicRunStore(workspace, config.stateDirectory, runId);
+  await store.create();
   await launch({ goal, workspace, config, store, mock: args.includes("--mock") });
 }
 
@@ -590,16 +610,7 @@ async function launch(options: {
     ?? await options.store.acquireExecutionLease();
   const backend: AgentBackend = options.mock
     ? new MockAgentBackend()
-    : new CodexAppServerBackend({
-        workspace: options.workspace,
-        config: options.config,
-        ...(process.env.LUNA_SWARM_CODEX_PATH
-          ? { codexPath: process.env.LUNA_SWARM_CODEX_PATH }
-          : {}),
-        onStderr: (line) => {
-          if (/error|warn/i.test(line)) process.stderr.write(`[codex] ${line}\n`);
-        },
-      });
+    : codexBackend(options.workspace, options.config);
   const controller = options.abortController ?? new AbortController();
   const controlStore = new DurableControlStore(options.store.runDirectory, options.store.runId, {
     initialConcurrencyCap: options.config.maxConcurrency,
@@ -673,6 +684,33 @@ async function launch(options: {
       await releaseExecutionLease();
     }
   }
+}
+
+function codexBackend(workspace: string, config: SwarmConfig): AgentBackend {
+  const shardCount = config.appServerShardCount;
+  const maxInflightPerShard = Math.max(1, Math.ceil(config.maxConcurrency / shardCount));
+  const factory = (shard: number) => new CodexAppServerBackend({
+    workspace,
+    config: {
+      ...config,
+      maxConcurrency: maxInflightPerShard,
+      initialConcurrency: Math.min(config.initialConcurrency, maxInflightPerShard),
+      minConcurrency: Math.min(config.minConcurrency, maxInflightPerShard),
+    },
+    ...(process.env.LUNA_SWARM_CODEX_PATH
+      ? { codexPath: process.env.LUNA_SWARM_CODEX_PATH }
+      : {}),
+    onStderr: (line) => {
+      if (/error|warn/i.test(line)) process.stderr.write(`[codex:${shard}] ${line}\n`);
+    },
+  });
+  if (shardCount === 1) return factory(0);
+  return new AppServerSupervisor(factory, {
+    shardCount,
+    maxInflightPerShard,
+    maxQueuePerShard: Math.max(1, maxInflightPerShard * 2),
+    drainTimeoutMs: Math.min(config.callTimeoutMs, 30_000),
+  });
 }
 
 async function status(args: string[]): Promise<void> {
@@ -855,6 +893,11 @@ async function evolutionCliFingerprint(
   config: SwarmConfig,
   workspace: string,
 ): Promise<EvolutionRuntimeFingerprintInput> {
+  const explicitSource: ExplicitSourceIdentity | undefined = config.sourceIdentity
+    ? { kind: "config", value: config.sourceIdentity }
+    : process.env.LUNA_SOURCE_COMMIT
+      ? { kind: "luna_environment", value: process.env.LUNA_SOURCE_COMMIT }
+      : undefined;
   return {
     model: config.model,
     reasoning: config.reasoning,
@@ -864,7 +907,7 @@ async function evolutionCliFingerprint(
     organizationVersion: HARNESS_V2_ORG_VERSION,
     sourceCommit: await resolveLocalSourceIdentity(
       workspace,
-      config.sourceIdentity ?? process.env.LUNA_SOURCE_COMMIT ?? process.env.GITHUB_SHA,
+      explicitSource,
     ),
   };
 }

@@ -36,8 +36,14 @@ export interface AgentRequest {
   roleContract?: AgentRoleContract;
   /** Canonical Work Order policy after it has been narrowed against roleContract. */
   effectiveToolPolicy?: NormalizedToolPolicy;
-  /** Immutable run-level bundle snapshot. It is telemetry and enforcement metadata, never prompt authority. */
+  /** Immutable run-level bundle snapshot whose verified components authorize execution behavior. */
   executionBundlePin?: RunBundlePin;
+  /** Exact declarative prompt module loaded from the pinned Bundle. */
+  executionPromptModule?: {
+    schemaVersion: 1;
+    moduleId: string;
+    contentHash: `sha256:${string}`;
+  };
   /** Work Order attempt identity, persisted with the lease fencing token. */
   attemptIdentity?: AttemptIdentity;
   inputArtifactRefs?: ArtifactRef[];

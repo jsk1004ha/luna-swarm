@@ -34,7 +34,7 @@ Program Knowledge Graph는 현재 **정적 AST 관계**입니다. 탐색은 파�
 ## 아직 구현하지 않았다고 명시하는 부분
 
 - SQLite WAL을 canonical state로 사용하는 event/outbox/lease transaction
-- 여러 App Server shard를 운영하는 shard supervisor
+- 실제 계정에서 8→256 단계로 검증한 App Server shard soak 및 용량 보고서 (bounded shard supervisor 자체는 구현됨)
 - capability token을 실제 파일·shell·network 호출에 연결하는 외부 Tool Broker
 - Git worktree 기반 구현자 격리와 Single Committer 자동 병합
 - G1 명령 실행 receipt와 run-level G4 release receipt. 현재 G2는 구조화 Oracle evaluator receipt이며 실제 shell/test command 실행은 주장하지 않습니다.

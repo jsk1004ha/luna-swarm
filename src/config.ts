@@ -6,6 +6,7 @@ export const DEFAULT_CONFIG: SwarmConfig = {
   model: "gpt-5.6-luna",
   organizationHeadcount: "auto",
   maxConcurrency: 128,
+  appServerShardCount: 1,
   initialConcurrency: 8,
   minConcurrency: 2,
   maxTasks: 512,
@@ -89,6 +90,10 @@ export function validateConfig(config: SwarmConfig): void {
     intInRange("organizationHeadcount", config.organizationHeadcount, 14, 256);
   }
   intInRange("maxConcurrency", config.maxConcurrency, 1, 1_024);
+  intInRange("appServerShardCount", config.appServerShardCount, 1, 32);
+  if (config.appServerShardCount > config.maxConcurrency) {
+    throw new Error("appServerShardCount must be <= maxConcurrency");
+  }
   intInRange("initialConcurrency", config.initialConcurrency, 1, 1_024);
   intInRange("minConcurrency", config.minConcurrency, 1, 1_024);
   if (config.minConcurrency > config.initialConcurrency) {

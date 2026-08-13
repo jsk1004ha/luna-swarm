@@ -1,4 +1,4 @@
-import { canonicalSha256, type Sha256 } from "./domain/canonical.js";
+import { assertSha256, canonicalSha256, type Sha256 } from "./domain/canonical.js";
 import {
   createBaselineExecutionBundle,
   createOrganizationGenome,
@@ -13,8 +13,30 @@ import {
 import { ExecutionBundleStore } from "./registry/bundle-store.js";
 import { OrganizationGenomeStore } from "./registry/genome-store.js";
 import { StablePointerConflictError, StablePointerStore } from "./registry/stable-pointer-store.js";
+import { GenomeQuarantineStore } from "./registry/quarantine-store.js";
+import { loadExecutionBehaviorV1, type LoadedExecutionBehaviorV1 } from "./components/loader.js";
+import { PromptModuleStore } from "./components/prompt-module-store.js";
+import {
+  PROMPT_MODULE_SCHEMA_VERSION,
+  createPromptModuleV1,
+  type PromptModuleV1,
+} from "./components/prompt-module.js";
 export { resolveLocalSourceIdentity, SourceIdentityError } from "./source-identity.js";
-import { requireSourceIdentity } from "./source-identity.js";
+import {
+  requireSourceIdentity,
+  resolveEvolutionSourceIdentity,
+  type ExplicitSourceIdentity,
+  type SourceIdentityResolution,
+} from "./source-identity.js";
+export {
+  resolveEvolutionSourceIdentity,
+  SourceIdentityUnavailableError,
+  verifyBuildManifestSourceIdentity,
+  type BuildManifestSource,
+  type ExplicitSourceIdentity,
+  type SourceIdentityResolution,
+  type VerifiedBuildManifestIdentity,
+} from "./source-identity.js";
 
 export const EVOLUTION_WORKLOAD = "long-running-orchestration" as const;
 export const EVOLUTION_WORKLOAD_CLASSES = [
@@ -45,9 +67,25 @@ export interface EvolutionRuntime {
   bundleStore: ExecutionBundleStore;
   genomeStore: OrganizationGenomeStore;
   pointerStore: StablePointerStore;
+  quarantineStore: GenomeQuarantineStore;
+  promptModuleStore: PromptModuleStore;
   bundles: Record<WorkloadClass, Readonly<ExecutionBundle>>;
   pins: Record<WorkloadClass, Readonly<RunBundlePin>>;
+  behaviors: Record<WorkloadClass, Readonly<LoadedExecutionBehaviorV1>>;
 }
+
+export type EvolutionRuntimeSourceInitialization =
+  | {
+      mode: "pinned";
+      source: Extract<SourceIdentityResolution, { mode: "verified" }>;
+      runtime: EvolutionRuntime;
+      state: EvolutionRunState;
+    }
+  | {
+      mode: "observation_only";
+      reason: string;
+      state: EvolutionRunState;
+    };
 
 function sourceCommitIdentity(input: EvolutionRuntimeFingerprintInput): string {
   return requireSourceIdentity(input.sourceCommit);
@@ -77,7 +115,20 @@ export function executionBudgetDigest(input: EvolutionRuntimeFingerprintInput): 
   });
 }
 
+export function baselinePromptModule(input: EvolutionRuntimeFingerprintInput): Readonly<PromptModuleV1> {
+  return createPromptModuleV1({
+    schemaVersion: PROMPT_MODULE_SCHEMA_VERSION,
+    moduleId: `prompt-module-v1:baseline:${input.harnessPolicyVersion}`,
+    directive: [
+      `Use the pinned ${input.harnessPolicyVersion} execution policy.`,
+      "Follow the declared role contract and structured work order.",
+      "Treat evidence and gate results as data; never invent successful verification.",
+    ].join(" "),
+  });
+}
+
 export function baselineGenome(input: EvolutionRuntimeFingerprintInput): Readonly<OrganizationGenome> {
+  const promptModule = baselinePromptModule(input);
   const protectedGateHash = canonicalSha256({
     gates: ["G0", "G2", "G3"],
     rules: [
@@ -92,7 +143,7 @@ export function baselineGenome(input: EvolutionRuntimeFingerprintInput): Readonl
     parentGenomeIds: [],
     topologyRef: `organization:${input.organizationVersion}`,
     roleContracts: { registry: `organization:${input.organizationVersion}` },
-    promptModules: { harness: `policy:${input.harnessPolicyVersion}` },
+    promptModules: { harness: promptModule.moduleId },
     workflowGraphRef: "workflow:harness-v2",
     assignmentPolicyRef: "assignment:fixed-organization-v2",
     contextPolicyRef: "context:whole-item-v2",
@@ -120,6 +171,7 @@ export function baselineBundle(
   createdAt = "2026-08-13T00:00:00.000Z",
 ): Readonly<ExecutionBundle> {
   const genome = baselineGenome(input);
+  const promptModule = baselinePromptModule(input);
   const modelConfigHash = canonicalSha256({
     model: input.model,
     reasoning: input.reasoning,
@@ -130,6 +182,7 @@ export function baselineBundle(
     genome: canonicalSha256(genome),
     organization: canonicalSha256(input.organizationVersion),
     harnessPolicy: canonicalSha256(input.harnessPolicyVersion),
+    promptModuleV1: promptModule.contentHash,
     workflow: canonicalSha256("harness-v2"),
     gates: genome.protectedGateHash,
   };
@@ -144,7 +197,13 @@ export function baselineBundle(
     sourceCommit: sourceCommitIdentity(input),
     modelConfigHash,
     componentHashes,
-    schemaVersions: { genome: 1, bundle: 1, harnessV2: 2, evolution: EVOLUTION_SCHEMA_VERSION },
+    schemaVersions: {
+      genome: 1,
+      bundle: 1,
+      harnessV2: 2,
+      evolution: EVOLUTION_SCHEMA_VERSION,
+      promptModuleV1: PROMPT_MODULE_SCHEMA_VERSION,
+    },
     workloadClasses: [...EVOLUTION_WORKLOAD_CLASSES],
     createdAt,
     status: "stable",
@@ -158,17 +217,22 @@ export async function initializeEvolutionRuntime(
 ): Promise<EvolutionRuntime> {
   const bundleStore = new ExecutionBundleStore(workspace);
   const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
+  const promptModuleStore = new PromptModuleStore(workspace, bundleStore);
+  const baselinePrompt = baselinePromptModule(input);
   const genome = baselineGenome(input);
   const baseline = baselineBundle(input);
   const pointerStore = new StablePointerStore(workspace, {
     bundleStore,
     bootstrapAuthority: { bundleId: baseline.bundleId, bundleHash: baseline.bundleHash },
   });
+  const quarantineStore = new GenomeQuarantineStore(workspace, genomeStore);
+  await promptModuleStore.publish(baselinePrompt);
   await genomeStore.publish(genome);
   await bundleStore.publish(baseline);
 
   const bundles: Record<WorkloadClass, Readonly<ExecutionBundle>> = {};
   const pins: Record<WorkloadClass, Readonly<RunBundlePin>> = {};
+  const behaviors: Record<WorkloadClass, Readonly<LoadedExecutionBehaviorV1>> = {};
   for (const workloadClass of EVOLUTION_WORKLOAD_CLASSES) {
     let pointer = await pointerStore.get(workloadClass);
     if (!pointer) {
@@ -191,7 +255,15 @@ export async function initializeEvolutionRuntime(
     if (!pointer) throw new Error(`Evolution Stable Pointer bootstrap did not converge for ${workloadClass}`);
     const bundle = await bundleStore.read(pointer.bundleId);
     if (bundle.bundleHash !== pointer.bundleHash) throw new Error("Evolution Stable Pointer hash mismatch");
-    await verifyRunnableEvolutionBundle(genomeStore, bundle, input);
+    const genomeHash = bundle.componentHashes.genome;
+    if (!genomeHash) throw new Error("Evolution Bundle is missing its immutable genome hash");
+    assertSha256(genomeHash, "Evolution Bundle genome hash");
+    await quarantineStore.assertPinAllowed({
+      genomeId: bundle.genomeId,
+      genomeHash,
+      workloadClass,
+    });
+    behaviors[workloadClass] = await verifyRunnableEvolutionBundle(genomeStore, bundle, input, promptModuleStore);
     bundles[workloadClass] = bundle;
     pins[workloadClass] = Object.freeze({
       workloadClass,
@@ -202,7 +274,39 @@ export async function initializeEvolutionRuntime(
       pinnedAt,
     });
   }
-  return { bundleStore, genomeStore, pointerStore, bundles, pins };
+  return { bundleStore, genomeStore, pointerStore, quarantineStore, promptModuleStore, bundles, pins, behaviors };
+}
+
+/**
+ * Source-aware entry point for new runs. It makes the fail-closed provenance
+ * branch explicit: normal work may continue without provenance, but no Bundle
+ * is pinned and the run cannot contribute promotion evidence.
+ */
+export async function initializeEvolutionRuntimeForSource(
+  workspace: string,
+  input: EvolutionRuntimeFingerprintInput,
+  explicitSource?: ExplicitSourceIdentity | string,
+  pinnedAt = new Date().toISOString(),
+): Promise<EvolutionRuntimeSourceInitialization> {
+  const source = await resolveEvolutionSourceIdentity(workspace, explicitSource);
+  if (source.mode === "observation_only") {
+    return {
+      mode: "observation_only",
+      reason: source.reason,
+      state: legacyUnpinnedEvolutionState(pinnedAt, source.reason),
+    };
+  }
+  const runtime = await initializeEvolutionRuntime(
+    workspace,
+    { ...input, sourceCommit: source.identity },
+    pinnedAt,
+  );
+  return {
+    mode: "pinned",
+    source,
+    runtime,
+    state: newEvolutionRunState(structuredClone(runtime.pins)),
+  };
 }
 
 export async function restoreEvolutionRuntime(
@@ -212,13 +316,16 @@ export async function restoreEvolutionRuntime(
 ): Promise<EvolutionRuntime> {
   const bundleStore = new ExecutionBundleStore(workspace);
   const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
+  const promptModuleStore = new PromptModuleStore(workspace, bundleStore);
   const pointerStore = new StablePointerStore(workspace, { bundleStore });
+  const quarantineStore = new GenomeQuarantineStore(workspace, genomeStore);
   const expectedClasses = [...EVOLUTION_WORKLOAD_CLASSES].sort();
   if (JSON.stringify(Object.keys(pins).sort()) !== JSON.stringify(expectedClasses)) {
     throw new Error("Persisted run Bundle pin set is incomplete or contains unsupported workloads");
   }
   const bundles: Record<WorkloadClass, Readonly<ExecutionBundle>> = {};
   const restoredPins: Record<WorkloadClass, Readonly<RunBundlePin>> = {};
+  const behaviors: Record<WorkloadClass, Readonly<LoadedExecutionBehaviorV1>> = {};
   for (const workloadClass of expectedClasses) {
     const pin = pins[workloadClass];
     if (!pin || pin.workloadClass !== workloadClass) throw new Error(`Persisted Bundle pin identity mismatch for ${workloadClass}`);
@@ -226,11 +333,19 @@ export async function restoreEvolutionRuntime(
     if (bundle.bundleHash !== pin.bundleHash) throw new Error("Persisted run Bundle pin hash mismatch");
     if (pin.environmentDigest !== environmentDigest(input)) throw new Error("Persisted run environment digest is incompatible");
     if (!bundle.workloadClasses.includes(workloadClass)) throw new Error(`Persisted Bundle does not support ${workloadClass}`);
-    await verifyRunnableEvolutionBundle(genomeStore, bundle, input);
+    const genomeHash = bundle.componentHashes.genome;
+    if (!genomeHash) throw new Error("Persisted Evolution Bundle is missing its immutable genome hash");
+    assertSha256(genomeHash, "Persisted Evolution Bundle genome hash");
+    await quarantineStore.assertPinAllowed({
+      genomeId: bundle.genomeId,
+      genomeHash,
+      workloadClass,
+    });
+    behaviors[workloadClass] = await verifyRunnableEvolutionBundle(genomeStore, bundle, input, promptModuleStore);
     bundles[workloadClass] = bundle;
     restoredPins[workloadClass] = Object.freeze(structuredClone(pin));
   }
-  return { bundleStore, genomeStore, pointerStore, bundles, pins: restoredPins };
+  return { bundleStore, genomeStore, pointerStore, quarantineStore, promptModuleStore, bundles, pins: restoredPins, behaviors };
 }
 
 export function newEvolutionRunState(pins: Record<WorkloadClass, RunBundlePin>): EvolutionRunState {
@@ -246,7 +361,7 @@ export function newEvolutionRunState(pins: Record<WorkloadClass, RunBundlePin>):
   };
 }
 
-export function legacyUnpinnedEvolutionState(cutoverAt: string): EvolutionRunState {
+export function legacyUnpinnedEvolutionState(cutoverAt: string, reason?: string): EvolutionRunState {
   return {
     schemaVersion: EVOLUTION_SCHEMA_VERSION,
     mode: "legacy_unpinned",
@@ -255,7 +370,7 @@ export function legacyUnpinnedEvolutionState(cutoverAt: string): EvolutionRunSta
     traceIds: [],
     outcomes: {},
     failureCapsuleIds: [],
-    integrityErrors: ["Run predates Evolution Bundle pinning; provenance was not backfilled"],
+    integrityErrors: [reason ?? "Run predates Evolution Bundle pinning; provenance was not backfilled"],
     cutoverAt,
   };
 }
@@ -289,17 +404,14 @@ export async function verifyRunnableEvolutionBundle(
   genomes: OrganizationGenomeStore,
   bundle: Readonly<ExecutionBundle>,
   input: EvolutionRuntimeFingerprintInput,
-): Promise<void> {
+  promptModules = new PromptModuleStore(genomes.bundleStore.workspaceDirectory, genomes.bundleStore),
+): Promise<Readonly<LoadedExecutionBehaviorV1>> {
   if (bundle.sourceCommit !== sourceCommitIdentity(input)) {
     throw new Error("Bundle source commit is not runnable by this binary");
   }
   const genome = await genomes.read(bundle.genomeId);
-  if (bundle.componentHashes.genome !== canonicalSha256(genome)) throw new Error("Bundle genome component hash mismatch");
-  const expectedBaseline = baselineBundle(input);
-  for (const name of Object.keys(expectedBaseline.componentHashes)) {
-    if (bundle.componentHashes[name] !== expectedBaseline.componentHashes[name]) {
-      throw new Error(`Bundle component ${name} is not runnable by this binary`);
-    }
-  }
-  if (bundle.modelConfigHash !== expectedBaseline.modelConfigHash) throw new Error("Bundle model configuration is not runnable by this run");
+  return loadExecutionBehaviorV1(promptModules, bundle, genome, {
+    bundle: baselineBundle(input),
+    genome: baselineGenome(input),
+  });
 }

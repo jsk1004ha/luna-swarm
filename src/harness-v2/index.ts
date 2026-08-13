@@ -1,6 +1,7 @@
 export * from "./contracts.js";
 export * from "./messages.js";
 export * from "./organization-registry.js";
+export * from "./staffing-plan.js";
 export * from "./work-orders.js";
 export * from "./blackboard.js";
 export * from "./gates.js";

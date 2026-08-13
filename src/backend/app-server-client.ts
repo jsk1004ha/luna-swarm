@@ -9,7 +9,7 @@ type RpcObject = Record<string, unknown>;
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
-  dispose: (clearDeadline: boolean) => void;
+  dispose: (clearDeadline: boolean) => boolean;
   aborted: boolean;
   onLateResult?: (value: unknown) => Promise<void> | void;
   onLateSettled?: () => void;
@@ -24,6 +24,9 @@ export interface AppServerClientOptions {
   env?: NodeJS.ProcessEnv;
   onStderr?: (line: string) => void;
   rpcTimeoutMs?: number;
+  writerMaxMessageBytes?: number;
+  writerMaxQueueBytes?: number;
+  writerMaxQueueMessages?: number;
 }
 
 export interface RpcRequestOptions<T> {
@@ -32,12 +35,162 @@ export interface RpcRequestOptions<T> {
   onLateSettled?: () => void;
 }
 
+export interface StdioWriterLimits {
+  maxMessageBytes: number;
+  maxQueueBytes: number;
+  maxQueueMessages: number;
+}
+
+interface DrainWritable {
+  destroyed?: boolean;
+  write(chunk: string): boolean;
+  once(event: "drain", listener: () => void): unknown;
+  removeListener(event: "drain", listener: () => void): unknown;
+}
+
+interface QueuedWrite {
+  message: string;
+  bytes: number;
+}
+
+export interface StdioWriterSnapshot {
+  backpressured: boolean;
+  closed: boolean;
+  queuedBytes: number;
+  queuedMessages: number;
+}
+
+/** A failure that proves the stdio transport or its app-server session is unhealthy. */
+export class AppServerTransportError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "AppServerTransportError";
+  }
+}
+
+/** A generation-scoped, bounded FIFO in front of one app-server stdin stream. */
+export class BoundedStdioWriter {
+  private readonly queue: QueuedWrite[] = [];
+  private queuedBytes = 0;
+  private backpressured = false;
+  private closed = false;
+  private readonly onDrain = () => {
+    if (this.closed) return;
+    this.backpressured = false;
+    try {
+      this.flush();
+    } catch {
+      // send() already closed the writer and reported a payload-free fatal error.
+    }
+  };
+
+  constructor(
+    private readonly stream: DrainWritable,
+    private readonly limits: StdioWriterLimits,
+    private readonly onFatal: (error: Error) => void,
+  ) {
+    assertPositiveInteger("maxMessageBytes", limits.maxMessageBytes);
+    assertPositiveInteger("maxQueueBytes", limits.maxQueueBytes);
+    assertPositiveInteger("maxQueueMessages", limits.maxQueueMessages);
+  }
+
+  write(message: string): () => boolean {
+    if (this.closed) throw new Error("App server writer is closed");
+    const bytes = Buffer.byteLength(message, "utf8");
+    if (bytes > this.limits.maxMessageBytes) {
+      throw new Error(
+        `App server writer message size exceeds the ${this.limits.maxMessageBytes}-byte limit`,
+      );
+    }
+    if (this.stream.destroyed) {
+      const error = new AppServerTransportError("App server stdin is unavailable");
+      this.close();
+      this.onFatal(error);
+      throw error;
+    }
+    if (!this.backpressured && this.queue.length === 0) {
+      this.send(message);
+      return () => false;
+    }
+    if (
+      this.queue.length >= this.limits.maxQueueMessages
+      || this.queuedBytes + bytes > this.limits.maxQueueBytes
+    ) {
+      throw new Error(
+        `App server writer queue capacity exceeded (${this.limits.maxQueueMessages} messages / ${this.limits.maxQueueBytes} bytes)`,
+      );
+    }
+    const queued = { message, bytes };
+    this.queue.push(queued);
+    this.queuedBytes += bytes;
+    return () => this.cancel(queued);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.backpressured) this.stream.removeListener("drain", this.onDrain);
+    this.backpressured = false;
+    this.queue.length = 0;
+    this.queuedBytes = 0;
+  }
+
+  snapshot(): StdioWriterSnapshot {
+    return {
+      backpressured: this.backpressured,
+      closed: this.closed,
+      queuedBytes: this.queuedBytes,
+      queuedMessages: this.queue.length,
+    };
+  }
+
+  private flush(): void {
+    while (!this.closed && !this.backpressured && this.queue.length > 0) {
+      const queued = this.queue.shift()!;
+      this.queuedBytes -= queued.bytes;
+      this.send(queued.message);
+    }
+  }
+
+  private send(message: string): void {
+    let accepted: boolean;
+    try {
+      accepted = this.stream.write(message);
+    } catch (cause) {
+      const error = new AppServerTransportError("App server stdin write failed", { cause });
+      this.close();
+      this.onFatal(error);
+      throw error;
+    }
+    if (!accepted) {
+      this.backpressured = true;
+      this.stream.once("drain", this.onDrain);
+    }
+  }
+
+  private cancel(queued: QueuedWrite): boolean {
+    if (this.closed) return false;
+    const index = this.queue.indexOf(queued);
+    if (index < 0) return false;
+    this.queue.splice(index, 1);
+    this.queuedBytes -= queued.bytes;
+    return true;
+  }
+}
+
+const DEFAULT_STDIO_WRITER_LIMITS: StdioWriterLimits = {
+  maxMessageBytes: 2 * 1024 * 1024,
+  maxQueueBytes: 8 * 1024 * 1024,
+  maxQueueMessages: 1_024,
+};
+
 export class AppServerClient {
   private child: ChildProcessWithoutNullStreams | undefined;
   private readonly pending = new Map<RpcId, PendingRequest>();
   private readonly threadListeners = new Map<string, Set<NotificationListener>>();
   private readonly fatalListeners = new Set<(error: Error) => void>();
   private startPromise: Promise<void> | undefined;
+  private writer: BoundedStdioWriter | undefined;
   private nextId = 1;
   private closed = false;
   private stderrTail: string[] = [];
@@ -66,12 +219,35 @@ export class AppServerClient {
       windowsHide: true,
     });
     this.child = child;
-    child.once("error", (error) => this.handleChildFailure(child, error));
+    this.writer = new BoundedStdioWriter(
+      child.stdin,
+      {
+        maxMessageBytes:
+          this.options.writerMaxMessageBytes ?? DEFAULT_STDIO_WRITER_LIMITS.maxMessageBytes,
+        maxQueueBytes:
+          this.options.writerMaxQueueBytes ?? DEFAULT_STDIO_WRITER_LIMITS.maxQueueBytes,
+        maxQueueMessages:
+          this.options.writerMaxQueueMessages ?? DEFAULT_STDIO_WRITER_LIMITS.maxQueueMessages,
+      },
+      (error) => {
+        if (this.child === child) this.recycle(error);
+      },
+    );
+    child.stdin.on("error", (cause) => {
+      if (this.child !== child) return;
+      this.recycle(
+        new AppServerTransportError("App server stdin failed; recycling session", { cause }),
+      );
+    });
+    child.once("error", (cause) => this.handleChildFailure(
+      child,
+      new AppServerTransportError("Failed to run codex app-server process", { cause }),
+    ));
     child.once("exit", (code, signal) => {
       const tail = this.stderrTail.slice(-8).join("\n");
       this.handleChildFailure(
         child,
-        new Error(
+        new AppServerTransportError(
           `codex app-server exited (${signal ?? code ?? "unknown"})${tail ? `: ${tail}` : ""}`,
         ),
       );
@@ -97,10 +273,12 @@ export class AppServerClient {
         },
       });
     } catch (error) {
-      this.recycle(
-        new Error("App server initialization failed; recycling session", { cause: error }),
+      const transportError = new AppServerTransportError(
+        `App server initialization failed; recycling session: ${errorMessage(error)}`,
+        { cause: error },
       );
-      throw error;
+      this.recycle(transportError);
+      throw transportError;
     }
     this.notify("initialized");
   }
@@ -111,12 +289,19 @@ export class AppServerClient {
     if (signal?.aborted) return Promise.reject(abortError(signal));
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
+      let cancelWrite: () => boolean = () => false;
       const onAbort = () => {
         const pending = this.pending.get(id);
         if (!pending) return;
-        pending.dispose(!pending.onLateResult);
         pending.aborted = true;
-        if (!pending.onLateResult) this.pending.delete(id);
+        const canceledBeforeSend = pending.dispose(!pending.onLateResult);
+        if (canceledBeforeSend) {
+          this.pending.delete(id);
+          pending.dispose(true);
+          pending.onLateSettled?.();
+        } else if (!pending.onLateResult) {
+          this.pending.delete(id);
+        }
         reject(abortError(signal));
       };
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -127,22 +312,24 @@ export class AppServerClient {
           pending.dispose(true);
           pending.onLateSettled?.();
           if (!pending.aborted) {
-            pending.reject(
-              new Error(`App server RPC ${method} timed out after ${this.rpcTimeoutMs()}ms`),
-            );
+            pending.reject(new AppServerTransportError(
+              `App server RPC ${method} timed out after ${this.rpcTimeoutMs()}ms`,
+            ));
           }
         }
-        this.recycle(
-          new Error(`App server RPC ${method} timed out after ${this.rpcTimeoutMs()}ms`),
-        );
+        this.recycle(new AppServerTransportError(
+          `App server RPC ${method} timed out after ${this.rpcTimeoutMs()}ms`,
+        ));
       }, this.rpcTimeoutMs());
       deadline.unref?.();
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
         dispose: (clearDeadline) => {
+          const canceledBeforeSend = cancelWrite();
           signal?.removeEventListener("abort", onAbort);
           if (clearDeadline) clearTimeout(deadline);
+          return canceledBeforeSend;
         },
         aborted: false,
         ...(onLateResult
@@ -151,7 +338,7 @@ export class AppServerClient {
         ...(onLateSettled ? { onLateSettled } : {}),
       });
       try {
-        this.write({ id, method, params });
+        cancelWrite = this.write({ id, method, params });
       } catch (error) {
         this.pending.delete(id);
         signal?.removeEventListener("abort", onAbort);
@@ -190,6 +377,8 @@ export class AppServerClient {
     this.closed = true;
     const child = this.child;
     this.child = undefined;
+    this.writer?.close();
+    this.writer = undefined;
     this.failAll(new Error("App server closed"));
     if (!child || child.exitCode !== null) return;
     child.kill("SIGTERM");
@@ -206,7 +395,7 @@ export class AppServerClient {
     try {
       message = JSON.parse(line) as RpcObject;
     } catch {
-      this.recycle(new Error(`Invalid app-server JSON: ${line}`));
+      this.recycle(new AppServerTransportError("Invalid JSON from app-server session"));
       return;
     }
 
@@ -283,10 +472,10 @@ export class AppServerClient {
     });
   }
 
-  private write(message: RpcObject): void {
-    const stdin = this.child?.stdin;
-    if (!stdin || stdin.destroyed) throw new Error("App server stdin is unavailable");
-    stdin.write(`${JSON.stringify(message)}\n`);
+  private write(message: RpcObject): () => boolean {
+    if (this.closed) throw new Error("App server is closed");
+    if (!this.child || !this.writer) throw new Error("App server stdin is unavailable");
+    return this.writer.write(`${JSON.stringify(message)}\n`);
   }
 
   private failAll(error: unknown): void {
@@ -301,6 +490,8 @@ export class AppServerClient {
 
   private handleChildFailure(child: ChildProcessWithoutNullStreams, error: Error): void {
     if (this.closed || this.child !== child) return;
+    this.writer?.close();
+    this.writer = undefined;
     this.child = undefined;
     this.startPromise = undefined;
     this.failAll(error);
@@ -314,12 +505,22 @@ export class AppServerClient {
     if (child.exitCode === null) child.kill("SIGKILL");
   }
 
-  recycleUncertainSession(error: Error): void {
-    this.recycle(error);
+  recycleUncertainSession(error: Error): AppServerTransportError {
+    const transportError = error instanceof AppServerTransportError
+      ? error
+      : new AppServerTransportError("App server session became uncertain", { cause: error });
+    this.recycle(transportError);
+    return transportError;
   }
 
   private rpcTimeoutMs(): number {
     return this.options.rpcTimeoutMs ?? 30_000;
+  }
+}
+
+function assertPositiveInteger(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${name} must be a positive safe integer`);
   }
 }
 

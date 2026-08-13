@@ -91,6 +91,7 @@ export async function createObjectiveEvidence(
   record.validationAttempts = 1;
 
   const runStore = new AtomicRunStore(workspace, stateDirectory, runId);
+  await runStore.create();
   const blackboard = new BlackboardStore(runStore.runDirectory, runId);
   const outputContent = {
     taskId: workOrderId,

@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, verify as verifySignature } from "node:crypto";
 import { lstat, readFile, readlink } from "node:fs/promises";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { canonicalSha256 } from "./domain/canonical.js";
+import { canonicalJson, canonicalSha256, type Sha256 } from "./domain/canonical.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -15,12 +15,79 @@ const PLACEHOLDER_IDENTITIES = new Set(["workspace-current", "unknown", "develop
 const EXCLUDED_PATHS = [".", ":(exclude).luna-swarm", ":(exclude).luna-swarm/**"];
 
 export class SourceIdentityError extends Error {}
+export class SourceIdentityUnavailableError extends SourceIdentityError {}
+
+export interface BuildManifestSource {
+  buildId: string;
+  sourceIdentity: string;
+  artifactDigest: Sha256;
+}
+
+export interface VerifiedBuildManifestIdentity {
+  kind: "verified_build_manifest";
+  value: string;
+  manifest: Readonly<BuildManifestSource>;
+}
+
+export type ExplicitSourceIdentity =
+  | { kind: "config"; value: string }
+  | { kind: "luna_environment"; value: string }
+  | VerifiedBuildManifestIdentity;
+
+export type SourceIdentityInput = string | ExplicitSourceIdentity;
+
+export type SourceIdentityResolution =
+  | {
+      mode: "verified";
+      identity: string;
+      origin: "git" | ExplicitSourceIdentity["kind"];
+    }
+  | {
+      mode: "observation_only";
+      reason: string;
+    };
+
+const verifiedBuildManifests = new WeakSet<object>();
+
+/** Verifies a signed build manifest against a caller-configured trusted key. */
+export function verifyBuildManifestSourceIdentity(
+  manifest: BuildManifestSource,
+  signatureBase64: string,
+  trustedPublicKeyPem: string,
+): Readonly<VerifiedBuildManifestIdentity> {
+  if (!manifest.buildId.trim()) throw new SourceIdentityError("Build manifest buildId is required");
+  if (!/^sha256:[a-f0-9]{64}$/.test(manifest.artifactDigest)) {
+    throw new SourceIdentityError("Build manifest artifact digest is not canonical SHA-256");
+  }
+  const identity = requireNonGitIdentity(manifest.sourceIdentity);
+  let signature: Buffer;
+  try {
+    signature = Buffer.from(signatureBase64, "base64");
+  } catch {
+    throw new SourceIdentityError("Build manifest signature is not valid base64");
+  }
+  if (signature.byteLength === 0 || !verifySignature(
+    null,
+    Buffer.from(canonicalJson(manifest), "utf8"),
+    trustedPublicKeyPem,
+    signature,
+  )) {
+    throw new SourceIdentityError("Build manifest signature verification failed");
+  }
+  const verified: VerifiedBuildManifestIdentity = Object.freeze({
+    kind: "verified_build_manifest",
+    value: identity,
+    manifest: Object.freeze(structuredClone(manifest)),
+  });
+  verifiedBuildManifests.add(verified);
+  return verified;
+}
 
 /**
  * Resolves a reproducible identity for the complete local Git worktree.
  * An explicit build identity is accepted only when the workspace is not a Git repository.
  */
-export async function resolveLocalSourceIdentity(workspace: string, explicitBuildIdentity?: string): Promise<string> {
+export async function resolveLocalSourceIdentity(workspace: string, explicitBuildIdentity?: SourceIdentityInput): Promise<string> {
   const root = resolve(workspace);
   const gitRoot = await discoverGitRoot(root);
   if (!gitRoot) return requireExplicitBuildIdentity(explicitBuildIdentity);
@@ -34,6 +101,28 @@ export async function resolveLocalSourceIdentity(workspace: string, explicitBuil
   if (first.trackedDiffHash === null && first.untracked.length === 0) return `git:${first.head}:clean`;
   const dirtyDigest = canonicalSha256({ trackedDiffHash: first.trackedDiffHash, untracked: first.untracked });
   return `git:${first.head}:dirty:${dirtyDigest.slice("sha256:".length)}`;
+}
+
+/**
+ * Resolves source provenance without consulting ambient CI variables. Missing
+ * provenance is an explicit observation-only outcome, while Git integrity and
+ * malformed manifest failures remain hard errors.
+ */
+export async function resolveEvolutionSourceIdentity(
+  workspace: string,
+  explicitSource?: SourceIdentityInput,
+): Promise<SourceIdentityResolution> {
+  try {
+    const identity = await resolveLocalSourceIdentity(workspace, explicitSource);
+    return {
+      mode: "verified",
+      identity,
+      origin: identity.startsWith("git:") ? "git" : explicitOrigin(explicitSource),
+    };
+  } catch (error) {
+    if (!(error instanceof SourceIdentityUnavailableError)) throw error;
+    return { mode: "observation_only", reason: error.message };
+  }
 }
 
 export function requireSourceIdentity(value: string | undefined): string {
@@ -131,8 +220,30 @@ async function gitBuffer(cwd: string, args: string[]): Promise<Buffer> {
   return stdout;
 }
 
-function requireExplicitBuildIdentity(value: string | undefined): string {
-  return requireSourceIdentity(value);
+function requireExplicitBuildIdentity(input: SourceIdentityInput | undefined): string {
+  if (input === undefined) {
+    throw new SourceIdentityUnavailableError(
+      "A concrete source identity is required; use config.sourceIdentity, LUNA_SOURCE_COMMIT, or a verified build manifest",
+    );
+  }
+  if (typeof input === "string") return requireNonGitIdentity(input);
+  if (input.kind === "verified_build_manifest" && !verifiedBuildManifests.has(input)) {
+    throw new SourceIdentityError("Build manifest source identity must be cryptographically verified before use");
+  }
+  return requireNonGitIdentity(input.value);
+}
+
+function requireNonGitIdentity(value: string): string {
+  const identity = requireSourceIdentity(value);
+  if (identity.startsWith("git:")) {
+    throw new SourceIdentityError("Only a verified local Git worktree may produce a git: source identity");
+  }
+  return identity;
+}
+
+function explicitOrigin(input: SourceIdentityInput | undefined): ExplicitSourceIdentity["kind"] {
+  if (typeof input === "object") return input.kind;
+  return "config";
 }
 
 function isPlaceholder(value: string): boolean {

@@ -321,6 +321,8 @@ export interface SwarmConfig {
     benchmarkSuites: Record<string, string>;
   }>;
   maxConcurrency: number;
+  /** Independent Codex App Server transport processes. Logical roster size is unrelated. */
+  appServerShardCount: number;
   initialConcurrency: number;
   minConcurrency: number;
   maxTasks: number;

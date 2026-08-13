@@ -33,6 +33,35 @@ function config() {
   };
 }
 
+function emptyRunState(
+  store: AtomicRunStore,
+  workspace: string,
+  goal: string,
+): RunState {
+  const now = new Date(0).toISOString();
+  return {
+    schemaVersion: 1,
+    revision: 0,
+    runId: store.runId,
+    status: "planning",
+    goal,
+    workspace,
+    createdAt: now,
+    updatedAt: now,
+    config: config(),
+    organization: companySnapshot(),
+    teams: {},
+    tasks: {},
+    threadIds: {},
+    metrics: {
+      modelCalls: 0,
+      retries: 0,
+      rateLimitEvents: 0,
+      maxActiveCalls: 0,
+    },
+  };
+}
+
 function directive(runId: string, id = "directive-1"): RunDirective {
   return {
     id,
@@ -73,6 +102,7 @@ test("directive store round-trips, caps reads, validates input, and leaves state
   const workspace = await mkdtemp(join(tmpdir(), "luna-directive-store-"));
   try {
     const store = new AtomicRunStore(workspace, ".state", "run-directives");
+    await store.create();
     const now = new Date(0).toISOString();
     const state: RunState = {
       schemaVersion: 1,
@@ -138,6 +168,7 @@ test("a directive added during an active call affects only later role calls and 
   try {
     const cfg = config();
     const store = new AtomicRunStore(workspace, ".state", "run-live-directive");
+    await store.create();
     let appended = false;
     const backend = new MockAgentBackend(async (request) => {
       if (!appended && request.purpose === "candidate_plan") {
@@ -185,6 +216,7 @@ test("resume keeps acknowledged directives active without duplicating applied ev
   try {
     const cfg = config();
     const store = new AtomicRunStore(workspace, ".state", "run-resume-directive");
+    await store.create();
     const command = directive(store.runId);
     await store.appendDirective(command);
     await store.ackAppliedDirectiveIds([command.id]);
@@ -266,6 +298,7 @@ test("a directive queued during final judging triggers a new judge checkpoint", 
   try {
     const cfg = config();
     const store = new AtomicRunStore(workspace, ".state", "run-final-directive");
+    await store.create();
     const lateDirective = {
       ...directive(store.runId, "directive-final"),
       text: "최종 보고에 운영 리스크 완화책을 추가할 것",
@@ -307,6 +340,9 @@ test("the directive gate serializes a terminal close against concurrent appender
   try {
     const writer = new AtomicRunStore(workspace, ".state", "run-gate-race");
     const closer = new AtomicRunStore(workspace, ".state", "run-gate-race");
+    await writer.create();
+    await writer.save(emptyRunState(writer, workspace, "gate race"));
+    await closer.load();
     for (let index = 0; index < 40; index += 1) {
       await closer.openDirectiveGate();
       const command = {
@@ -338,6 +374,7 @@ test("an abandoned command lock is reclaimed without blocking resume or interven
   const workspace = await mkdtemp(join(tmpdir(), "luna-directive-stale-lock-"));
   try {
     const store = new AtomicRunStore(workspace, ".state", "run-stale-command-lock");
+    await store.create();
     await store.init();
     const old = new Date(Date.now() - 10 * 60_000);
     const deadPid = await exitedProcessId();
@@ -366,6 +403,7 @@ test("an old lock owned by a live process is never reclaimed by age alone", asyn
   const workspace = await mkdtemp(join(tmpdir(), "luna-directive-live-lock-"));
   try {
     const store = new AtomicRunStore(workspace, ".state", "run-live-command-lock");
+    await store.create();
     await store.init();
     const old = new Date(Date.now() - 10 * 60_000);
     await writeFile(
@@ -394,6 +432,7 @@ test("resume reconciles a command persisted before its queued audit event", asyn
   const workspace = await mkdtemp(join(tmpdir(), "luna-directive-reconcile-"));
   try {
     const store = new AtomicRunStore(workspace, ".state", "run-reconcile-command");
+    await store.create();
     await store.init();
     const command = directive(store.runId, "directive-reconciled");
     await writeFile(
@@ -432,6 +471,7 @@ test("directive contexts have a validated minimum and fail fast when bypassed", 
   try {
     const cfg = { ...config(), maxContextChars: 128 };
     const store = new AtomicRunStore(workspace, ".state", "run-small-context");
+    await store.create();
     await store.appendDirective(directive(store.runId));
     const backend = new MockAgentBackend(demoHandler);
     const gateway = new AgentGateway({ backend, config: cfg });
@@ -460,6 +500,7 @@ test("model prompts stay bounded and required structured context fails closed in
       return demoHandler(request);
     });
     const store = new AtomicRunStore(workspace, ".state", "run-context-bound");
+    await store.create();
     const orchestrator = new SwarmOrchestrator({
       gateway: new AgentGateway({ backend, config: cfg }),
       store,
@@ -486,6 +527,7 @@ test("more than 24 directives are applied in prompt-sized batches without silent
   try {
     const cfg = config();
     const store = new AtomicRunStore(workspace, ".state", "run-bulk-directives");
+    await store.create();
     const commands = Array.from({ length: 25 }, (_, index) => ({
       ...directive(store.runId, `directive-bulk-${String(index + 1).padStart(2, "0")}`),
       at: new Date(1_000 + index).toISOString(),

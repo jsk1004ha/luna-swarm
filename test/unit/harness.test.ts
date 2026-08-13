@@ -315,9 +315,11 @@ test("current run experience is persisted as weak observation and never recalled
   try {
     const cfg = { ...config(), stateDirectory: ".state" };
     const firstBackend = new MockAgentBackend(demoHandler);
+    const firstStore = new AtomicRunStore(workspace, cfg.stateDirectory, "learning-run-1");
+    await firstStore.create();
     const first = new SwarmOrchestrator({
       gateway: new AgentGateway({ backend: firstBackend, config: cfg }),
-      store: new AtomicRunStore(workspace, cfg.stateDirectory, "learning-run-1"),
+      store: firstStore,
       config: cfg,
       workspace,
     });
@@ -356,9 +358,11 @@ test("current run experience is persisted as weak observation and never recalled
     assert.match(afterRestart, /requirements-traceability|evidence-first-research/);
 
     const secondBackend = new MockAgentBackend(demoHandler);
+    const secondStore = new AtomicRunStore(workspace, cfg.stateDirectory, "learning-run-2");
+    await secondStore.create();
     const second = new SwarmOrchestrator({
       gateway: new AgentGateway({ backend: secondBackend, config: cfg }),
-      store: new AtomicRunStore(workspace, cfg.stateDirectory, "learning-run-2"),
+      store: secondStore,
       config: cfg,
       workspace,
     });

@@ -1,20 +1,23 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { canonicalSha256 } from "../../src/evolution/domain/canonical.js";
+import { assertSha256, canonicalJson, canonicalSha256 } from "../../src/evolution/domain/canonical.js";
 import { createExecutionBundle } from "../../src/evolution/domain/bundle.js";
 import type { PairedEvaluationReceipt } from "../../src/evolution/evaluation/receipt.js";
 import {
   EVOLUTION_WORKLOAD_CLASSES,
   environmentDigest,
+  initializeEvolutionRuntimeForSource,
   initializeEvolutionRuntime,
   newEvolutionRunState,
   restoreEvolutionRuntime,
   resolveLocalSourceIdentity,
+  verifyBuildManifestSourceIdentity,
   type EvolutionRuntimeFingerprintInput,
 } from "../../src/evolution/runtime.js";
 
@@ -27,6 +30,7 @@ const fingerprint: EvolutionRuntimeFingerprintInput = {
   organizationVersion: "lab-128@2",
   sourceCommit: "test-commit",
 };
+const { sourceCommit: _sourceCommit, ...sourceLessFingerprint } = fingerprint;
 const workload = "engineering.bugfix";
 const execFileAsync = promisify(execFile);
 
@@ -90,6 +94,67 @@ test("non-Git workspaces reject missing or placeholder source identities", async
   await assert.rejects(() => resolveLocalSourceIdentity(workspace), /concrete source identity is required/);
   await assert.rejects(() => resolveLocalSourceIdentity(workspace, "workspace-current"), /concrete source identity is required/);
   assert.equal(await resolveLocalSourceIdentity(workspace, "build:release-2026.08.13"), "build:release-2026.08.13");
+});
+
+test("ambient GITHUB_SHA cannot silently authorize Evolution provenance", async (t) => {
+  const workspace = await workspaceFixture(t);
+  const previous = process.env.GITHUB_SHA;
+  process.env.GITHUB_SHA = "a".repeat(40);
+  t.after(() => {
+    if (previous === undefined) delete process.env.GITHUB_SHA;
+    else process.env.GITHUB_SHA = previous;
+  });
+
+  const resolved = await initializeEvolutionRuntimeForSource(
+    workspace,
+    sourceLessFingerprint,
+    undefined,
+    "2026-08-13T00:00:00.000Z",
+  );
+  assert.equal(resolved.mode, "observation_only");
+  assert.equal(resolved.state.promotionEligible, false);
+  assert.deepEqual(resolved.state.bundlePins, {});
+  assert.match(resolved.reason, /concrete source identity is required/);
+});
+
+test("non-Git provenance accepts only an explicitly attributed identity", async (t) => {
+  const workspace = await workspaceFixture(t);
+  const resolved = await initializeEvolutionRuntimeForSource(
+    workspace,
+    sourceLessFingerprint,
+    { kind: "luna_environment", value: "build:release-2026.08.13" },
+    "2026-08-13T00:00:00.000Z",
+  );
+  assert.equal(resolved.mode, "pinned");
+  assert.equal(resolved.source.origin, "luna_environment");
+  assert.equal(resolved.source.identity, "build:release-2026.08.13");
+  assert.equal(resolved.state.promotionEligible, true);
+  assert.ok(Object.keys(resolved.state.bundlePins).length > 0);
+});
+
+test("build-manifest provenance requires a valid signature from a trusted key", async (t) => {
+  const workspace = await workspaceFixture(t);
+  const manifest = {
+    buildId: "release-2026.08.13",
+    sourceIdentity: "build:packaged-release",
+    artifactDigest: `sha256:${"b".repeat(64)}` as const,
+  };
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  assert.throws(
+    () => verifyBuildManifestSourceIdentity(manifest, Buffer.from("forged").toString("base64"), publicKeyPem),
+    /signature verification failed/,
+  );
+  const signature = sign(null, Buffer.from(canonicalJson(manifest), "utf8"), privateKey).toString("base64");
+  const verified = verifyBuildManifestSourceIdentity(manifest, signature, publicKeyPem);
+  await assert.rejects(
+    () => resolveLocalSourceIdentity(workspace, structuredClone(verified)),
+    /must be cryptographically verified/,
+  );
+  assert.equal(
+    await resolveLocalSourceIdentity(workspace, verified),
+    "build:packaged-release",
+  );
 });
 
 test("concurrent baseline bootstrap converges to one complete workload pin set", async (t) => {
@@ -184,5 +249,30 @@ test("restore rejects pins created by a different source commit", async (t) => {
   await assert.rejects(
     () => restoreEvolutionRuntime(workspace, sourceB, forgedEnvironmentPins),
     /source commit is not runnable/,
+  );
+});
+
+test("new and resumed runs reject a globally quarantined pinned genome", async (t) => {
+  const workspace = await workspaceFixture(t);
+  const runtime = await initializeEvolutionRuntime(workspace, fingerprint);
+  const pinnedBundle = runtime.bundles[workload]!;
+  const genomeHash = pinnedBundle.componentHashes.genome!;
+  assertSha256(genomeHash, "test genome hash");
+  await runtime.quarantineStore.quarantine({
+    genomeId: pinnedBundle.genomeId,
+    genomeHash,
+    scope: { type: "global" },
+    expectedRevision: 0,
+    reason: "reproduced protected regression",
+    quarantinedAt: "2026-08-13T05:00:00.000Z",
+  });
+
+  await assert.rejects(
+    () => initializeEvolutionRuntime(workspace, fingerprint, "2026-08-13T05:01:00.000Z"),
+    /quarantined for all workloads/,
+  );
+  await assert.rejects(
+    () => restoreEvolutionRuntime(workspace, fingerprint, structuredClone(runtime.pins)),
+    /quarantined for all workloads/,
   );
 });

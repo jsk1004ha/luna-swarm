@@ -3,9 +3,14 @@ import { dirname, join, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import { CodexAppServerBackend } from "../../src/backend/codex-app-server.js";
-import { AppServerClient } from "../../src/backend/app-server-client.js";
+import {
+  AppServerClient,
+  AppServerTransportError,
+  BoundedStdioWriter,
+} from "../../src/backend/app-server-client.js";
 import { DEFAULT_CONFIG } from "../../src/config.js";
 import type { AgentRequest } from "../../src/backend/agent-backend.js";
 import { AgentPolicyError } from "../../src/backend/agent-backend.js";
@@ -14,6 +19,23 @@ import { AgentGateway } from "../../src/runtime/gateway.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fakeCodex = resolve(here, "../fixtures/fake-codex.mjs");
+
+class ControlledWritable extends EventEmitter {
+  readonly writes: string[] = [];
+  destroyed = false;
+  private blockNext = true;
+
+  write(chunk: string): boolean {
+    this.writes.push(chunk);
+    if (!this.blockNext) return true;
+    this.blockNext = false;
+    return false;
+  }
+
+  releaseBackpressure(): void {
+    this.emit("drain");
+  }
+}
 
 function request(threadKey: string, prompt: string): AgentRequest {
   return {
@@ -76,14 +98,23 @@ function policyRequest(
   };
 }
 
-test("late turn/start after abort returns promptly and is interrupted once", async () => {
+test("late turn/start after abort returns promptly and is interrupted once", { timeout: 10_000 }, async () => {
   const stderr: string[] = [];
+  let interruptObserved = false;
+  let resolveInterruptCleanup!: () => void;
+  const interruptCleanup = new Promise<void>((resolve) => {
+    resolveInterruptCleanup = resolve;
+  });
   const instance = new CodexAppServerBackend({
     workspace: process.cwd(),
     codexPath: process.execPath,
     codexArgs: [fakeCodex],
     config: DEFAULT_CONFIG,
-    onStderr: (line) => stderr.push(line),
+    onStderr: (line) => {
+      stderr.push(line);
+      if (line.startsWith("INTERRUPT ")) interruptObserved = true;
+      if (interruptObserved && line.startsWith("ACTIVE 0 ")) resolveInterruptCleanup();
+    },
   });
   try {
     await instance.run(request("warmup", "warmup"));
@@ -93,7 +124,7 @@ test("late turn/start after abort returns promptly and is interrupted once", asy
     setTimeout(() => controller.abort(), 50);
     await assert.rejects(result, { name: "AbortError" });
     assert.ok(Date.now() - startedAt < 100, "abort returned before the delayed turn ID");
-    await new Promise((resolve) => setTimeout(resolve, 180));
+    await interruptCleanup;
     assert.equal(stderr.filter((line) => line.startsWith("INTERRUPT ")).length, 1);
   } finally {
     await instance.close();
@@ -133,6 +164,290 @@ test("more than ten simultaneous turns route notifications independently", async
     process.off("warning", onWarning);
     await instance.close();
   }
+});
+
+test("per-thread serialization locks are reclaimed after unique threads finish", async () => {
+  const instance = backend();
+  try {
+    await Promise.all(
+      Array.from({ length: 64 }, (_, index) =>
+        instance.run(request(`reclaim-${index}`, `turn-${index}`)),
+      ),
+    );
+    const internals = instance as unknown as {
+      locks: Map<string, { users: number }>;
+    };
+    assert.equal(internals.locks.size, 0);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("an aborted same-thread lock waiter never occupies or sends a turn", { timeout: 10_000 }, async () => {
+  let markActiveStarted!: () => void;
+  const activeStarted = new Promise<void>((resolve) => {
+    markActiveStarted = resolve;
+  });
+  const instance = new CodexAppServerBackend({
+    workspace: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+    config: { ...DEFAULT_CONFIG, maxConcurrency: 1 },
+    onStderr: (line) => {
+      if (line.startsWith("ACTIVE 1 ")) markActiveStarted();
+    },
+  });
+  try {
+    const activeController = new AbortController();
+    const active = instance.run(
+      request("abortable-shared", "delayed"),
+      activeController.signal,
+    );
+    await activeStarted;
+
+    const queuedController = new AbortController();
+    const queued = instance.run(
+      request("abortable-shared", "must-not-send"),
+      queuedController.signal,
+    );
+    await Promise.resolve();
+    queuedController.abort();
+    await assert.rejects(queued, { name: "AbortError" });
+
+    const internals = instance as unknown as {
+      locks: Map<string, { users: number; mutex: { waiters: unknown[] } }>;
+      occupancy: { active: number; waiters: unknown[] };
+    };
+    assert.equal(internals.locks.get("abortable-shared")?.users, 1);
+    assert.equal(internals.locks.get("abortable-shared")?.mutex.waiters.length, 0);
+    assert.equal(internals.occupancy.active, 1);
+    assert.equal(internals.occupancy.waiters.length, 0);
+
+    activeController.abort();
+    await assert.rejects(active, { name: "AbortError" });
+    const subsequent = await instance.run(request("abortable-shared", "subsequent"));
+    assert.equal(subsequent.text, "network=false");
+    assert.equal(internals.locks.size, 0);
+    assert.equal(internals.occupancy.active, 0);
+    assert.equal(internals.occupancy.waiters.length, 0);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("bounded stdio writer preserves FIFO after backpressure and fails closed without payload leaks", () => {
+  const stream = new ControlledWritable();
+  const fatal: Error[] = [];
+  const writer = new BoundedStdioWriter(
+    stream,
+    { maxMessageBytes: 32, maxQueueBytes: 32, maxQueueMessages: 2 },
+    (error) => fatal.push(error),
+  );
+
+  writer.write("first\n");
+  writer.write("second\n");
+  writer.write("third\n");
+  assert.deepEqual(stream.writes, ["first\n"]);
+  assert.deepEqual(writer.snapshot(), {
+    backpressured: true,
+    closed: false,
+    queuedBytes: 13,
+    queuedMessages: 2,
+  });
+
+  stream.releaseBackpressure();
+  assert.deepEqual(stream.writes, ["first\n", "second\n", "third\n"]);
+  assert.equal(writer.snapshot().queuedMessages, 0);
+  assert.equal(fatal.length, 0);
+
+  const overflowStream = new ControlledWritable();
+  const overflowWriter = new BoundedStdioWriter(
+    overflowStream,
+    { maxMessageBytes: 24, maxQueueBytes: 16, maxQueueMessages: 1 },
+    (error) => fatal.push(error),
+  );
+  overflowWriter.write("block\n");
+  overflowWriter.write("queued-secret\n");
+  assert.throws(
+    () => overflowWriter.write("must-not-appear\n"),
+    (error: unknown) =>
+      error instanceof Error
+      && /queue capacity/i.test(error.message)
+      && !error.message.includes("must-not-appear"),
+  );
+  assert.throws(
+    () => overflowWriter.write("credential-that-is-too-large\n"),
+    (error: unknown) =>
+      error instanceof Error
+      && /message size/i.test(error.message)
+      && !error.message.includes("credential"),
+  );
+  overflowWriter.close();
+  assert.equal(overflowWriter.snapshot().queuedMessages, 0);
+  assert.throws(() => overflowWriter.write("after-close\n"), /closed/i);
+});
+
+test("client recycle rejects pending writes from the old child generation and clears its queue", async () => {
+  const client = new AppServerClient({
+    cwd: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+  });
+  await client.start();
+  const internals = client as unknown as { writer?: BoundedStdioWriter };
+  internals.writer?.close();
+  const stream = new ControlledWritable();
+  const writer = new BoundedStdioWriter(
+    stream,
+    { maxMessageBytes: 1_024, maxQueueBytes: 1_024, maxQueueMessages: 4 },
+    (error) => client.recycleUncertainSession(error),
+  );
+  internals.writer = writer;
+
+  const first = client.request("test/old-generation-1", { token: "secret-one" });
+  const second = client.request("test/old-generation-2", { token: "secret-two" });
+  assert.equal(writer.snapshot().queuedMessages, 1);
+  client.recycleUncertainSession(new Error("forced generation recycle"));
+  const settled = await Promise.allSettled([first, second]);
+  assert.ok(settled.every((result) => result.status === "rejected"));
+  assert.ok(settled.every(
+    (result) => result.status === "rejected" && !String(result.reason).includes("secret"),
+  ));
+  assert.deepEqual(writer.snapshot(), {
+    backpressured: false,
+    closed: true,
+    queuedBytes: 0,
+    queuedMessages: 0,
+  });
+
+  await client.start();
+  await client.close();
+});
+
+test("aborting a backpressured unsent RPC settles without recycling the healthy child", async () => {
+  const client = new AppServerClient({
+    cwd: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+  });
+  await client.start();
+  const internals = client as unknown as {
+    child?: unknown;
+    options: { rpcTimeoutMs?: number };
+    pending: Map<number | string, unknown>;
+    writer?: BoundedStdioWriter;
+  };
+  const child = internals.child;
+  assert.ok(child);
+  internals.options.rpcTimeoutMs = 30;
+  internals.writer?.close();
+  const stream = new ControlledWritable();
+  const writer = new BoundedStdioWriter(
+    stream,
+    { maxMessageBytes: 1_024, maxQueueBytes: 1_024, maxQueueMessages: 4 },
+    (error) => client.recycleUncertainSession(error),
+  );
+  internals.writer = writer;
+  writer.write("block\n");
+
+  const controller = new AbortController();
+  let lateSettled = 0;
+  const request = client.request("test/abort-before-send", {}, {
+    signal: controller.signal,
+    onLateResult: () => assert.fail("an unsent RPC cannot produce a late result"),
+    onLateSettled: () => {
+      lateSettled += 1;
+    },
+  });
+  assert.equal(writer.snapshot().queuedMessages, 1);
+
+  controller.abort();
+  await assert.rejects(request, (error: unknown) =>
+    error instanceof Error && error.name === "AbortError");
+  assert.equal(writer.snapshot().queuedMessages, 0);
+  assert.equal(internals.pending.size, 0);
+  assert.equal(lateSettled, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(internals.child, child);
+  assert.equal(writer.snapshot().closed, false);
+  assert.equal(lateSettled, 1);
+  await client.close();
+});
+
+test("async stdin EPIPE recycles only the active generation and rejects backpressured requests", async () => {
+  const client = new AppServerClient({
+    cwd: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+  });
+  await client.start();
+  const internals = client as unknown as {
+    child?: { stdin: NodeJS.WritableStream };
+    writer?: BoundedStdioWriter;
+  };
+  const child = internals.child;
+  assert.ok(child);
+  internals.writer?.close();
+  const stream = new ControlledWritable();
+  const writer = new BoundedStdioWriter(
+    stream,
+    { maxMessageBytes: 1_024, maxQueueBytes: 1_024, maxQueueMessages: 4 },
+    (error) => client.recycleUncertainSession(error),
+  );
+  internals.writer = writer;
+
+  const first = client.request("test/epipe-active", {});
+  const second = client.request("test/epipe-queued", {});
+  assert.equal(writer.snapshot().queuedMessages, 1);
+  const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+  child.stdin.emit("error", epipe);
+
+  const settled = await Promise.allSettled([first, second]);
+  assert.ok(settled.every((result) => result.status === "rejected"));
+  assert.ok(settled.every((result) =>
+    result.status === "rejected" && result.reason instanceof AppServerTransportError));
+  assert.deepEqual(writer.snapshot(), {
+    backpressured: false,
+    closed: true,
+    queuedBytes: 0,
+    queuedMessages: 0,
+  });
+  await client.start();
+  const replacement = internals.child;
+  assert.ok(replacement);
+  assert.notEqual(replacement, child);
+  child.stdin.emit("error", Object.assign(new Error("late stale EPIPE"), { code: "EPIPE" }));
+  assert.equal(internals.child, replacement);
+  await client.close();
+});
+
+test("client close rejects queued and future writes without logging request payloads", async () => {
+  const client = new AppServerClient({
+    cwd: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+  });
+  await client.start();
+  const internals = client as unknown as { writer?: BoundedStdioWriter };
+  internals.writer?.close();
+  const stream = new ControlledWritable();
+  const writer = new BoundedStdioWriter(
+    stream,
+    { maxMessageBytes: 1_024, maxQueueBytes: 1_024, maxQueueMessages: 4 },
+    (error) => client.recycleUncertainSession(error),
+  );
+  internals.writer = writer;
+  const pending = client.request("test/close-queued", { credential: "do-not-log" });
+  const pendingRejected = assert.rejects(pending, (error: unknown) =>
+    error instanceof Error
+    && /closed/i.test(error.message)
+    && !error.message.includes("do-not-log"));
+  await client.close();
+  await pendingRejected;
+  await assert.rejects(client.request("test/after-close", {}), /closed/i);
+  assert.throws(() => client.notify("test/after-close"), /closed/i);
+  assert.equal(writer.snapshot().queuedMessages, 0);
 });
 
 test("network access is disabled by default and requires explicit opt-in", async () => {
@@ -327,7 +642,7 @@ test("never-returning turn/start is recycled and releases its occupancy slot", a
     config: { ...DEFAULT_CONFIG, maxConcurrency: 1, initialConcurrency: 1 },
     // Keep the watchdog much shorter than production while leaving enough
     // room for a cold Windows child-process startup under the full suite.
-    rpcTimeoutMs: 1_500,
+    rpcTimeoutMs: 3_000,
     onStderr: (line) => stderr.push(line),
   });
   try {
@@ -356,7 +671,7 @@ test("never-acknowledged interrupt recycles the child and permits recovery", asy
     codexPath: process.execPath,
     codexArgs: [fakeCodex, "never-interrupt-ack"],
     config: { ...DEFAULT_CONFIG, maxConcurrency: 1, initialConcurrency: 1 },
-    rpcTimeoutMs: 1_500,
+    rpcTimeoutMs: 3_000,
     onStderr: (line) => stderr.push(line),
   });
   try {
@@ -385,7 +700,7 @@ test("rejected interrupt recycles the uncertain session before releasing capacit
     codexPath: process.execPath,
     codexArgs: [fakeCodex, "reject-interrupt"],
     config: { ...DEFAULT_CONFIG, maxConcurrency: 1, initialConcurrency: 1 },
-    rpcTimeoutMs: 1_500,
+    rpcTimeoutMs: 3_000,
     onStderr: (line) => stderr.push(line),
   });
   try {
@@ -453,8 +768,10 @@ test("malformed thread and turn responses recycle uncertain sessions", async () 
       onStderr: (line) => stderr.push(line),
     });
     try {
-      await assert.rejects(instance.run(request(mode, "work")), /Malformed/);
-      await assert.rejects(instance.run(request(`${mode}-again`, "work")), /Malformed/);
+      await assert.rejects(instance.run(request(mode, "work")), (error: unknown) =>
+        error instanceof AppServerTransportError && /Malformed/.test(error.message));
+      await assert.rejects(instance.run(request(`${mode}-again`, "work")), (error: unknown) =>
+        error instanceof AppServerTransportError && /Malformed/.test(error.message));
       assert.equal(stderr.filter((line) => line.startsWith("SERVER_START ")).length, 2);
       assert.equal(stderr.some((line) => /MAX [2-9]/.test(line)), false);
     } finally {

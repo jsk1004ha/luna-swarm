@@ -35,11 +35,21 @@ function config() {
   };
 }
 
+async function createdRunStore(
+  workspace: string,
+  stateDirectory: string,
+  runId: string,
+): Promise<AtomicRunStore> {
+  const store = new AtomicRunStore(workspace, stateDirectory, runId);
+  await store.create();
+  return store;
+}
+
 test("start readiness is signalled only after persisted state and the run-start audit exist", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-orch-ready-"));
   try {
     const backend = new MockAgentBackend(demoHandler);
-    const store = new AtomicRunStore(workspace, ".state", "run-ready");
+    const store = await createdRunStore(workspace, ".state", "run-ready");
     const gateway = new AgentGateway({ backend, config: config() });
     const orchestrator = new SwarmOrchestrator({
       gateway,
@@ -69,9 +79,11 @@ test("start readiness is signalled only after persisted state and the run-start 
 
 test("a non-Git workspace without build identity runs in observation-only mode", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-orch-unpinned-"));
+  const previousGithubSha = process.env.GITHUB_SHA;
+  process.env.GITHUB_SHA = "a".repeat(40);
   try {
     const backend = new MockAgentBackend(demoHandler);
-    const store = new AtomicRunStore(workspace, ".state", "run-unpinned");
+    const store = await createdRunStore(workspace, ".state", "run-unpinned");
     const gateway = new AgentGateway({ backend, config: config() });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: config(), workspace });
     await assert.rejects(
@@ -86,6 +98,33 @@ test("a non-Git workspace without build identity runs in observation-only mode",
       }),
       /stop-after-unpinned-ready/,
     );
+  } finally {
+    if (previousGithubSha === undefined) delete process.env.GITHUB_SHA;
+    else process.env.GITHUB_SHA = previousGithubSha;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a malformed explicit source identity fails closed before creating run state", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-invalid-source-"));
+  try {
+    const backend = new MockAgentBackend(demoHandler);
+    const store = await createdRunStore(workspace, ".state", "run-invalid-source");
+    const gateway = new AgentGateway({ backend, config: config() });
+    const orchestrator = new SwarmOrchestrator({
+      gateway,
+      store,
+      config: config(),
+      workspace,
+      sourceIdentity: "git:not-a-verified-workspace-commit",
+    });
+
+    await assert.rejects(
+      orchestrator.start("잘못된 출처는 실행 금지"),
+      /Only a verified local Git worktree may produce a git: source identity/,
+    );
+    await assert.rejects(readFile(store.statePath, "utf8"), /ENOENT/);
+    assert.equal(backend.calls.length, 0);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -111,7 +150,7 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       }
       return demoHandler(request);
     });
-    const store = new AtomicRunStore(workspace, ".state", "run-e2e");
+    const store = await createdRunStore(workspace, ".state", "run-e2e");
     const gateway = new AgentGateway({ backend, config: config() });
     const orchestrator = new SwarmOrchestrator({
       gateway,
@@ -139,6 +178,11 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     assert.equal(state.harnessV2?.orgVersion, "lab-128@2");
     assert.equal(state.harnessV2?.organizationHeadcount, 17);
     assert.equal(state.harnessV2?.organizationReviewerSlots, 3);
+    assert.equal(state.harnessV2?.staffingPlan?.logicalAgentCount, 17);
+    assert.equal(state.harnessV2?.staffingPlan?.reviewerSlots, 3);
+    assert.equal(state.harnessV2?.staffingPlan?.revision, 1);
+    assert.match(state.harnessV2?.staffingPlan?.planHash ?? "", /^sha256:[a-f0-9]{64}$/);
+    assert.match(state.harnessV2?.staffingPlan?.registryHash ?? "", /^sha256:[a-f0-9]{64}$/);
     assert.ok(Object.values(state.harnessV2?.workOrders ?? {}).every((order) =>
       /^luna-0(?:0[1-9]|1[0-7])$/.test(order.assignedAgentId) &&
       order.reviewerAgentIds.every((agentId) => /^luna-0(?:0[1-9]|1[0-7])$/.test(agentId))));
@@ -171,6 +215,16 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       Object.values(state.harnessV2?.artifactHeads ?? {}).map((ref) => blackboard.read(ref)),
     );
     assert.equal(v2Artifacts.filter((artifact) => artifact.kind === "gate-receipt").length, 9);
+    const teamReportArtifacts = v2Artifacts.filter((artifact) => artifact.kind === "team-report");
+    assert.equal(teamReportArtifacts.length, Object.keys(state.teams).length);
+    assert.ok(teamReportArtifacts.every((artifact) => artifact.inputs.length > 0));
+    assert.equal(
+      state.harnessV2?.messages.filter((message) => message.type === "TEAM_REPORT").length,
+      Object.keys(state.teams).length,
+    );
+    assert.ok(state.harnessV2?.messages
+      .filter((message) => message.type === "TEAM_REPORT")
+      .every((message) => message.artifactIds.length === 1));
     assert.ok(v2Artifacts.every((artifact) => artifact.recordHash.length === 64));
     const gateArtifacts = v2Artifacts.filter((artifact) => artifact.kind === "gate-receipt");
     const decisionArtifacts = v2Artifacts.filter((artifact) =>
@@ -234,6 +288,20 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       9,
     );
     assert.ok(state.metrics.maxActiveCalls <= 4);
+    for (const call of backend.calls) {
+      assert.ok(call.executionBundlePin, `${call.purpose} must carry a run-pinned Bundle`);
+      assert.ok(call.executionPromptModule, `${call.purpose} must carry its loaded prompt component`);
+      assert.match(call.prompt, /^<evolution-prompt-module schema="1"/);
+      assert.ok(
+        call.prompt.includes(`hash="${call.executionPromptModule!.contentHash}"`),
+        `${call.purpose} prompt must be rendered from the declared component hash`,
+      );
+    }
+    for (const purpose of ["team_synthesis", "critic_review", "final"]) {
+      const calls = backend.calls.filter((call) => call.purpose === purpose);
+      assert.ok(calls.length > 0, `${purpose} must execute`);
+      assert.ok(calls.every((call) => call.executionBundlePin && call.executionPromptModule));
+    }
     assert.equal(backend.calls.filter((call) => call.purpose === "critic_review").length, 1);
     const finalCall = backend.calls.find((call) => call.purpose === "final");
     assert.equal(
@@ -275,6 +343,67 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
   }
 });
 
+test("resume backfills immutable TEAM_REPORT artifacts for accepted legacy team packets", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-team-report-resume-"));
+  try {
+    const cfg = config();
+    const store = await createdRunStore(workspace, ".state", "run-team-report-resume");
+    const initialBackend = new MockAgentBackend(demoHandler);
+    const completed = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend: initialBackend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-team-report-resume",
+    }).start("legacy team report backfill");
+    assert.equal(completed.status, "completed", completed.error);
+
+    const blackboard = new BlackboardStore(store.runDirectory, completed.runId);
+    const reportIds = Object.values(completed.harnessV2?.artifactHeads ?? {})
+      .map((ref) => ref.artifactId)
+      .filter((artifactId) => artifactId.startsWith("team-report-"));
+    assert.equal(reportIds.length, Object.keys(completed.teams).length);
+    for (const artifactId of reportIds) {
+      await rm(join(blackboard.artifactsDirectory, artifactId), { recursive: true, force: true });
+      await rm(join(blackboard.headsDirectory, `${artifactId}.json`), { force: true });
+      delete completed.harnessV2!.artifactHeads[artifactId];
+    }
+    completed.harnessV2!.messages = completed.harnessV2!.messages.filter(
+      (message) => message.type !== "TEAM_REPORT",
+    );
+    completed.status = "running";
+    delete completed.final;
+    completed.revision += 1;
+    completed.updatedAt = new Date().toISOString();
+    await store.save(completed);
+
+    const resumedBackend = new MockAgentBackend(demoHandler);
+    const resumed = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend: resumedBackend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-team-report-resume",
+    }).resume(await store.load());
+    assert.equal(resumed.status, "completed", resumed.error);
+    const resumedReportRefs = Object.values(resumed.harnessV2?.artifactHeads ?? {})
+      .filter((ref) => ref.artifactId.startsWith("team-report-"));
+    assert.equal(resumedReportRefs.length, Object.keys(resumed.teams).length);
+    assert.equal(
+      resumed.harnessV2?.messages.filter((message) => message.type === "TEAM_REPORT").length,
+      Object.keys(resumed.teams).length,
+    );
+    await Promise.all(resumedReportRefs.map((ref) => blackboard.read(ref)));
+    assert.equal(
+      resumedBackend.calls.filter((call) => call.purpose === "team_synthesis").length,
+      0,
+      "persisted packets are backfilled without re-running reducers",
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("adaptive validation escalates to the remaining blind auditor only after a split vote", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-adaptive-audit-"));
   try {
@@ -300,7 +429,7 @@ test("adaptive validation escalates to the remaining blind auditor only after a 
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-adaptive-audit");
+    const store = await createdRunStore(workspace, ".state", "run-adaptive-audit");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("adaptive audit goal");
@@ -335,12 +464,13 @@ test("validator infrastructure failure retries validation without rerunning the 
       }
       return demoHandler(request);
     });
-    const store = new AtomicRunStore(workspace, ".state", "run-validation-retry");
+    const store = await createdRunStore(workspace, ".state", "run-validation-retry");
     const state = await new SwarmOrchestrator({
       gateway: new AgentGateway({ backend, config: config() }),
       store,
       config: config(),
       workspace,
+      sourceIdentity: "build:test-validation-retry",
     }).start("validation retry preserves outputs");
 
     assert.equal(state.status, "completed", state.error);
@@ -352,6 +482,12 @@ test("validator infrastructure failure retries validation without rerunning the 
     assert.equal(state.tasks.T1?.attempts, 1);
     assert.equal(state.harnessV2?.workOrders.T1?.executionAttempts, 1);
     assert.equal(state.harnessV2?.workOrders.T1?.validationAttempts, 2);
+    const validationCalls = backend.calls.filter((call) =>
+      call.taskId === "T1" && ["manager_review", "validate_task"].includes(call.purpose));
+    assert.ok(validationCalls.length > 2);
+    assert.equal(new Set(validationCalls.map((call) => call.executionBundlePin?.bundleHash)).size, 1);
+    assert.equal(new Set(validationCalls.map((call) => call.executionPromptModule?.contentHash)).size, 1);
+    assert.equal(new Set(validationCalls.map((call) => call.attemptIdentity?.attemptId)).size, 1);
     const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
       .map((line) => JSON.parse(line) as { type: string; taskId?: string });
     assert.ok(events.some((event) => event.type === "task_validation_retry" && event.taskId === "T1"));
@@ -371,7 +507,7 @@ test("planning committee tolerates a minority failure but enforces deterministic
       return demoHandler(request);
     });
     const cfg = { ...config(), planningCommitteeSize: 3 };
-    const store = new AtomicRunStore(workspace, ".state", "run-planner-quorum");
+    const store = await createdRunStore(workspace, ".state", "run-planner-quorum");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("planner quorum");
@@ -389,11 +525,22 @@ test("planning committee tolerates a minority failure but enforces deterministic
 
 test("dependency completion releases downstream work without waiting for a slow sibling", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-event-driven-dag-"));
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
   try {
     const plan = demoPlan("event-driven scheduler");
     plan.tasks.find((task) => task.id === "T3")!.dependencies = ["T2"];
-    let slowFinishedAt = Number.POSITIVE_INFINITY;
-    let downstreamStartedAt = Number.POSITIVE_INFINITY;
+    let sequence = 0;
+    let slowFinishedOrder = Number.POSITIVE_INFINITY;
+    let downstreamStartedOrder = Number.POSITIVE_INFINITY;
+    let releaseSlowSibling: () => void = () => undefined;
+    let watchdogReleasedSibling = false;
+    const slowSiblingGate = new Promise<void>((resolve) => {
+      releaseSlowSibling = resolve;
+    });
+    watchdog = setTimeout(() => {
+      watchdogReleasedSibling = true;
+      releaseSlowSibling();
+    }, 15_000);
     const backend = new MockAgentBackend(async (request) => {
       if (["candidate_plan", "architect_plan", "architect_repair"].includes(request.purpose)) {
         return plan;
@@ -401,18 +548,21 @@ test("dependency completion releases downstream work without waiting for a slow 
       if (request.purpose === "execute_task") {
         const taskId = (request.data as { task: { id: string } }).task.id;
         if (taskId === "T1") {
-          // Keep the independent sibling slower than durable CAS + two gate
-          // receipts on the dependency path, especially on Windows CI.
-          await new Promise((resolve) => setTimeout(resolve, 3_000));
-          slowFinishedAt = Date.now();
+          // The independent sibling can finish only after the downstream task
+          // actually reaches the backend. This proves ordering without assuming
+          // a particular filesystem or CI performance envelope.
+          await slowSiblingGate;
+          slowFinishedOrder = ++sequence;
         } else if (taskId === "T3") {
-          downstreamStartedAt = Date.now();
+          downstreamStartedOrder = ++sequence;
+          clearTimeout(watchdog);
+          releaseSlowSibling();
         }
       }
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-event-driven-dag");
+    const store = await createdRunStore(workspace, ".state", "run-event-driven-dag");
     const state = await new SwarmOrchestrator({
       gateway: new AgentGateway({ backend, config: cfg }),
       store,
@@ -421,9 +571,94 @@ test("dependency completion releases downstream work without waiting for a slow 
     }).start(plan.goal);
 
     assert.equal(state.status, "completed");
+    assert.equal(
+      watchdogReleasedSibling,
+      false,
+      "T3 did not start until the deadlock watchdog released unrelated T1",
+    );
     assert.ok(
-      downstreamStartedAt < slowFinishedAt,
-      `T3 started at ${downstreamStartedAt}, but slow unrelated T1 finished at ${slowFinishedAt}`,
+      downstreamStartedOrder < slowFinishedOrder,
+      `T3 order ${downstreamStartedOrder} did not precede unrelated T1 order ${slowFinishedOrder}`,
+    );
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("team synthesis releases a ready parent without waiting for a slow sibling subtree", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-event-driven-synthesis-"));
+  try {
+    const plan = demoPlan("event-driven team synthesis");
+    const intel = plan.teams.find((team) => team.id === "TEAM-INTEL")!;
+    const risk = plan.teams.find((team) => team.id === "TEAM-RISK")!;
+    plan.teams.push(
+      {
+        ...structuredClone(intel),
+        id: "TEAM-INTEL-LEAF",
+        name: "근거 수집 셀",
+        parentTeamId: intel.id,
+        leadRank: "director",
+        priority: intel.priority + 1,
+      },
+      {
+        ...structuredClone(risk),
+        id: "TEAM-RISK-LEAF",
+        name: "반례 수집 셀",
+        parentTeamId: risk.id,
+        leadRank: "director",
+        priority: risk.priority + 1,
+      },
+    );
+    const t1 = plan.tasks.find((task) => task.id === "T1")!;
+    const t2 = plan.tasks.find((task) => task.id === "T2")!;
+    plan.tasks.push(
+      {
+        ...structuredClone(t1),
+        id: "T4",
+        title: "추가 근거 조사",
+        teamId: "TEAM-INTEL-LEAF",
+        priority: t1.priority - 1,
+      },
+      {
+        ...structuredClone(t2),
+        id: "T5",
+        title: "추가 반례 조사",
+        teamId: "TEAM-RISK-LEAF",
+        priority: t2.priority - 1,
+      },
+    );
+
+    let slowLeafFinishedAt = Number.POSITIVE_INFINITY;
+    let readyParentStartedAt = Number.POSITIVE_INFINITY;
+    const backend = new MockAgentBackend(async (request) => {
+      if (["candidate_plan", "architect_plan", "architect_repair"].includes(request.purpose)) {
+        return plan;
+      }
+      if (request.purpose === "team_synthesis") {
+        const teamId = (request.data as { team: { id: string } }).team.id;
+        if (teamId === "TEAM-RISK-LEAF") {
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+          slowLeafFinishedAt = Date.now();
+        } else if (teamId === "TEAM-INTEL") {
+          readyParentStartedAt = Date.now();
+        }
+      }
+      return demoHandler(request);
+    });
+    const cfg = config();
+    const store = await createdRunStore(workspace, ".state", "run-event-driven-synthesis");
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+    }).start(plan.goal);
+
+    assert.equal(state.status, "completed", state.error);
+    assert.ok(
+      readyParentStartedAt < slowLeafFinishedAt,
+      `ready parent started at ${readyParentStartedAt}, but slow sibling leaf finished at ${slowLeafFinishedAt}`,
     );
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -456,7 +691,7 @@ test("missing accepted work prevents false final requirement coverage", async ()
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-manager");
+    const store = await createdRunStore(workspace, ".state", "run-manager");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("manager gate goal");
@@ -494,7 +729,7 @@ test("deterministic gates request targeted architect and team-report repairs", a
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-repair");
+    const store = await createdRunStore(workspace, ".state", "run-repair");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("repair goal");
@@ -537,7 +772,7 @@ test("reducer repairs an invented factual claim even when immutable lineage is p
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-invented-reducer");
+    const store = await createdRunStore(workspace, ".state", "run-invented-reducer");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("invented reducer claim");
@@ -581,7 +816,7 @@ test("final gate repairs duplicate, uncovered, unexplained, and untraced require
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-final-coverage");
+    const store = await createdRunStore(workspace, ".state", "run-final-coverage");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("strict final coverage");
@@ -627,7 +862,7 @@ test("final gate repairs invented claims and unrelated claim/evidence requiremen
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-final-semantic-trace");
+    const store = await createdRunStore(workspace, ".state", "run-final-semantic-trace");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("strict semantic trace");
@@ -662,7 +897,7 @@ test("valid claim IDs cannot smuggle invented free-form prose into the final out
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-final-prose-render");
+    const store = await createdRunStore(workspace, ".state", "run-final-prose-render");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("deterministic final prose");
@@ -717,7 +952,7 @@ test("trusted leaf gaps and recommendations survive while invented reducer prose
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-reducer-prose-union");
+    const store = await createdRunStore(workspace, ".state", "run-reducer-prose-union");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("trusted reducer prose union");
@@ -753,7 +988,7 @@ test("critic rejection deterministically blocks completion", async () => {
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-critic-contract");
+    const store = await createdRunStore(workspace, ".state", "run-critic-contract");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("critic resolution contract");
@@ -793,7 +1028,7 @@ test("unresolved material critic issues deterministically block completion", asy
       return demoHandler(request);
     });
     const cfg = config();
-    const store = new AtomicRunStore(workspace, ".state", "run-critic-block");
+    const store = await createdRunStore(workspace, ".state", "run-critic-block");
     const gateway = new AgentGateway({ backend, config: cfg });
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("unresolved critic issue");
@@ -858,7 +1093,7 @@ test("legacy resume fails closed when an accepted result has no verifiable v2 pr
       workOrders: { T2: createWorkOrderRecord(persistedOrder, "READY", now, registry) },
       artifactHeads: {}, councils: {}, missionCells: {}, messages: [],
     };
-    const store = new AtomicRunStore(workspace, ".state", "run-resume");
+    const store = await createdRunStore(workspace, ".state", "run-resume");
     await store.save(initial);
     const loaded = await store.load();
     const backend = new MockAgentBackend(demoHandler);
@@ -946,7 +1181,7 @@ test("process interruption is resumable while explicit cancellation remains term
         sealedAt: preparedAt,
       };
     }
-    const store = new AtomicRunStore(workspace, ".state", initial.runId);
+    const store = await createdRunStore(workspace, ".state", initial.runId);
     await store.save(initial);
 
     const controller = new AbortController();
@@ -978,7 +1213,7 @@ test("process interruption is resumable while explicit cancellation remains term
       ["T1", "T2", "T3"],
     );
 
-    const cancelledStore = new AtomicRunStore(workspace, ".state", "run-explicitly-cancelled");
+    const cancelledStore = await createdRunStore(workspace, ".state", "run-explicitly-cancelled");
     const cancelledState = structuredClone(initial);
     cancelledState.runId = cancelledStore.runId;
     cancelledState.status = "cancelled";

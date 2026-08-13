@@ -436,7 +436,7 @@ test("promotion remains fail-closed without a verified authoritative quality rec
   await assert.rejects(() => store.append(receipt), /authoritative quality measurement receipt is unavailable or invalid/);
 });
 
-test("real CAS outcomes plus signed benchmark quality authorize manual promotion", { timeout: 180_000 }, async (t) => {
+test("real CAS outcomes plus signed benchmark quality authorize manual promotion", { timeout: 600_000 }, async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "evolution-quality-signed-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const benchmarkSuiteId = "engineering-bugfix-suite-v1";

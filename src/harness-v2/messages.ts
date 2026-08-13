@@ -7,23 +7,31 @@ import type {
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$/;
 const TYPES = new Set<StructuredMessageType>([
   "WORK_ORDER",
+  "EVIDENCE_CLAIM",
   "EVIDENCE_PACKET",
   "RFC",
   "ARTIFACT_SUBMITTED",
   "REVIEW_REQUEST",
+  "CHALLENGE",
+  "REVISION_REQUEST",
   "FINDING",
   "DECISION_RECORD",
   "GATE_RECEIPT",
+  "TEAM_REPORT",
   "ESCALATION",
 ]);
 
 const ARTIFACT_REQUIRED = new Set<StructuredMessageType>([
+  "EVIDENCE_CLAIM",
   "EVIDENCE_PACKET",
   "ARTIFACT_SUBMITTED",
   "REVIEW_REQUEST",
+  "CHALLENGE",
+  "REVISION_REQUEST",
   "FINDING",
   "DECISION_RECORD",
   "GATE_RECEIPT",
+  "TEAM_REPORT",
 ]);
 
 export interface StructuredMessageInput
@@ -64,7 +72,7 @@ export function assertStructuredMessage(message: StructuredMessageEnvelope): voi
   if (ARTIFACT_REQUIRED.has(message.type) && message.artifactIds.length === 0) {
     throw new Error(`${message.type} must reference at least one immutable artifact`);
   }
-  if (message.type !== "ESCALATION" && !message.workOrderId) {
+  if (!new Set<StructuredMessageType>(["ESCALATION", "TEAM_REPORT"]).has(message.type) && !message.workOrderId) {
     throw new Error(`${message.type} must reference a Work Order`);
   }
   const serializedMetadata = JSON.stringify(message.metadata);

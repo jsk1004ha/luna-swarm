@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
   access,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -27,17 +28,42 @@ interface StateEnvelope {
   schemaVersion: 1;
   revision: number;
   checksum: string;
+  generation?: string;
   state: RunState;
+}
+
+interface RunManifest {
+  schemaVersion: 1;
+  runId: string;
+  generation: string;
+  createdAt: string;
+  importedLegacyState?: true;
+}
+
+export interface RunGenerationContext {
+  runId: string;
+  generation: string;
+}
+
+export interface RunGenerationAuthority {
+  capture(): Promise<RunGenerationContext>;
+  assert(context: RunGenerationContext): Promise<void>;
 }
 
 const MAX_DIRECTIVES_PER_RUN = 10_000;
 const COMMAND_LOCK_WAIT_MS = 5_000;
 const COMMAND_LOCK_RETRY_MS = 10;
 const COMMAND_LOCK_STALE_MS = 5 * 60_000;
+const STATE_LOCK_WAIT_MS = 5_000;
+const STATE_LOCK_RETRY_MS = 10;
+const STATE_LOCK_STALE_MS = 5 * 60_000;
 
 export class DirectiveGateClosedError extends Error {}
 export class DirectiveLimitError extends Error {}
 export class RunExecutionLockedError extends Error {}
+export class RunIdExistsError extends Error {
+  readonly code = "RUN_ID_EXISTS";
+}
 
 interface CommandLockRecord {
   at: string;
@@ -53,9 +79,16 @@ interface ExecutionLockRecord {
   token: string;
 }
 
+interface StateLockRecord extends CommandLockRecord {
+  generation?: string;
+}
+
 export class AtomicRunStore {
+  private readonly rootDirectory: string;
   readonly runDirectory: string;
+  readonly manifestPath: string;
   readonly statePath: string;
+  readonly stateLockPath: string;
   readonly eventsPath: string;
   readonly finalPath: string;
   readonly organizationPath: string;
@@ -69,6 +102,7 @@ export class AtomicRunStore {
   private readonly commandsMutex = new Mutex();
   private readonly executionMutex = new Mutex();
   private lastRevision = -1;
+  private generation: string | undefined;
 
   constructor(
     workspace: string,
@@ -78,9 +112,9 @@ export class AtomicRunStore {
     if (!isValidRunId(runId)) {
       throw new Error(`Run ID is invalid: ${runId}`);
     }
-    const root = resolve(workspace, stateDirectory, "runs");
-    this.runDirectory = resolve(root, runId);
-    const relativeRunDirectory = relative(root, this.runDirectory);
+    this.rootDirectory = resolve(workspace, stateDirectory, "runs");
+    this.runDirectory = resolve(this.rootDirectory, runId);
+    const relativeRunDirectory = relative(this.rootDirectory, this.runDirectory);
     if (
       !relativeRunDirectory ||
       relativeRunDirectory.startsWith(`..${sepForPlatform()}`) ||
@@ -89,7 +123,9 @@ export class AtomicRunStore {
     ) {
       throw new Error(`Run directory escapes the state root: ${runId}`);
     }
+    this.manifestPath = join(this.runDirectory, "run.manifest.json");
     this.statePath = join(this.runDirectory, "state.json");
+    this.stateLockPath = join(this.runDirectory, "state.lock");
     this.eventsPath = join(this.runDirectory, "events.jsonl");
     this.finalPath = join(this.runDirectory, "final.md");
     this.organizationPath = join(this.runDirectory, "organization.md");
@@ -104,83 +140,224 @@ export class AtomicRunStore {
     await mkdir(this.runDirectory, { recursive: true });
   }
 
+  /** Exclusively reserves a new run id. Existing and interrupted runs are never reused. */
+  async create(): Promise<void> {
+    await this.mutex.run(async () => {
+      if (this.generation) {
+        throw new RunIdExistsError(`RUN_ID_EXISTS: Run ${this.runId} already exists`);
+      }
+      await this.claimNewRun();
+    });
+  }
+
   async save(state: RunState): Promise<void> {
     await this.mutex.run(async () => {
       if (state.runId !== this.runId) {
         throw new Error(`State runId does not match this run: ${state.runId}`);
       }
-      if (state.revision <= this.lastRevision) {
+      if (!this.generation) {
         throw new Error(
-          `Refusing stale state revision ${state.revision}; last is ${this.lastRevision}`,
+          `Run ${this.runId} must be created or loaded before saving state`,
         );
       }
-      await this.init();
-      const serializedState = JSON.stringify(state);
-      const envelope: StateEnvelope = {
-        schemaVersion: 1,
-        revision: state.revision,
-        checksum: sha256(serializedState),
-        state,
-      };
-      const tempPath = `${this.statePath}.tmp.${process.pid}.${randomUUID()}`;
-      await writeFile(tempPath, `${JSON.stringify(envelope, null, 2)}\n`, {
-        encoding: "utf8",
-        flag: "wx",
+      await this.withStateFileLock(async () => {
+        const manifest = await this.readManifest();
+        if (manifest.generation !== this.generation) {
+          throw new Error(`Run generation changed for ${this.runId}; refusing stale writer`);
+        }
+        const diskText = await readOptionalFile(this.statePath);
+        const diskEnvelope = diskText ? parseStateEnvelope(diskText, this.statePath, this.runId) : null;
+        if (diskEnvelope?.generation && diskEnvelope.generation !== manifest.generation) {
+          throw new Error(`State generation mismatch in ${this.statePath}`);
+        }
+        const diskRevision = diskEnvelope?.revision ?? -1;
+        if (diskRevision !== this.lastRevision) {
+          throw new Error(
+            `Refusing stale disk revision for ${this.runId}; expected ${this.lastRevision}, found ${diskRevision}`,
+          );
+        }
+        if (state.revision <= diskRevision) {
+          throw new Error(
+            `Refusing stale state revision ${state.revision}; last is ${diskRevision}`,
+          );
+        }
+        const serializedState = JSON.stringify(state);
+        const envelope: StateEnvelope = {
+          schemaVersion: 1,
+          revision: state.revision,
+          checksum: sha256(serializedState),
+          generation: manifest.generation,
+          state,
+        };
+        await writeAtomicDurable(this.statePath, `${JSON.stringify(envelope, null, 2)}\n`);
+        this.lastRevision = state.revision;
       });
-      const handle = await open(tempPath, "r");
-      try {
-        try {
-          await handle.datasync();
-        } catch (error) {
-          if (!isUnsupportedSyncError(error)) throw error;
-          // Some Windows/filesystem combinations reject fdatasync on regular files.
-        }
-      } finally {
-        await handle.close();
-      }
-      await rename(tempPath, this.statePath);
-      try {
-        const directory = await open(dirname(this.statePath), "r");
-        try {
-          await directory.sync();
-        } finally {
-          await directory.close();
-        }
-      } catch {
-        // Directory fsync is unavailable on some Windows/filesystem combinations.
-      }
-      this.lastRevision = state.revision;
     });
   }
 
   async load(): Promise<RunState> {
-    const text = await readFile(this.statePath, "utf8");
-    let envelope: StateEnvelope;
+    return this.mutex.run(async () => this.withStateFileLock(async () => {
+      const envelope = parseStateEnvelope(await readFile(this.statePath, "utf8"), this.statePath, this.runId);
+      const manifest = await this.readOrImportManifest(envelope);
+      if (envelope.generation && envelope.generation !== manifest.generation) {
+        throw new Error(`State generation mismatch in ${this.statePath}`);
+      }
+      this.generation = manifest.generation;
+      this.lastRevision = envelope.revision;
+      return envelope.state;
+    }, false));
+  }
+
+  private async claimNewRun(): Promise<void> {
+    if (this.generation) return;
+    await mkdir(this.rootDirectory, { recursive: true });
     try {
-      envelope = JSON.parse(text) as StateEnvelope;
+      await mkdir(this.runDirectory);
     } catch (error) {
-      throw new Error(`State file is truncated or invalid: ${this.statePath}`, { cause: error });
+      if (isNodeError(error) && error.code === "EEXIST") {
+        throw new RunIdExistsError(`RUN_ID_EXISTS: Run ${this.runId} already exists`);
+      }
+      throw error;
     }
-    if (envelope.schemaVersion !== 1 || envelope.state?.schemaVersion !== 1) {
-      throw new Error(`Unsupported state schema in ${this.statePath}`);
+    const manifest: RunManifest = {
+      schemaVersion: 1,
+      runId: this.runId,
+      generation: randomUUID(),
+      createdAt: new Date().toISOString(),
+    };
+    await writeFile(this.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    await syncFileAndDirectory(this.manifestPath);
+    this.generation = manifest.generation;
+    this.lastRevision = -1;
+  }
+
+  private async readOrImportManifest(envelope: StateEnvelope): Promise<RunManifest> {
+    try {
+      return await this.readManifest();
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
     }
-    const serialized = JSON.stringify(envelope.state);
-    if (sha256(serialized) !== envelope.checksum) {
-      throw new Error(`State checksum mismatch in ${this.statePath}`);
+    const generation = envelope.generation ?? legacyGeneration(this.runId, envelope.checksum);
+    await migrateLegacyBlackboard(this.runDirectory, generation);
+    const manifest: RunManifest = {
+      schemaVersion: 1,
+      runId: this.runId,
+      generation,
+      createdAt: envelope.state.createdAt,
+      importedLegacyState: true,
+    };
+    try {
+      await writeFile(this.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      await syncFileAndDirectory(this.manifestPath);
+      return manifest;
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+      return this.readManifest();
     }
-    if (envelope.revision !== envelope.state.revision) {
-      throw new Error(`State revision mismatch in ${this.statePath}`);
+  }
+
+  private async readManifest(): Promise<RunManifest> {
+    const path = this.manifestPath;
+    let value: Partial<RunManifest>;
+    try {
+      value = JSON.parse(await readFile(path, "utf8")) as Partial<RunManifest>;
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") throw error;
+      throw new Error(`Run manifest is truncated or invalid: ${path}`, { cause: error });
     }
-    if (envelope.state.runId !== this.runId) {
-      throw new Error(`State runId does not match this run in ${this.statePath}`);
+    if (
+      value.schemaVersion !== 1 ||
+      value.runId !== this.runId ||
+      typeof value.generation !== "string" ||
+      !/^[0-9a-f-]{36}$/i.test(value.generation) ||
+      typeof value.createdAt !== "string" ||
+      !isIsoTimestamp(value.createdAt)
+    ) {
+      throw new Error(`Run manifest is invalid: ${path}`);
     }
-    this.lastRevision = envelope.revision;
-    return envelope.state;
+    return value as RunManifest;
+  }
+
+  private async withStateFileLock<T>(operation: () => Promise<T>, createDirectory = true): Promise<T> {
+    if (createDirectory) await this.init();
+    const deadline = Date.now() + STATE_LOCK_WAIT_MS;
+    const token = randomUUID();
+    let handle;
+    while (true) {
+      try {
+        handle = await open(this.stateLockPath, "wx");
+        break;
+      } catch (error) {
+        if (!isTransientCommandLockError(error)) throw error;
+        if (error.code === "EEXIST" && await this.recoverStaleStateLock()) continue;
+        if (Date.now() >= deadline) {
+          throw new Error(`Timed out waiting for the state lock for run ${this.runId}`);
+        }
+        await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, STATE_LOCK_RETRY_MS));
+      }
+    }
+    try {
+      await handle.writeFile(`${JSON.stringify({
+        at: new Date().toISOString(),
+        pid: process.pid,
+        runId: this.runId,
+        token,
+        ...(this.generation ? { generation: this.generation } : {}),
+      } satisfies StateLockRecord)}\n`, "utf8");
+      await handle.sync();
+      return await operation();
+    } finally {
+      await handle.close();
+      const record = parseStateLock(await readOptionalFile(this.stateLockPath), this.runId);
+      if (record?.token === token) {
+        await unlink(this.stateLockPath).catch((error: unknown) => {
+          if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+        });
+      }
+    }
+  }
+
+  private async recoverStaleStateLock(): Promise<boolean> {
+    let text: string;
+    let modifiedAt: number;
+    try {
+      const [contents, metadata] = await Promise.all([
+        readFile(this.stateLockPath, "utf8"),
+        stat(this.stateLockPath),
+      ]);
+      text = contents;
+      modifiedAt = metadata.mtimeMs;
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return true;
+      if (isCommandLockBusyError(error)) return false;
+      throw error;
+    }
+    const record = parseStateLock(text, this.runId);
+    const stale = record
+      ? !isProcessAlive(record.pid)
+      : Date.now() - modifiedAt >= STATE_LOCK_STALE_MS;
+    if (!stale) return false;
+    try {
+      if (await readFile(this.stateLockPath, "utf8") !== text) return false;
+      await unlink(this.stateLockPath);
+      return true;
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") return true;
+      if (isCommandLockBusyError(error)) return false;
+      throw error;
+    }
   }
 
   async appendEvent(event: RunEvent): Promise<RunEvent> {
     return this.eventsMutex.run(async () => {
       await this.init();
+      await this.assertCurrentGenerationIfKnown();
       const persisted = withEventId(event);
       await appendFile(this.eventsPath, `${JSON.stringify(persisted)}\n`, "utf8");
       return persisted;
@@ -190,6 +367,7 @@ export class AtomicRunStore {
   async acquireExecutionLease(): Promise<() => Promise<void>> {
     return this.executionMutex.run(async () => {
       await this.init();
+      await this.assertCurrentGenerationIfKnown();
       const token = randomUUID();
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
@@ -204,6 +382,7 @@ export class AtomicRunStore {
             { encoding: "utf8", flag: "wx" },
           );
           return async () => {
+            await this.assertCurrentGenerationIfKnown();
             await this.executionMutex.run(async () => {
               let record: ExecutionLockRecord | null = null;
               try {
@@ -345,15 +524,18 @@ export class AtomicRunStore {
   }
 
   async ackAppliedDirectiveIds(ids: Iterable<string>): Promise<void> {
+    await this.assertCurrentGenerationIfKnown();
     const requested = [...new Set(ids)];
     for (const id of requested) {
       if (!isDirectiveId(id)) throw new Error(`Invalid directive ID: ${id}`);
     }
     if (requested.length === 0) return;
     await this.commandsMutex.run(async () => {
+      await this.assertCurrentGenerationIfKnown();
       const applied = await this.readAppliedDirectiveIds();
       const fresh = requested.filter((id) => !applied.has(id));
       if (fresh.length === 0) return;
+      await this.assertCurrentGenerationIfKnown();
       await this.init();
       await appendFile(this.commandsAppliedPath, `${fresh.join("\n")}\n`, "utf8");
     });
@@ -361,6 +543,7 @@ export class AtomicRunStore {
 
   private async withCommandFileLock<T>(operation: () => Promise<T>): Promise<T> {
     await this.init();
+    await this.assertCurrentGenerationIfKnown();
     const deadline = Date.now() + COMMAND_LOCK_WAIT_MS;
     const token = randomUUID();
     let lockHandle;
@@ -432,6 +615,7 @@ export class AtomicRunStore {
   }
 
   private async releaseCommandFileLock(token: string): Promise<void> {
+    await this.assertCurrentGenerationIfKnown();
     const deadline = Date.now() + COMMAND_LOCK_WAIT_MS;
     while (true) {
       try {
@@ -503,6 +687,7 @@ export class AtomicRunStore {
   }
 
   async writeFinal(report: FinalReport): Promise<void> {
+    await this.assertCurrentGenerationIfKnown();
     const coverage = report.requirementsCoverage
       .map(
         (entry) =>
@@ -514,6 +699,7 @@ export class AtomicRunStore {
   }
 
   async writeOrganization(plan: SwarmPlan): Promise<void> {
+    await this.assertCurrentGenerationIfKnown();
     const sortedTeams = [...plan.teams].sort(
       (a, b) => a.priority - b.priority || a.id.localeCompare(b.id),
     );
@@ -565,10 +751,197 @@ export class AtomicRunStore {
       return [];
     }
   }
+
+  /** Fences writes from a store instance that belongs to an older run generation. */
+  async assertCurrentGeneration(): Promise<void> {
+    if (!this.generation) {
+      throw new Error(`Run ${this.runId} has not been created or loaded`);
+    }
+    await this.assertCurrentGenerationIfKnown();
+  }
+
+  generationAuthority(): RunGenerationAuthority {
+    return {
+      capture: async () => {
+        await this.assertCurrentGenerationIfKnown();
+        return { runId: this.runId, generation: this.generation! };
+      },
+      assert: async (context) => {
+        if (context.runId !== this.runId) {
+          throw new Error(`Run generation context does not match ${this.runId}`);
+        }
+        if (!this.generation || this.generation !== context.generation) {
+          throw new Error(`Run generation changed for ${this.runId}; refusing stale writer`);
+        }
+        await this.assertCurrentGenerationIfKnown();
+      },
+    };
+  }
+
+  private async assertCurrentGenerationIfKnown(): Promise<void> {
+    if (!this.generation) {
+      throw new Error(`Run ${this.runId} must be created or loaded before mutation`);
+    }
+    const manifest = await this.readManifest();
+    if (manifest.generation !== this.generation) {
+      throw new Error(`Run generation changed for ${this.runId}; refusing stale writer`);
+    }
+  }
 }
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function legacyGeneration(runId: string, stateChecksum: string): string {
+  const digest = sha256(`luna-swarm:legacy-run-generation:v1:${runId}:${stateChecksum}`);
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+/**
+ * Imports the pre-generation Blackboard as one directory snapshot. Deterministic
+ * staging and target paths make both renames recoverable before manifest publish.
+ */
+async function migrateLegacyBlackboard(runDirectory: string, generation: string): Promise<void> {
+  const legacyRoot = join(runDirectory, "blackboard-v2");
+  const stagingRoot = join(runDirectory, `.blackboard-v2.legacy-import.${generation}`);
+  const generationsRoot = join(legacyRoot, "generations");
+  const targetRoot = join(generationsRoot, generation);
+
+  const staging = await pathKind(stagingRoot);
+  const target = await pathKind(targetRoot);
+  if (staging === "symlink" || target === "symlink") {
+    throw new Error(`Legacy Blackboard import path cannot be a symbolic link for ${generation}`);
+  }
+  if (staging !== "missing" && staging !== "directory") {
+    throw new Error(`Legacy Blackboard import staging path is invalid: ${stagingRoot}`);
+  }
+  if (target !== "missing" && target !== "directory") {
+    throw new Error(`Legacy Blackboard generation path is invalid: ${targetRoot}`);
+  }
+  if (staging === "directory" && target === "directory") {
+    throw new Error("Legacy Blackboard import has conflicting staging and target directories");
+  }
+
+  if (staging === "missing") {
+    if (target === "directory") return;
+    const legacy = await pathKind(legacyRoot);
+    if (legacy === "missing") return;
+    if (legacy !== "directory") {
+      throw new Error(`Legacy Blackboard root is invalid: ${legacyRoot}`);
+    }
+    const legacyEntries = await readdir(legacyRoot);
+    const hasLegacyStorage = legacyEntries.some((entry) =>
+      entry === "blobs" || entry === "artifacts" || entry === "heads" || entry === "locks"
+    );
+    if (!hasLegacyStorage) return;
+    if (legacyEntries.includes("generations")) {
+      throw new Error(`Legacy Blackboard root mixes legacy and generation storage: ${legacyRoot}`);
+    }
+    await rename(legacyRoot, stagingRoot);
+    await syncDirectory(runDirectory);
+  }
+
+  await mkdir(generationsRoot, { recursive: true });
+  await syncDirectory(legacyRoot);
+  await rename(stagingRoot, targetRoot);
+  await syncDirectory(generationsRoot);
+  await syncDirectory(runDirectory);
+}
+
+async function pathKind(path: string): Promise<"missing" | "directory" | "symlink" | "other"> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) return "symlink";
+    if (info.isDirectory()) return "directory";
+    return "other";
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return "missing";
+    throw error;
+  }
+}
+
+function parseStateEnvelope(text: string, path: string, runId: string): StateEnvelope {
+  let envelope: StateEnvelope;
+  try {
+    envelope = JSON.parse(text) as StateEnvelope;
+  } catch (error) {
+    throw new Error(`State file is truncated or invalid: ${path}`, { cause: error });
+  }
+  if (envelope.schemaVersion !== 1 || envelope.state?.schemaVersion !== 1) {
+    throw new Error(`Unsupported state schema in ${path}`);
+  }
+  const serialized = JSON.stringify(envelope.state);
+  if (sha256(serialized) !== envelope.checksum) {
+    throw new Error(`State checksum mismatch in ${path}`);
+  }
+  if (envelope.revision !== envelope.state.revision) {
+    throw new Error(`State revision mismatch in ${path}`);
+  }
+  if (envelope.state.runId !== runId) {
+    throw new Error(`State runId does not match this run in ${path}`);
+  }
+  if (
+    envelope.generation !== undefined &&
+    (typeof envelope.generation !== "string" || !/^[0-9a-f-]{36}$/i.test(envelope.generation))
+  ) {
+    throw new Error(`State generation is invalid in ${path}`);
+  }
+  return envelope;
+}
+
+async function writeAtomicDurable(path: string, contents: string): Promise<void> {
+  const tempPath = `${path}.tmp.${process.pid}.${randomUUID()}`;
+  await writeFile(tempPath, contents, { encoding: "utf8", flag: "wx" });
+  try {
+    await syncFileAndDirectory(tempPath, false);
+    await rename(tempPath, path);
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    await unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function syncFileAndDirectory(path: string, includeDirectory = true): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    try {
+      await handle.datasync();
+    } catch (error) {
+      if (!isUnsupportedSyncError(error)) throw error;
+    }
+  } finally {
+    await handle.close();
+  }
+  if (includeDirectory) await syncDirectory(dirname(path));
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  let directory: Awaited<ReturnType<typeof open>>;
+  try {
+    directory = await open(path, "r");
+  } catch (error) {
+    if (isUnsupportedDirectorySyncError(error, false)) return;
+    throw error;
+  }
+
+  try {
+    await directory.sync();
+  } catch (error) {
+    if (!isUnsupportedDirectorySyncError(error, true)) throw error;
+  } finally {
+    await directory.close();
+  }
+}
+
+function isUnsupportedDirectorySyncError(error: unknown, duringSync: boolean): boolean {
+  // Opening or syncing directories is unavailable on some Windows/filesystem combinations.
+  // Permission, I/O, capacity, and unknown errors must remain visible to the caller.
+  if (!isNodeError(error)) return false;
+  if (["EINVAL", "EISDIR", "ENOSYS", "ENOTSUP"].includes(error.code ?? "")) return true;
+  // Windows reports directory fsync itself as EPERM even when opening the directory succeeded.
+  return duringSync && process.platform === "win32" && error.code === "EPERM";
 }
 
 function mermaidLabel(value: string): string {
@@ -683,6 +1056,23 @@ function parseCommandLockRecord(text: string, runId: string): CommandLockRecord 
       return null;
     }
     return value as CommandLockRecord;
+  } catch {
+    return null;
+  }
+}
+
+function parseStateLock(text: string, runId: string): StateLockRecord | null {
+  const record = parseCommandLockRecord(text, runId);
+  if (!record) return null;
+  try {
+    const value = JSON.parse(text) as Partial<StateLockRecord>;
+    if (
+      value.generation !== undefined &&
+      (typeof value.generation !== "string" || !/^[0-9a-f-]{36}$/i.test(value.generation))
+    ) {
+      return null;
+    }
+    return value as StateLockRecord;
   } catch {
     return null;
   }

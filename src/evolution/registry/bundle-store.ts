@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { link, lstat, mkdir, open, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { canonicalJson, immutable } from "../domain/canonical.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { canonicalJson, canonicalSha256, immutable } from "../domain/canonical.js";
 import { BundleIntegrityError, verifyExecutionBundle, type ExecutionBundle } from "../domain/bundle.js";
 
 export class BundleStoreConflictError extends Error {}
@@ -35,6 +36,7 @@ export class ExecutionBundleStore {
   async publish(bundle: ExecutionBundle): Promise<Readonly<ExecutionBundle>> {
     const verified = verifyExecutionBundle(bundle);
     await this.init();
+    await this.assertReferencedGenome(verified);
     const hashHex = verified.bundleHash.slice("sha256:".length);
     const contentPath = join(this.bundlesDirectory, `${hashHex}.json`);
     const idPath = join(this.idsDirectory, `${encodeURIComponent(verified.bundleId)}.json`);
@@ -72,6 +74,34 @@ export class ExecutionBundleStore {
     const path = join(this.bundlesDirectory, `${bundleHash.slice(7)}.json`);
     return verifyExecutionBundle(JSON.parse(await readRegularBundleFile(path)) as ExecutionBundle);
   }
+
+  private async assertReferencedGenome(bundle: Readonly<ExecutionBundle>): Promise<void> {
+    const expectedHash = bundle.componentHashes.genome;
+    // Legacy bundles did not declare a genome component hash. New publications that do
+    // declare it are fail-closed and cannot point at missing or mismatched content.
+    if (expectedHash === undefined) return;
+    const idsDirectory = join(this.rootDirectory, "genome-ids");
+    const genomesDirectory = join(this.rootDirectory, "genomes", "sha256");
+    await assertNoLinks(this.workspaceDirectory, idsDirectory);
+    await assertNoLinks(this.workspaceDirectory, genomesDirectory);
+    let pointerText: string;
+    try {
+      pointerText = await readRegularBundleFile(join(idsDirectory, `${encodeURIComponent(bundle.genomeId)}.json`));
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        throw new BundleIntegrityError(`Bundle ${bundle.bundleId} references missing genome ${bundle.genomeId}`);
+      }
+      throw error;
+    }
+    const pointer = JSON.parse(pointerText) as { genomeHash?: unknown };
+    if (pointer.genomeHash !== expectedHash) {
+      throw new BundleIntegrityError(`Bundle ${bundle.bundleId} genome pointer does not match componentHashes.genome`);
+    }
+    const content = JSON.parse(await readRegularBundleFile(join(genomesDirectory, `${expectedHash.slice(7)}.json`))) as Record<string, unknown>;
+    if (content.genomeId !== bundle.genomeId || canonicalSha256(content) !== expectedHash) {
+      throw new BundleIntegrityError(`Bundle ${bundle.bundleId} references invalid genome content`);
+    }
+  }
 }
 
 export const FileBundleRegistry = ExecutionBundleStore;
@@ -96,21 +126,45 @@ async function readOptional(path: string): Promise<string | undefined> {
 }
 
 async function readRegularBundleFile(path: string): Promise<string> {
-  const current = await lstat(path);
-  if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1) {
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    try {
+      const current = await lstat(path);
+      assertSafeBundleSnapshot(current, path);
+      const handle = await open(path, "r");
+      try {
+        const [opened, latest] = await Promise.all([handle.stat(), lstat(path)]);
+        assertSafeBundleSnapshot(opened, path);
+        assertSafeBundleSnapshot(latest, path);
+        if (!sameFileIdentity(opened, latest)) throw new BundleFileChangedDuringReadError();
+        return await handle.readFile("utf8");
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if (!isTransientBundleReadError(error) || attempt === 15) {
+        if (error instanceof BundleFileChangedDuringReadError) {
+          throw new BundleIntegrityError(`Unsafe bundle path: ${path}`);
+        }
+        throw error;
+      }
+      await delay(Math.min(attempt + 1, 4));
+    }
+  }
+  throw new BundleIntegrityError(`Unsafe bundle path: ${path}`);
+}
+
+class BundleFileChangedDuringReadError extends Error {}
+
+function assertSafeBundleSnapshot(info: import("node:fs").Stats, path: string): void {
+  if (!info.isFile() || info.isSymbolicLink()) {
     throw new BundleIntegrityError(`Unsafe bundle path: ${path}`);
   }
-  const handle = await open(path, "r");
-  try {
-    const [opened, latest] = await Promise.all([handle.stat(), lstat(path)]);
-    if (!opened.isFile() || !latest.isFile() || latest.isSymbolicLink() ||
-        opened.nlink !== 1 || latest.nlink !== 1 || !sameFileIdentity(opened, latest)) {
-      throw new BundleIntegrityError(`Unsafe bundle path: ${path}`);
-    }
-    return await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
+  if (info.nlink !== 1) throw new BundleFileChangedDuringReadError();
+}
+
+function isTransientBundleReadError(error: unknown): boolean {
+  return error instanceof BundleFileChangedDuringReadError
+    || (isNodeError(error) && ["EACCES", "EPERM"].includes(error.code ?? ""));
 }
 
 export async function assertNoLinks(root: string, target: string): Promise<void> {

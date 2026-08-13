@@ -85,7 +85,7 @@ test("authority rejects persisted Work Order revision and canonical artifact-hea
       state.harnessV2!.artifactHeads[output.id]!.contentHash = "0".repeat(64);
     }
     state.revision += 1;
-    await new AtomicRunStore(workspace, receipt.evidenceLocation.stateDirectory, receipt.runId).save(state);
+    await runStore.save(state);
     await assert.rejects(() => store.read(receipt.receiptId), /authoritative evidence verification failed/);
   }
 });

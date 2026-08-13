@@ -89,7 +89,7 @@ export class AgentGateway {
     }
     entry.users += 1;
     try {
-      return await entry.mutex.run(() => this.runWithRetries(request, signal));
+      return await entry.mutex.run(() => this.runWithRetries(request, signal), signal);
     } finally {
       entry.users -= 1;
       if (entry.users === 0 && this.threadLocks.get(request.threadKey) === entry) {
@@ -114,17 +114,17 @@ export class AgentGateway {
           { cause: failureBeforeAcquire },
         );
       }
-      let controlPermit = await this.acquireControlPermit(request, attempt, callSequence, signal);
       let permit: Permit | undefined;
+      let controlPermit: LaunchPermit | undefined;
       const releasePermits = async (): Promise<void> => {
         const acquiredPermit = permit;
         const acquiredControlPermit = controlPermit;
         permit = undefined;
         controlPermit = undefined;
         try {
-          acquiredPermit?.release();
-        } finally {
           await acquiredControlPermit?.release();
+        } finally {
+          acquiredPermit?.release();
         }
       };
       try {
@@ -160,24 +160,60 @@ export class AgentGateway {
           attempt - 1,
         );
       }
-      const combined = combineSignals(signal, this.options.config.callTimeoutMs);
-      this.modelCalls += 1;
-      await this.emit({
-        type: "call_started",
-        ...(request.taskId ? { taskId: request.taskId } : {}),
-        role: request.role,
-        ...(request.corporateRole ? { corporateRole: request.corporateRole } : {}),
-        ...(request.department ? { department: request.department } : {}),
-        ...(request.specialistId ? { specialistId: request.specialistId } : {}),
-        ...(request.skillIds ? { skillIds: request.skillIds } : {}),
-        ...(request.memoryIds ? { memoryIds: request.memoryIds } : {}),
-        attempt,
-        active: this.pool.snapshot().active,
-        concurrency: this.pool.snapshot().target,
-      });
+      let effectiveRequest: AgentRequest;
       try {
-        const effectiveRequest = await this.withOperatorInstruction(request, attempt, callSequence);
-        const response = await this.options.backend.run(effectiveRequest, combined.signal);
+        effectiveRequest = await this.withOperatorInstruction(request, attempt, callSequence);
+        // Durable admission is the final await before backend invocation. This
+        // leaves no coordinator work where a completed pause/cancel can race an
+        // already-issued launch lease into a new remote call.
+        controlPermit = await this.acquireControlPermit(request, attempt, callSequence, signal);
+      } catch (error) {
+        await releasePermits();
+        throw error;
+      }
+      let combined: ReturnType<typeof combineSignals> | undefined;
+      try {
+        const failureBeforeSend = this.getAuthFailure();
+        if (failureBeforeSend) {
+          throw new AgentCallError(
+            `Authentication circuit is open: ${failureBeforeSend.message}`,
+            "auth",
+            attempt - 1,
+            { cause: failureBeforeSend },
+          );
+        }
+        if (this.modelCalls >= this.options.config.maxAgentTurns) {
+          throw new AgentCallError(
+            `Agent turn budget exhausted at ${this.options.config.maxAgentTurns}`,
+            "permanent",
+            attempt - 1,
+          );
+        }
+        this.modelCalls += 1;
+        // Start the remote deadline and invoke the backend synchronously after
+        // durable admission. Attach both promise branches immediately so a fast
+        // rejection cannot become unhandled while telemetry is persisted.
+        combined = combineSignals(signal, this.options.config.callTimeoutMs);
+        const backendOutcome = this.options.backend.run(effectiveRequest, combined.signal).then(
+          (response) => ({ ok: true as const, response }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        await this.emit({
+          type: "call_started",
+          ...(request.taskId ? { taskId: request.taskId } : {}),
+          role: request.role,
+          ...(request.corporateRole ? { corporateRole: request.corporateRole } : {}),
+          ...(request.department ? { department: request.department } : {}),
+          ...(request.specialistId ? { specialistId: request.specialistId } : {}),
+          ...(request.skillIds ? { skillIds: request.skillIds } : {}),
+          ...(request.memoryIds ? { memoryIds: request.memoryIds } : {}),
+          attempt,
+          active: this.pool.snapshot().active,
+          concurrency: this.pool.snapshot().target,
+        });
+        const outcome = await backendOutcome;
+        if (!outcome.ok) throw outcome.error;
+        const response = outcome.response;
         const targetBeforeSuccess = this.pool.snapshot().target;
         this.pool.recordSuccess();
         if (this.pool.snapshot().target !== targetBeforeSuccess) {
@@ -203,7 +239,7 @@ export class AgentGateway {
         });
         return { ...response, queueWaitMs: totalQueueWaitMs, modelTurns: attempt };
       } catch (error) {
-        const kind = classifyError(error, combined.signal, signal);
+        const kind = classifyError(error, combined?.signal, signal);
         this.pool.recordFailure();
         if (kind === "rate_limit") {
           this.rateLimitEvents += 1;
@@ -256,7 +292,7 @@ export class AgentGateway {
         await releasePermits();
         await this.clock.sleep(waitMs, signal);
       } finally {
-        combined.dispose();
+        combined?.dispose();
         await releasePermits();
       }
     }
@@ -364,9 +400,9 @@ export function classifyError(
   combinedSignal?: AbortSignal,
   parentSignal?: AbortSignal,
 ): ErrorKind {
-  if (parentSignal?.aborted || isAbortError(error)) return "abort";
-  const message = errorMessage(error).toLowerCase();
+  if (parentSignal?.aborted) return "abort";
   if (combinedSignal?.aborted && !parentSignal?.aborted) return "transient";
+  const message = errorMessage(error).toLowerCase();
   if (/\b401\b|unauthori[sz]ed|authentication|codex login|auth token/.test(message)) {
     return "auth";
   }
@@ -384,6 +420,7 @@ export function classifyError(
   ) {
     return "transient";
   }
+  if (isAbortError(error)) return "abort";
   return "permanent";
 }
 

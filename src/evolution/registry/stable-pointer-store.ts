@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, open, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { immutable, type Sha256 } from "../domain/canonical.js";
 import { pinAttemptIdentity, type AttemptIdentity, type ExecutionBundle } from "../domain/bundle.js";
@@ -223,7 +223,7 @@ export class StablePointerStore {
   }
 
   private async load(): Promise<PointerState> {
-    return this.loadUnlocked();
+    return withStateQueue(this.statePath, () => this.loadUnlocked());
   }
 
   private async loadUnlocked(): Promise<PointerState> {
@@ -241,15 +241,21 @@ export class StablePointerStore {
   private async write(state: PointerState): Promise<void> {
     await this.prepareStateAccess();
     const temp = `${this.statePath}.tmp.${process.pid}.${randomUUID()}`;
-    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-    const handle = await open(temp, "r");
+    const handle = await open(temp, "wx");
     try {
+      await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8" });
       try { await handle.datasync(); } catch (error) {
         if (!isNodeError(error) || !["EINVAL", "ENOTSUP", "EPERM"].includes(error.code ?? "")) throw error;
       }
-    } finally { await handle.close(); }
+    } catch (error) {
+      await handle.close().catch(() => undefined);
+      await unlink(temp).catch(() => undefined);
+      throw error;
+    }
+    await handle.close();
     try {
       await replaceFile(temp, this.statePath);
+      await syncDirectory(dirname(this.statePath));
     } catch (error) {
       await unlink(temp).catch(() => undefined);
       throw error;
@@ -257,6 +263,10 @@ export class StablePointerStore {
   }
 
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+    return withStateQueue(this.statePath, () => this.withFileLock(operation));
+  }
+
+  private async withFileLock<T>(operation: () => Promise<T>): Promise<T> {
     await this.prepareStateAccess();
     const token = randomUUID();
     const deadline = Date.now() + this.lockTimeoutMs;
@@ -265,8 +275,8 @@ export class StablePointerStore {
         await writeFile(this.lockPath, `${JSON.stringify({ pid: process.pid, token, at: this.now().toISOString() })}\n`, { encoding: "utf8", flag: "wx" });
         break;
       } catch (error) {
-        if (!isNodeError(error) || error.code !== "EEXIST") throw error;
-        if (await this.recoverAbandonedLock()) continue;
+        if (!isNodeError(error) || !["EACCES", "EEXIST", "EPERM"].includes(error.code ?? "")) throw error;
+        if (error.code === "EEXIST" && await this.recoverAbandonedLock()) continue;
         if (Date.now() >= deadline) throw new StablePointerConflictError("Timed out acquiring stable pointer lock");
         await delay(5);
       }
@@ -321,15 +331,55 @@ export class StablePointerStore {
 
 async function replaceFile(source: string, target: string): Promise<void> {
   const retryable = new Set(["EACCES", "EPERM"]);
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 32; attempt += 1) {
     try {
       await rename(source, target);
       return;
     } catch (error) {
-      if (!isNodeError(error) || !retryable.has(error.code ?? "") || attempt === 7) throw error;
-      await delay(5 * (attempt + 1));
+      if (!isNodeError(error) || !retryable.has(error.code ?? "") || attempt === 31) throw error;
+      await delay(5 * Math.min(attempt + 1, 8));
     }
   }
+}
+
+const stateQueues = new Map<string, Promise<void>>();
+
+async function withStateQueue<T>(statePath: string, operation: () => Promise<T>): Promise<T> {
+  const previous = stateQueues.get(statePath) ?? Promise.resolve();
+  let release = (): void => undefined;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  stateQueues.set(statePath, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (stateQueues.get(statePath) === current) stateQueues.delete(statePath);
+  }
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, "r");
+  } catch (error) {
+    if (isUnsupportedDirectorySync(error, false)) return;
+    throw error;
+  }
+  try {
+    try { await handle.sync(); } catch (error) {
+      if (!isUnsupportedDirectorySync(error, true)) throw error;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+function isUnsupportedDirectorySync(error: unknown, duringSync: boolean): boolean {
+  if (!isNodeError(error)) return false;
+  if (["EINVAL", "EISDIR", "ENOSYS", "ENOTSUP"].includes(error.code ?? "")) return true;
+  // Windows reports directory fsync itself as EPERM even when opening the directory succeeded.
+  return duringSync && process.platform === "win32" && error.code === "EPERM";
 }
 
 export const FileStablePointerStore = StablePointerStore;
@@ -362,17 +412,42 @@ function isProcessAlive(pid: number): boolean {
 }
 
 async function readRegularStateFile(path: string): Promise<string> {
-  const initial = await lstat(path);
-  assertSafeStateStat(initial, path);
-  const handle = await open(path, "r");
-  try {
-    const [opened, current] = await Promise.all([handle.stat(), lstat(path)]);
-    if (!isSafeStateStat(opened) || !isSafeStateStat(current) ||
-        !sameFileIdentity(initial, opened) || !sameFileIdentity(opened, current)) {
-      throw new Error(`Unsafe Stable Pointer state path: ${path}`);
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    try {
+      const initial = await lstat(path);
+      assertSafeStateSnapshotStat(initial, path);
+      const handle = await open(path, "r");
+      try {
+        const [opened, current] = await Promise.all([handle.stat(), lstat(path)]);
+        assertSafeStateSnapshotStat(opened, path);
+        assertSafeStateSnapshotStat(current, path);
+        if (sameFileIdentity(initial, opened) && sameFileIdentity(opened, current)) {
+          return await handle.readFile("utf8");
+        }
+      } finally {
+        await handle.close();
+      }
+    } catch (error) {
+      if (!isTransientStateReadError(error) || attempt === 15) throw error;
     }
-    return await handle.readFile("utf8");
-  } finally { await handle.close(); }
+    if (attempt === 15) throw new StablePointerConflictError(`Stable Pointer state changed continuously while reading: ${path}`);
+    await delay(Math.min(attempt + 1, 4));
+  }
+  throw new StablePointerConflictError(`Stable Pointer state could not be read consistently: ${path}`);
+}
+
+function isTransientStateReadError(error: unknown): boolean {
+  return error instanceof StateFileChangedDuringReadError ||
+    (isNodeError(error) && ["EACCES", "EPERM"].includes(error.code ?? ""));
+}
+
+class StateFileChangedDuringReadError extends Error {}
+
+function assertSafeStateSnapshotStat(info: import("node:fs").Stats, path: string): void {
+  if (info.isFile() && !info.isSymbolicLink() && info.nlink === 0) {
+    throw new StateFileChangedDuringReadError(`Stable Pointer state was replaced while reading: ${path}`);
+  }
+  assertSafeStateStat(info, path);
 }
 
 function assertSafeStateStat(info: import("node:fs").Stats, path: string): void {

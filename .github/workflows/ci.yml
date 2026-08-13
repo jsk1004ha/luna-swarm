@@ -10,7 +10,13 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 20.19.0
+          - 22.x
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -18,7 +24,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - name: Install dependencies
@@ -32,3 +38,9 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Audit production dependencies
+        run: npm audit --audit-level=low
+
+      - name: Verify package contents
+        run: npm pack --dry-run

@@ -11,6 +11,12 @@ export function canonicalSha256(value: unknown): Sha256 {
   return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }
 
+export function assertSha256(value: string, label = "digest"): asserts value is Sha256 {
+  if (!/^sha256:[a-f0-9]{64}$/.test(value)) {
+    throw new TypeError(`${label} must be a canonical SHA-256 digest`);
+  }
+}
+
 export function immutable<T>(value: T): Readonly<T> {
   return deepFreeze(structuredClone(value));
 }

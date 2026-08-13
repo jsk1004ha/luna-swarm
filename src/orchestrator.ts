@@ -44,6 +44,7 @@ import type {
   ClaimLineageItem,
   EvidenceLineageItem,
   FinalReport,
+  JsonValue,
   RunDirective,
   RunEvent,
   RunState,
@@ -61,8 +62,14 @@ import { AdaptiveHarness } from "./harness.js";
 import { BlackboardStore, toRef } from "./harness-v2/blackboard.js";
 import {
   automaticOrganizationHeadcount,
+  BUILT_IN_ORGANIZATION_PLUGIN,
   organizationRegistryV2,
 } from "./harness-v2/organization-registry.js";
+import {
+  createStaffingPlanV1,
+  migrateLegacyStaffingPlanV1,
+  validateStaffingPlanV1,
+} from "./harness-v2/staffing-plan.js";
 import {
   acquireWorkOrderLease,
   createWorkOrderRecord,
@@ -141,12 +148,14 @@ import {
   pinRunAttempt,
   restoreEvolutionRuntime,
   resolveLocalSourceIdentity,
-  SourceIdentityError,
+  SourceIdentityUnavailableError,
+  type ExplicitSourceIdentity,
   workloadForTask,
   type EvolutionRuntimeFingerprintInput,
   type EvolutionRuntime,
 } from "./evolution/runtime.js";
 import { canonicalSha256 } from "./evolution/domain/canonical.js";
+import { renderPromptModuleV1 } from "./evolution/components/prompt-module.js";
 import type { EvolutionAttemptRecord, RunBundlePin } from "./evolution/domain/bundle.js";
 import {
   DecisionTraceConflictError,
@@ -202,7 +211,11 @@ export class SwarmOrchestrator {
   constructor(private readonly options: OrchestratorOptions) {
     this.idFactory = options.idFactory ?? randomUUID;
     this.harness = new AdaptiveHarness(options.workspace, options.config);
-    this.blackboard = new BlackboardStore(options.store.runDirectory, options.store.runId);
+    this.blackboard = new BlackboardStore(
+      options.store.runDirectory,
+      options.store.runId,
+      options.store.generationAuthority(),
+    );
     this.knowledgeCapsules = new VerifiedKnowledgeCapsuleStore(options.workspace, {
       verifier: (context) => this.verifyKnowledgeCapsuleAdmission(context),
     });
@@ -228,7 +241,7 @@ export class SwarmOrchestrator {
       );
       evolutionState = newEvolutionRunState(structuredClone(this.evolutionRuntime.pins));
     } catch (error) {
-      if (!(error instanceof SourceIdentityError)) throw error;
+      if (!(error instanceof SourceIdentityUnavailableError)) throw error;
       delete this.evolutionRuntime;
       delete this.evolutionRuntimeFingerprint;
       evolutionState = legacyUnpinnedEvolutionState(now);
@@ -621,6 +634,13 @@ export class SwarmOrchestrator {
   }
 
   private async resolveEvolutionFingerprint(): Promise<EvolutionRuntimeFingerprintInput> {
+    const explicitSource: ExplicitSourceIdentity | undefined = this.options.sourceIdentity
+      ? { kind: "config", value: this.options.sourceIdentity }
+      : this.options.config.sourceIdentity
+        ? { kind: "config", value: this.options.config.sourceIdentity }
+        : process.env.LUNA_SOURCE_COMMIT
+          ? { kind: "luna_environment", value: process.env.LUNA_SOURCE_COMMIT }
+          : undefined;
     const fingerprint: EvolutionRuntimeFingerprintInput = {
       model: this.options.config.model,
       reasoning: this.options.config.reasoning,
@@ -630,7 +650,7 @@ export class SwarmOrchestrator {
       organizationVersion: HARNESS_V2_ORG_VERSION,
       sourceCommit: await resolveLocalSourceIdentity(
         this.options.workspace,
-        this.options.sourceIdentity ?? this.options.config.sourceIdentity ?? process.env.LUNA_SOURCE_COMMIT ?? process.env.GITHUB_SHA,
+        explicitSource,
       ),
     };
     this.evolutionRuntimeFingerprint = fingerprint;
@@ -807,6 +827,17 @@ export class SwarmOrchestrator {
       headcount: organizationHeadcount,
       reviewerSlots: organizationReviewerSlots,
     });
+    const staffingPlan = createStaffingPlanV1({
+      planId: `staffing:${this.state.runId}`,
+      revision: 1,
+      parent: null,
+      logicalAgentCount: organizationHeadcount,
+      reviewerSlots: organizationReviewerSlots,
+      workDagHash: staffingWorkDagHash(plan),
+      capabilityDemand: staffingCapabilityDemand(plan, registry),
+      organizationTemplate: BUILT_IN_ORGANIZATION_PLUGIN,
+      registry,
+    });
     const preparedAt = isoNow();
     const environmentDigest = this.currentEnvironmentDigest();
     const preparedOrders = plan.tasks.map((task) => {
@@ -835,6 +866,7 @@ export class SwarmOrchestrator {
       state.tasks = recordsFromPlan(plan);
       const previousHarness = state.harnessV2;
       state.harnessV2 = emptyHarnessV2State(organizationHeadcount, organizationReviewerSlots);
+      state.harnessV2.staffingPlan = structuredClone(staffingPlan);
       if (previousHarness?.missionPreflight) {
         state.harnessV2.missionPreflight = structuredClone(previousHarness.missionPreflight);
       }
@@ -878,6 +910,11 @@ export class SwarmOrchestrator {
       type: "plan_accepted",
       status: "running",
       message: `${plan.tasks.length} tasks`,
+    });
+    await this.event({
+      type: "staffing_plan_pinned",
+      status: "pinned",
+      message: `${staffingPlan.logicalAgentCount} logical agents · revision ${staffingPlan.revision} · ${staffingPlan.planHash}`,
     });
     for (const order of Object.values(this.state.harnessV2?.workOrders ?? {})) {
       await this.event({
@@ -1825,13 +1862,45 @@ export class SwarmOrchestrator {
     const ordered = Object.values(this.state.teams).sort(
       (a, b) => b.depth - a.depth || b.priority - a.priority || a.id.localeCompare(b.id),
     );
-    const depths = uniqueSorted(ordered.map((team) => String(team.depth)))
-      .map(Number)
-      .sort((a, b) => b - a);
-    for (const depth of depths) {
+    const pending = new Set(ordered.map((team) => team.id));
+    const running = new Map<
+      string,
+      Promise<{ teamId: string; error?: unknown }>
+    >();
+
+    while (pending.size > 0 || running.size > 0) {
+      if (signal?.aborted) {
+        await Promise.allSettled(running.values());
+        throw abortError();
+      }
       await this.reloadDirectives();
-      const level = ordered.filter((team) => team.depth === depth);
-      await Promise.all(level.map((team) => this.synthesizeOneTeam(team.id, signal)));
+      const ready = ordered.filter(
+        (team) =>
+          pending.has(team.id) &&
+          team.childTeamIds.every(
+            (childId) => !pending.has(childId) && !running.has(childId),
+          ),
+      );
+      for (const team of ready) {
+        pending.delete(team.id);
+        const execution = this.synthesizeOneTeam(team.id, signal).then(
+          () => ({ teamId: team.id }),
+          (error: unknown) => ({ teamId: team.id, error }),
+        );
+        running.set(team.id, execution);
+      }
+
+      if (running.size === 0) {
+        throw new Error(
+          `Team synthesis scheduler stalled: ${[...pending].sort().join(", ")}`,
+        );
+      }
+      const completed = await Promise.race(running.values());
+      running.delete(completed.teamId);
+      if (completed.error !== undefined) {
+        await Promise.allSettled(running.values());
+        throw completed.error;
+      }
     }
     const root = Object.values(this.state.teams).find(
       (team) => team.parentTeamId === null,
@@ -1862,14 +1931,37 @@ export class SwarmOrchestrator {
   ): Promise<void> {
       if (signal?.aborted) throw abortError();
       const current = this.state.teams[teamId]!;
-      if (["accepted", "partial"].includes(current.status) && current.packet) return;
-
       const directTasks = Object.values(this.state.tasks)
         .filter((task) => task.teamId === current.id)
         .sort((a, b) => a.id.localeCompare(b.id));
       const childTeams = current.childTeamIds
         .map((id) => this.state.teams[id])
         .filter((team): team is TeamRecord => Boolean(team));
+      if (["accepted", "partial"].includes(current.status) && current.packet) {
+        const full = current.status === "accepted";
+        const reportArtifact = await this.persistTeamReportArtifact(
+          current,
+          current.packet,
+          directTasks,
+          childTeams,
+          full,
+        );
+        await this.commit((state) => {
+          const team = state.teams[current.id];
+          if (!team?.packet || !["accepted", "partial"].includes(team.status)) return;
+          this.recordTeamReport(state, team, team.packet, reportArtifact, full);
+        });
+        await this.event({
+          type: "team_report_backfilled",
+          messageType: "TEAM_REPORT",
+          artifactIds: [reportArtifact.artifactId],
+          corporateRole: `project-lead:${current.id}:${current.leadRank}`,
+          department: current.department,
+          status: current.status,
+          message: `${current.name} immutable report verified during resume`,
+        });
+        return;
+      }
       const packets: SynthesisPacket[] = [
         ...directTasks
           .filter((task): task is TaskRecord & { result: AgentResult } =>
@@ -1974,6 +2066,13 @@ export class SwarmOrchestrator {
         const full =
           directTasks.every((task) => task.status === "accepted") &&
           childTeams.every((team) => team.status === "accepted");
+        const reportArtifact = await this.persistTeamReportArtifact(
+          current,
+          packet,
+          directTasks,
+          childTeams,
+          full,
+        );
         await this.commit((state) => {
           const team = state.teams[current.id];
           if (!team || team.leaseId !== leaseId) return;
@@ -1982,9 +2081,12 @@ export class SwarmOrchestrator {
           team.completedAt = isoNow();
           delete team.leaseId;
           delete team.error;
+          this.recordTeamReport(state, team, packet, reportArtifact, full);
         });
         await this.event({
           type: "team_report_delivered",
+          messageType: "TEAM_REPORT",
+          artifactIds: [reportArtifact.artifactId],
           corporateRole: `project-lead:${current.id}:${current.leadRank}`,
           department: current.department,
           status: this.state.teams[current.id]?.status ?? "unknown",
@@ -2010,6 +2112,72 @@ export class SwarmOrchestrator {
           delete team.leaseId;
         });
       }
+  }
+
+  private recordTeamReport(
+    state: RunState,
+    team: TeamRecord,
+    packet: SynthesisPacket,
+    reportArtifact: ArtifactRevision,
+    full: boolean,
+  ): void {
+    if (!state.harnessV2) throw new Error("Harness v2 state is required for immutable team reports");
+    state.harnessV2.artifactHeads[reportArtifact.artifactId] = toRef(reportArtifact);
+    const messageId = `team-report:${team.id}`;
+    if (state.harnessV2.messages.some((message) => message.id === messageId)) return;
+    state.harnessV2.messages.push(createStructuredMessage({
+      id: messageId,
+      createdAt: reportArtifact.createdAt,
+      type: "TEAM_REPORT",
+      runId: state.runId,
+      from: { agentId: `project-lead:${team.id}`, teamId: team.id },
+      to: {
+        teamIds: [team.parentTeamId ?? "hq:command/division:executive-office/team:mission-command"],
+        agentIds: [],
+      },
+      artifactIds: [reportArtifact.artifactId],
+      metadata: {
+        sourceTaskIds: packet.sourceTaskIds,
+        status: full ? "accepted" : "partial",
+        claimCount: packet.claimLineage.length,
+        evidenceCount: packet.evidenceLineage.length,
+      },
+    }));
+  }
+
+  private async persistTeamReportArtifact(
+    team: TeamRecord,
+    packet: SynthesisPacket,
+    directTasks: TaskRecord[],
+    childTeams: TeamRecord[],
+    full: boolean,
+  ): Promise<ArtifactRevision> {
+    const harness = this.state.harnessV2;
+    if (!harness) throw new Error("Harness v2 state is required for immutable team reports");
+    const expectedInputIds = [
+      ...directTasks
+        .filter((task) => task.status === "accepted")
+        .map((task) => taskResultArtifactId(task.id)),
+      ...childTeams
+        .filter((child) => ["accepted", "partial"].includes(child.status))
+        .map((child) => teamReportArtifactId(child.id)),
+    ];
+    const inputs = expectedInputIds.map((artifactId) => {
+      const ref = harness.artifactHeads[artifactId];
+      if (!ref) throw new Error(`Team report input artifact is missing: ${artifactId}`);
+      return structuredClone(ref);
+    });
+    return this.blackboard.put({
+      artifactId: teamReportArtifactId(team.id),
+      kind: "team-report",
+      createdBy: { agentId: `project-lead:${team.id}`, teamId: team.id },
+      requirementIds: uniqueSorted(team.requirementIds),
+      inputs,
+      verificationStatus: full ? "accepted" : "contested",
+      tools: [],
+      commands: [],
+      content: structuredClone(packet) as unknown as JsonValue,
+    }, null);
   }
 
   private async judge(root: SynthesisPacket, signal?: AbortSignal): Promise<FinalReport> {
@@ -2121,16 +2289,37 @@ export class SwarmOrchestrator {
     if (this.state.evolution?.mode === "pinned" && !executionBundlePin) {
       throw new Error(`Evolution Bundle pin is missing for ${workloadClass}`);
     }
+    const executionBehavior = executionBundlePin
+      ? this.evolutionRuntime?.behaviors[workloadClass]
+      : undefined;
+    if (executionBundlePin && !executionBehavior) {
+      throw new Error(`Evolution Bundle behavior is missing for ${workloadClass}`);
+    }
+    if (taskAttempt && executionBundlePin &&
+        (taskAttempt.bundleId !== executionBundlePin.bundleId || taskAttempt.bundleHash !== executionBundlePin.bundleHash)) {
+      throw new Error(`Work Order AttemptIdentity does not match the pinned Bundle for ${workloadClass}`);
+    }
     const evolutionBoundRequest: AgentRequest = {
       ...request,
       ...(executionBundlePin ? { executionBundlePin } : {}),
+      ...(executionBehavior ? {
+        executionPromptModule: {
+          schemaVersion: executionBehavior.promptModule.schemaVersion,
+          moduleId: executionBehavior.promptModule.moduleId,
+          contentHash: executionBehavior.promptModule.contentHash,
+        },
+      } : {}),
       ...(taskAttempt ? { attemptIdentity: taskAttempt } : {}),
     };
+    const requiredPromptModule = executionBehavior
+      ? renderPromptModuleV1(executionBehavior.promptModule)
+      : undefined;
     const harnessed = this.harness.apply(evolutionBoundRequest);
     const directed = this.withHarnessAndDirectives(
       harnessed.request,
       harnessed.block,
       directiveSnapshot,
+      requiredPromptModule,
     );
     await this.event({
       type: "harness_selected",
@@ -2785,11 +2974,40 @@ export class SwarmOrchestrator {
     harness.organizationHeadcount ??= HARNESS_V2_AGENT_COUNT;
     harness.organizationReviewerSlots ??= 3;
     if (!loaded.plan) return { harness, errors: [] };
-    const registry = organizationRegistryV2({
-      headcount: harness.organizationHeadcount,
-      reviewerSlots: harness.organizationReviewerSlots,
-    });
     const errors: string[] = [];
+    const registry = organizationRegistryV2({
+      headcount: harness.staffingPlan?.logicalAgentCount ?? harness.organizationHeadcount,
+      reviewerSlots: harness.staffingPlan?.reviewerSlots ?? harness.organizationReviewerSlots,
+    });
+    try {
+      if (harness.staffingPlan) {
+        validateStaffingPlanV1(
+          harness.staffingPlan,
+          registry,
+          BUILT_IN_ORGANIZATION_PLUGIN,
+        );
+        if (harness.staffingPlan.workDagHash !== staffingWorkDagHash(loaded.plan)) {
+          throw new Error("persisted Staffing Plan does not match the accepted Work DAG");
+        }
+      } else {
+        harness.staffingPlan = migrateLegacyStaffingPlanV1(
+          {
+            organizationHeadcount: harness.organizationHeadcount,
+            organizationReviewerSlots: harness.organizationReviewerSlots,
+          },
+          {
+            planId: `staffing:${loaded.runId}`,
+            workDagHash: staffingWorkDagHash(loaded.plan),
+            capabilityDemand: staffingCapabilityDemand(loaded.plan, registry),
+            organizationTemplate: BUILT_IN_ORGANIZATION_PLUGIN,
+          },
+        );
+      }
+      harness.organizationHeadcount = harness.staffingPlan.logicalAgentCount;
+      harness.organizationReviewerSlots = harness.staffingPlan.reviewerSlots;
+    } catch (error) {
+      errors.push(`Staffing Plan integrity check failed: ${errorMessage(error)}`);
+    }
     for (const task of Object.values(loaded.tasks)) {
       const order = workOrderFromTask(task, { missionId: `mission:${loaded.runId}`, registry });
       const dependenciesAccepted = task.dependencies.every((id) => loaded.tasks[id]?.status === "accepted");
@@ -3199,10 +3417,21 @@ export class SwarmOrchestrator {
     request: AgentRequest,
     harnessBlock: string,
     directives: RunDirective[],
+    requiredPromptModule?: string,
   ): { request: AgentRequest; includedDirectives: RunDirective[] } {
+    const maxContext = this.options.config.maxContextChars;
+    if (requiredPromptModule && requiredPromptModule.length > maxContext) {
+      throw new Error(
+        `Verified evolution prompt module ${request.executionPromptModule?.moduleId ?? "unknown"} ` +
+        `requires ${requiredPromptModule.length} characters but maxContextChars is ${maxContext}`,
+      );
+    }
+    const bodyBudget = requiredPromptModule
+      ? Math.max(0, maxContext - requiredPromptModule.length - 2)
+      : maxContext;
     const rendered = chairmanDirectiveBlock(
       directives,
-      Math.min(4_000, this.options.config.maxContextChars),
+      Math.min(4_000, bodyBudget),
     );
     if (directives.length > 0 && rendered.includedDirectives.length === 0) {
       throw new Error(
@@ -3210,32 +3439,31 @@ export class SwarmOrchestrator {
       );
     }
     const blocks: string[] = [];
-    const maxContext = this.options.config.maxContextChars;
     const directiveLength = rendered.text ? rendered.text.length + 2 : 0;
-    const minimumTaskBudget = Math.min(1_024, Math.max(0, maxContext - directiveLength));
-    const harnessBudget = Math.max(0, maxContext - directiveLength - minimumTaskBudget - 2);
+    const minimumTaskBudget = Math.min(1_024, Math.max(0, bodyBudget - directiveLength));
+    const harnessBudget = Math.max(0, bodyBudget - directiveLength - minimumTaskBudget - 2);
     const boundedHarness = truncateToExactLength(harnessBlock, harnessBudget);
     if (boundedHarness) blocks.push(boundedHarness);
     if (rendered.text) blocks.push(rendered.text);
+    let body: string;
     if (blocks.length === 0) {
-      return {
-        request: {
-          ...request,
-          prompt: truncate(request.prompt, maxContext),
-        },
-        includedDirectives: [],
-      };
+      body = truncate(request.prompt, bodyBudget);
+    } else {
+      const suffix = blocks.join("\n\n");
+      const separator = "\n\n";
+      const promptBudget = Math.max(0, bodyBudget - separator.length - suffix.length);
+      const prompt = request.prompt.length <= promptBudget
+        ? request.prompt
+        : truncate(request.prompt, promptBudget);
+      body = prompt ? `${prompt}${separator}${suffix}` : suffix;
     }
-    const suffix = blocks.join("\n\n");
-    const separator = "\n\n";
-    const promptBudget = Math.max(0, maxContext - separator.length - suffix.length);
-    const prompt = request.prompt.length <= promptBudget
-      ? request.prompt
-      : truncate(request.prompt, promptBudget);
+    const prompt = requiredPromptModule
+      ? (body ? `${requiredPromptModule}\n\n${body}` : requiredPromptModule)
+      : body;
     return {
       request: {
         ...request,
-        prompt: prompt ? `${prompt}${separator}${suffix}` : suffix,
+        prompt,
       },
       includedDirectives: rendered.includedDirectives,
     };
@@ -3300,14 +3528,58 @@ export class SwarmOrchestrator {
   private organizationRegistry(): OrganizationRegistryV2 {
     const harness = this.state.harnessV2;
     return organizationRegistryV2({
-      headcount: harness?.organizationHeadcount ?? (
+      headcount: harness?.staffingPlan?.logicalAgentCount ?? harness?.organizationHeadcount ?? (
         typeof this.options.config.organizationHeadcount === "number"
           ? this.options.config.organizationHeadcount
           : HARNESS_V2_AGENT_COUNT
       ),
-      reviewerSlots: harness?.organizationReviewerSlots ?? configuredReviewerSlots(this.options.config),
+      reviewerSlots: harness?.staffingPlan?.reviewerSlots ?? harness?.organizationReviewerSlots ?? configuredReviewerSlots(this.options.config),
     });
   }
+}
+
+function staffingWorkDagHash(plan: SwarmPlan): `sha256:${string}` {
+  return canonicalSha256({
+    requirements: [...plan.requirements].sort((a, b) => a.id.localeCompare(b.id)),
+    teams: [...plan.teams].sort((a, b) => a.id.localeCompare(b.id)),
+    tasks: [...plan.tasks].sort((a, b) => a.id.localeCompare(b.id)),
+  });
+}
+
+function staffingCapabilityDemand(
+  plan: SwarmPlan,
+  registry: OrganizationRegistryV2,
+): Array<{
+  capabilityId: string;
+  requiredSlots: number;
+  preferredDepartmentIds: string[];
+  requiredToolContractIds: string[];
+}> {
+  const headquartersFor = (department: string): OrganizationRegistryV2["agents"][number]["headquartersId"] => {
+    if (department === "research") return "research";
+    if (department === "engineering") return "engineering";
+    if (department === "quality" || department === "risk") return "quality";
+    if (department === "integration") return "integration";
+    return "command";
+  };
+  const requested = new Map<string, number>();
+  for (const task of plan.tasks) {
+    const headquartersId = headquartersFor(task.department);
+    requested.set(headquartersId, (requested.get(headquartersId) ?? 0) + 1);
+  }
+  return [...requested.entries()]
+    .map(([headquartersId, count]) => {
+      const available = registry.agents.filter(
+        (agent) => agent.headquartersId === headquartersId,
+      ).length;
+      return {
+        capabilityId: `department:${headquartersId}`,
+        requiredSlots: Math.max(1, Math.min(count, available)),
+        preferredDepartmentIds: [headquartersId],
+        requiredToolContractIds: [`builtin:${headquartersId}`],
+      };
+    })
+    .sort((a, b) => a.capabilityId.localeCompare(b.capabilityId));
 }
 
 function finalViolations(
@@ -3690,6 +3962,10 @@ function oracleReceiptArtifactId(taskId: string): string {
 
 function oracleObservationArtifactId(taskId: string): string {
   return `oracle-observation-${safeArtifactId(taskId).slice(0, 72)}-${sha256(taskId).slice(0, 12)}`;
+}
+
+function teamReportArtifactId(teamId: string): string {
+  return `team-report-${safeArtifactId(teamId).slice(0, 72)}-${sha256(teamId).slice(0, 12)}`;
 }
 
 function agentResultFromArtifact(content: unknown): AgentResult {

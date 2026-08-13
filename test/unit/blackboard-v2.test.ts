@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DEFAULT_CONFIG } from "../../src/config.js";
 import {
   BlackboardConflictError,
   BlackboardStore,
   canonicalJson,
   toRef,
 } from "../../src/harness-v2/blackboard.js";
+import { companySnapshot } from "../../src/organization.js";
+import { AtomicRunStore } from "../../src/store.js";
 
 const producer = { agentId: "agent-1", teamId: "engineering-core" };
 
@@ -57,6 +61,112 @@ test("CAS publication is safe when different artifacts concurrently share conten
     ]);
     assert.equal(left.contentHash, right.contentHash);
     await Promise.all([store.verify(toRef(left)), store.verify(toRef(right))]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("generation namespaces fence a stale run from replacement artifact heads", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "luna-blackboard-generation-"));
+  try {
+    const oldRun = new AtomicRunStore(directory, ".state", "generation-run");
+    await oldRun.create();
+    const stale = new BlackboardStore(
+      oldRun.runDirectory,
+      oldRun.runId,
+      oldRun.generationAuthority(),
+    );
+    const staleBeforeFirstUse = new BlackboardStore(
+      oldRun.runDirectory,
+      oldRun.runId,
+      oldRun.generationAuthority(),
+    );
+    const oldArtifact = await stale.put(submission("shared-head", { value: "old" }), null);
+    const oldArtifactsDirectory = stale.artifactsDirectory;
+
+    await rm(oldRun.runDirectory, { recursive: true, force: true });
+    const replacementRun = new AtomicRunStore(directory, ".state", "generation-run");
+    await replacementRun.create();
+    const current = new BlackboardStore(
+      replacementRun.runDirectory,
+      replacementRun.runId,
+      replacementRun.generationAuthority(),
+    );
+    const currentArtifact = await current.put(submission("shared-head", { value: "current" }), null);
+
+    assert.notEqual(current.artifactsDirectory, oldArtifactsDirectory);
+    await assert.rejects(
+      stale.put({
+        ...submission("shared-head", { value: "stale-overwrite" }),
+        supersedes: toRef(oldArtifact),
+      }, 1),
+      /generation changed/i,
+    );
+    await assert.rejects(
+      stale.put(submission("stale-only", { value: "must-not-appear" }), null),
+      /generation changed/i,
+    );
+    await assert.rejects(
+      staleBeforeFirstUse.put(submission("lazy-stale", { value: "must-not-appear" }), null),
+      /generation changed/i,
+    );
+    assert.equal((await current.head<Record<string, string>>("shared-head")).content.value, "current");
+    assert.deepEqual(await current.list("shared-head"), [toRef(currentArtifact)]);
+    assert.deepEqual(await current.list("stale-only"), []);
+    assert.deepEqual(await current.list("lazy-stale"), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("legacy artifacts remain readable after manifest import assigns a generation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "luna-blackboard-legacy-import-"));
+  try {
+    const runId = "legacy-artifact-run";
+    const runStore = new AtomicRunStore(directory, ".state", runId);
+    await runStore.init();
+    const legacyBlackboard = new BlackboardStore(runStore.runDirectory, runId);
+    const legacyArtifact = await legacyBlackboard.put(
+      submission("legacy-evidence", { value: "still-verifiable" }),
+      null,
+    );
+    const legacyArtifactsDirectory = legacyBlackboard.artifactsDirectory;
+
+    const legacyState = {
+      schemaVersion: 1 as const,
+      revision: 0,
+      runId,
+      status: "planning" as const,
+      goal: "resume legacy artifacts",
+      workspace: directory,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      config: DEFAULT_CONFIG,
+      organization: companySnapshot(),
+      teams: {},
+      tasks: {},
+      threadIds: {},
+      metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
+    };
+    const serializedState = JSON.stringify(legacyState);
+    await writeFile(runStore.statePath, `${JSON.stringify({
+      schemaVersion: 1,
+      revision: 0,
+      checksum: createHash("sha256").update(serializedState).digest("hex"),
+      state: legacyState,
+    })}\n`, "utf8");
+
+    await runStore.load();
+    const importedBlackboard = new BlackboardStore(
+      runStore.runDirectory,
+      runId,
+      runStore.generationAuthority(),
+    );
+    const imported = await importedBlackboard.read<Record<string, string>>(toRef(legacyArtifact));
+
+    assert.notEqual(importedBlackboard.artifactsDirectory, legacyArtifactsDirectory);
+    assert.equal(imported.content.value, "still-verifiable");
+    await importedBlackboard.verify(toRef(legacyArtifact));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

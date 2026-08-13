@@ -62,6 +62,79 @@ export interface OrganizationRegistryV2 {
   agents: AgentRoleContract[];
 }
 
+export type CanonicalSha256 = `sha256:${string}`;
+
+export interface OrganizationPluginToolContract {
+  id: string;
+  tools: { allow: string[]; deny: string[] };
+  filesystem: { read: string[]; write: string[] };
+  network: AgentNetworkPolicy;
+  allowedDomains: string[];
+}
+
+export interface OrganizationPluginRole {
+  id: string;
+  title: string;
+  mission: string;
+  toolContractId: string;
+}
+
+export interface OrganizationPluginDepartment {
+  id: string;
+  name: string;
+  mission: string;
+  divisions: Array<{
+    id: string;
+    name: string;
+    mission: string;
+    teamIds: string[];
+  }>;
+  roles: OrganizationPluginRole[];
+}
+
+/** Declarative data only. Loading executable plugin code is intentionally outside this contract. */
+export interface OrganizationPluginManifest {
+  schemaVersion: 1;
+  pluginId: string;
+  pluginVersion: string;
+  departments: OrganizationPluginDepartment[];
+  toolContracts: OrganizationPluginToolContract[];
+}
+
+export interface StaffingCapabilityDemand {
+  capabilityId: string;
+  requiredSlots: number;
+  preferredDepartmentIds: string[];
+  requiredToolContractIds: string[];
+}
+
+export interface StaffingAllocationV1 {
+  unitId: string;
+  departmentId: string;
+  logicalAgentCount: number;
+  agentIds: string[];
+  roleCounts: Record<string, number>;
+}
+
+export interface StaffingPlanRefV1 {
+  planId: string;
+  revision: number;
+  planHash: CanonicalSha256;
+}
+
+export interface StaffingPlanV1 extends StaffingPlanRefV1 {
+  schemaVersion: 1;
+  parent: StaffingPlanRefV1 | null;
+  logicalAgentCount: number;
+  reviewerSlots: number;
+  workDagHash: CanonicalSha256;
+  capabilityDemand: StaffingCapabilityDemand[];
+  organizationTemplateHash: CanonicalSha256;
+  pluginManifestHashes: CanonicalSha256[];
+  registryHash: CanonicalSha256;
+  allocations: StaffingAllocationV1[];
+}
+
 export interface MissionCellMember {
   agentId: string;
   responsibility: string;
@@ -157,13 +230,17 @@ export interface WorkOrderRecordV2 {
 
 export type StructuredMessageType =
   | "WORK_ORDER"
+  | "EVIDENCE_CLAIM"
   | "EVIDENCE_PACKET"
   | "RFC"
   | "ARTIFACT_SUBMITTED"
   | "REVIEW_REQUEST"
+  | "CHALLENGE"
+  | "REVISION_REQUEST"
   | "FINDING"
   | "DECISION_RECORD"
   | "GATE_RECEIPT"
+  | "TEAM_REPORT"
   | "ESCALATION";
 
 export interface StructuredMessageEnvelope {
@@ -191,6 +268,7 @@ export type ArtifactKind =
   | "benchmark"
   | "finding"
   | "decision"
+  | "team-report"
   | "gate-receipt"
   | "release";
 
@@ -441,6 +519,8 @@ export interface HarnessV2RunState {
   organizationHeadcount?: number;
   /** Reviewer capacity used to build the pinned organization roster. */
   organizationReviewerSlots?: number;
+  /** Exact revisioned staffing identity. Optional until legacy scalar migration runs. */
+  staffingPlan?: StaffingPlanV1;
   workOrders: Record<string, WorkOrderRecordV2>;
   artifactHeads: Record<string, ArtifactRef>;
   councils: Record<string, CouncilSnapshot>;

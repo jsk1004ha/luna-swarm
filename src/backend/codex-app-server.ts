@@ -5,7 +5,11 @@ import {
   type AgentResponse,
   type BackendInfo,
 } from "./agent-backend.js";
-import { AppServerClient, chatGptOnlyEnvironment } from "./app-server-client.js";
+import {
+  AppServerClient,
+  AppServerTransportError,
+  chatGptOnlyEnvironment,
+} from "./app-server-client.js";
 import { Mutex, errorMessage, isAbortError } from "../util.js";
 import type { JsonValue, SwarmConfig } from "../types.js";
 import {
@@ -48,7 +52,7 @@ export interface CodexAppServerOptions {
 export class CodexAppServerBackend implements AgentBackend {
   private readonly client: AppServerClient;
   private readonly threads = new Map<string, Promise<string>>();
-  private readonly locks = new Map<string, Mutex>();
+  private readonly locks = new Map<string, { mutex: Mutex; users: number }>();
   private readonly occupancy: AsyncSemaphore;
   private startPromise: Promise<void> | undefined;
   private started = false;
@@ -81,8 +85,7 @@ export class CodexAppServerBackend implements AgentBackend {
   async run(request: AgentRequest, signal?: AbortSignal): Promise<AgentResponse> {
     const runtimePolicy = resolveRuntimePolicy(request, this.options.config.allowNetwork);
     await this.ensureStarted(signal);
-    const lock = this.getLock(request.threadKey);
-    return lock.run(async () => {
+    return this.withThreadLock(request.threadKey, async () => {
       if (signal?.aborted) throw agentAbortError(signal);
       const releaseOccupancy = await this.occupancy.acquire(signal);
       try {
@@ -93,7 +96,7 @@ export class CodexAppServerBackend implements AgentBackend {
         releaseOccupancy();
         throw error;
       }
-    });
+    }, signal);
   }
 
   private async ensureStarted(signal?: AbortSignal): Promise<void> {
@@ -124,13 +127,25 @@ export class CodexAppServerBackend implements AgentBackend {
     await this.client.close();
   }
 
-  private getLock(key: string): Mutex {
-    let lock = this.locks.get(key);
-    if (!lock) {
-      lock = new Mutex();
-      this.locks.set(key, lock);
+  private async withThreadLock<T>(
+    key: string,
+    action: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    let entry = this.locks.get(key);
+    if (!entry) {
+      entry = { mutex: new Mutex(), users: 0 };
+      this.locks.set(key, entry);
     }
-    return lock;
+    entry.users += 1;
+    try {
+      return await entry.mutex.run(action, signal);
+    } finally {
+      entry.users -= 1;
+      if (entry.users === 0 && this.locks.get(key) === entry) {
+        this.locks.delete(key);
+      }
+    }
   }
 
   private ensureThread(request: AgentRequest, signal?: AbortSignal): Promise<string> {
@@ -186,9 +201,8 @@ export class CodexAppServerBackend implements AgentBackend {
     if (typeof response?.thread?.id === "string" && response.thread.id) {
       return response.thread.id;
     }
-    const error = new Error(`Malformed ${method} response`);
-    this.client.recycleUncertainSession(error);
-    throw error;
+    const error = new AppServerTransportError(`Malformed ${method} response`);
+    throw this.client.recycleUncertainSession(error);
   }
 
   private async runTurn(
@@ -321,6 +335,7 @@ export class CodexAppServerBackend implements AgentBackend {
       if (signal?.aborted && !turnId) releaseDeferred = true;
       if (signal?.aborted) throw agentAbortError(signal);
       if (isAbortError(error)) throw error;
+      if (error instanceof AppServerTransportError) throw error;
       const wrapped = new Error(errorMessage(error), { cause: error });
       Object.assign(wrapped, error && typeof error === "object" ? error : {});
       throw wrapped;
@@ -336,9 +351,8 @@ export class CodexAppServerBackend implements AgentBackend {
     if (typeof response?.turn?.id === "string" && response.turn.id) {
       return response.turn.id;
     }
-    const error = new Error("Malformed turn/start response");
-    this.client.recycleUncertainSession(error);
-    throw error;
+    const error = new AppServerTransportError("Malformed turn/start response");
+    throw this.client.recycleUncertainSession(error);
   }
 }
 

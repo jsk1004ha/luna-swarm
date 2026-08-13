@@ -10,6 +10,14 @@
   "bin": {
     "luna-swarm": "./dist/src/cli.js"
   },
+  "files": [
+    "dist/",
+    "ui/dist/",
+    "DESIGN.md",
+    "SECURITY.md",
+    "docs/",
+    "examples/"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json && npm run build:ui",
     "build:server": "tsc -p tsconfig.json",

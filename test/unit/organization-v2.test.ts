@@ -50,6 +50,19 @@ test("automatic sizing follows task concurrency and protected reviewer capacity"
     () => validateConfig({ ...DEFAULT_CONFIG, organizationHeadcount: 21, validatorsHighRisk: 7 }),
     /at least 22/,
   );
+  assert.doesNotThrow(() => validateConfig({
+    ...DEFAULT_CONFIG,
+    maxConcurrency: 16,
+    appServerShardCount: 4,
+  }));
+  assert.throws(
+    () => validateConfig({
+      ...DEFAULT_CONFIG,
+      maxConcurrency: 4,
+      appServerShardCount: 5,
+    }),
+    /appServerShardCount must be <= maxConcurrency/,
+  );
 });
 
 test("mission cells reuse 3-9 registered slots and require an independent verifier", () => {

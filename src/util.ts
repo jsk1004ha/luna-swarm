@@ -13,21 +13,70 @@ export const systemClock: Clock = {
 };
 
 export class Mutex {
-  private tail: Promise<void> = Promise.resolve();
+  private locked = false;
+  private readonly waiters: Array<{
+    resolve: (release: () => void) => void;
+    reject: (error: Error) => void;
+    signal?: AbortSignal;
+    onAbort?: () => void;
+  }> = [];
 
-  async run<T>(fn: () => Promise<T> | T): Promise<T> {
-    const previous = this.tail;
-    let release!: () => void;
-    this.tail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
+  async run<T>(fn: () => Promise<T> | T, signal?: AbortSignal): Promise<T> {
+    const release = await this.acquire(signal);
     try {
       return await fn();
     } finally {
       release();
     }
   }
+
+  private acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) return Promise.reject(mutexAbortError(signal));
+    if (!this.locked) {
+      this.locked = true;
+      return Promise.resolve(this.releaseFunction());
+    }
+    return new Promise<() => void>((resolve, reject) => {
+      const waiter: (typeof this.waiters)[number] = { resolve, reject };
+      if (signal) {
+        waiter.signal = signal;
+        waiter.onAbort = () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index < 0) return;
+          this.waiters.splice(index, 1);
+          reject(mutexAbortError(signal));
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      this.waiters.push(waiter);
+    });
+  }
+
+  private releaseFunction(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const waiter = this.waiters.shift();
+      if (!waiter) {
+        this.locked = false;
+        return;
+      }
+      if (waiter.signal && waiter.onAbort) {
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+      }
+      waiter.resolve(this.releaseFunction());
+    };
+  }
+}
+
+function mutexAbortError(signal: AbortSignal): Error {
+  const error = new Error(
+    signal.reason instanceof Error ? signal.reason.message : "Operation aborted",
+    signal.reason instanceof Error ? { cause: signal.reason } : undefined,
+  );
+  error.name = "AbortError";
+  return error;
 }
 
 export function parseJsonResponse<T>(text: string): T {

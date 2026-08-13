@@ -12,6 +12,10 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { JsonValue } from "../types.js";
 import type {
+  RunGenerationAuthority,
+  RunGenerationContext,
+} from "../store.js";
+import type {
   ArtifactKind,
   ArtifactProducer,
   ArtifactRef,
@@ -42,37 +46,62 @@ export interface ArtifactSubmission<T extends JsonValue = JsonValue> {
 export class BlackboardConflictError extends Error {}
 export class BlackboardIntegrityError extends Error {}
 
+interface BlackboardPaths {
+  storageRoot: string;
+  blobs: string;
+  artifacts: string;
+  heads: string;
+  locks: string;
+}
+
 /** File-backed immutable artifact store rooted inside one existing run directory. */
 export class ImmutableBlackboard {
   readonly rootDirectory: string;
-  readonly blobsDirectory: string;
-  readonly artifactsDirectory: string;
-  readonly headsDirectory: string;
-  readonly locksDirectory: string;
+  private paths: BlackboardPaths | undefined;
+  private generationContext: RunGenerationContext | undefined;
+  private generationAuthority: RunGenerationAuthority | undefined;
 
   constructor(
     readonly runDirectory: string,
     readonly runId: string = basename(resolve(runDirectory)),
+    generationAuthority?: RunGenerationAuthority,
   ) {
     if (!ARTIFACT_ID_PATTERN.test(runId)) {
       throw new Error(`Run ID is invalid: ${runId}`);
     }
     const resolvedRunDirectory = resolve(runDirectory);
-    this.rootDirectory = resolve(resolvedRunDirectory, "blackboard-v2");
+    const legacyRoot = resolve(resolvedRunDirectory, "blackboard-v2");
+    this.generationAuthority = generationAuthority;
+    this.rootDirectory = legacyRoot;
     assertContained(resolvedRunDirectory, this.rootDirectory, "blackboard root");
-    this.blobsDirectory = join(this.rootDirectory, "blobs", "sha256");
-    this.artifactsDirectory = join(this.rootDirectory, "artifacts");
-    this.headsDirectory = join(this.rootDirectory, "heads");
-    this.locksDirectory = join(this.rootDirectory, "locks");
+    if (!generationAuthority) this.paths = blackboardPaths(this.rootDirectory);
+  }
+
+  get blobsDirectory(): string {
+    return this.requirePaths().blobs;
+  }
+
+  get artifactsDirectory(): string {
+    return this.requirePaths().artifacts;
+  }
+
+  get headsDirectory(): string {
+    return this.requirePaths().heads;
+  }
+
+  get locksDirectory(): string {
+    return this.requirePaths().locks;
   }
 
   async init(): Promise<void> {
+    await this.assertGenerationBoundary();
     await Promise.all([
       mkdir(this.blobsDirectory, { recursive: true }),
       mkdir(this.artifactsDirectory, { recursive: true }),
       mkdir(this.headsDirectory, { recursive: true }),
       mkdir(this.locksDirectory, { recursive: true }),
     ]);
+    await this.assertGenerationBoundary();
   }
 
   async publish<T extends JsonValue>(
@@ -80,8 +109,10 @@ export class ImmutableBlackboard {
     expectedHeadRevision: number | null,
   ): Promise<ArtifactRevision<T>> {
     validateSubmission(submission, this.runId);
+    await this.assertGenerationBoundary();
     await this.init();
     return this.withArtifactLock(submission.artifactId, async () => {
+      await this.assertGenerationBoundary();
       const currentHead = await this.readHeadOrNull(submission.artifactId);
       if (currentHead && isIdempotentSubmission(currentHead, submission)) {
         return currentHead as ArtifactRevision<T>;
@@ -160,6 +191,7 @@ export class ImmutableBlackboard {
 
   async read<T extends JsonValue = JsonValue>(ref: ArtifactRef): Promise<ArtifactRevision<T>> {
     validateRef(ref);
+    await this.assertGenerationBoundary();
     const path = this.revisionPath(ref.artifactId, ref.revision);
     let parsed: ArtifactRevision<T>;
     try {
@@ -178,6 +210,7 @@ export class ImmutableBlackboard {
 
   async readHead<T extends JsonValue = JsonValue>(artifactId: string): Promise<ArtifactRevision<T>> {
     validateArtifactId(artifactId);
+    await this.assertGenerationBoundary();
     const head = await this.readHeadOrNull<T>(artifactId);
     if (!head) throw new Error(`Artifact head does not exist: ${artifactId}`);
     return head;
@@ -193,6 +226,7 @@ export class ImmutableBlackboard {
 
   async listRevisions(artifactId: string): Promise<ArtifactRef[]> {
     validateArtifactId(artifactId);
+    await this.assertGenerationBoundary();
     let names: string[];
     try {
       names = await readdir(this.artifactDirectory(artifactId));
@@ -337,13 +371,22 @@ export class ImmutableBlackboard {
   }
 
   private async writeHead(record: ArtifactRevision): Promise<void> {
+    await this.assertGenerationBoundary();
     const path = this.headPath(record.artifactId);
     const tempPath = `${path}.tmp.${process.pid}.${randomUUID()}`;
     await writeFile(tempPath, `${canonicalJson(toRef(record))}\n`, {
       encoding: "utf8",
       flag: "wx",
     });
-    await rename(tempPath, path);
+    try {
+      await this.assertGenerationBoundary();
+      await rename(tempPath, path);
+      await this.assertGenerationBoundary();
+    } finally {
+      await unlink(tempPath).catch((error: unknown) => {
+        if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+      });
+    }
   }
 
   private async isStaleInternal(ref: ArtifactRef, visiting: Set<string>): Promise<boolean> {
@@ -378,6 +421,7 @@ export class ImmutableBlackboard {
   }
 
   private async withArtifactLock<T>(artifactId: string, action: () => Promise<T>): Promise<T> {
+    await this.assertGenerationBoundary();
     const lockPath = this.lockPath(artifactId);
     const startedAt = Date.now();
     const token = randomUUID();
@@ -408,6 +452,7 @@ export class ImmutableBlackboard {
       }
     }
     try {
+      await this.assertGenerationBoundary();
       return await action();
     } finally {
       try {
@@ -444,6 +489,87 @@ export class ImmutableBlackboard {
     if (!HASH_PATTERN.test(hash)) throw new Error(`Content hash is invalid: ${hash}`);
     return containedPath(this.blobsDirectory, hash.slice(0, 2), `${hash}.json`);
   }
+
+  private async assertGenerationBoundary(): Promise<void> {
+    if (!this.generationAuthority) {
+      const detected = await manifestGenerationAuthority(this.runDirectory, this.runId);
+      if (!detected) return;
+      this.generationAuthority = detected;
+      this.paths = undefined;
+    }
+    if (!this.generationContext) {
+      const context = await this.generationAuthority.capture();
+      if (context.runId !== this.runId || !/^[0-9a-f-]{36}$/i.test(context.generation)) {
+        throw new BlackboardIntegrityError(`Run generation context is invalid for ${this.runId}`);
+      }
+      this.generationContext = { ...context };
+      const storageRoot = resolve(this.rootDirectory, "generations", context.generation);
+      assertContained(this.rootDirectory, storageRoot, "blackboard generation root");
+      this.paths = blackboardPaths(storageRoot);
+    }
+    await this.generationAuthority.assert(this.generationContext);
+  }
+
+  private requirePaths(): BlackboardPaths {
+    if (!this.paths) {
+      throw new BlackboardIntegrityError(`Blackboard generation is not initialized for ${this.runId}`);
+    }
+    return this.paths;
+  }
+}
+
+async function manifestGenerationAuthority(
+  runDirectory: string,
+  runId: string,
+): Promise<RunGenerationAuthority | undefined> {
+  const manifestPath = resolve(runDirectory, "run.manifest.json");
+  const readContext = async (): Promise<RunGenerationContext> => {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(manifestPath, "utf8"));
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") throw error;
+      throw new BlackboardIntegrityError(`Run manifest is invalid for ${runId}`, { cause: error });
+    }
+    if (
+      !value ||
+      typeof value !== "object" ||
+      (value as { runId?: unknown }).runId !== runId ||
+      typeof (value as { generation?: unknown }).generation !== "string" ||
+      !/^[0-9a-f-]{36}$/i.test((value as { generation: string }).generation)
+    ) {
+      throw new BlackboardIntegrityError(`Run manifest identity is invalid for ${runId}`);
+    }
+    return {
+      runId,
+      generation: (value as { generation: string }).generation,
+    };
+  };
+  try {
+    await readContext();
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+  return {
+    capture: readContext,
+    assert: async (context) => {
+      const current = await readContext();
+      if (current.runId !== context.runId || current.generation !== context.generation) {
+        throw new BlackboardIntegrityError(`Run generation changed for ${runId}; refusing stale writer`);
+      }
+    },
+  };
+}
+
+function blackboardPaths(storageRoot: string): BlackboardPaths {
+  return {
+    storageRoot,
+    blobs: join(storageRoot, "blobs", "sha256"),
+    artifacts: join(storageRoot, "artifacts"),
+    heads: join(storageRoot, "heads"),
+    locks: join(storageRoot, "locks"),
+  };
 }
 
 export function canonicalJson(value: unknown): string {

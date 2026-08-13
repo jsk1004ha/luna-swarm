@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { link, mkdtemp, readFile, rm, symlink, unlink, utimes, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { link, mkdtemp, open, readFile, rm, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -407,3 +408,142 @@ test("stable pointer lock recovers a dead owner but never steals from a live own
   );
   assert.match(await readFile(livePointers.lockPath, "utf8"), /live-owner/);
 });
+
+test("stable pointer directory fsync failures propagate instead of reporting durable promotion", async (t) => {
+  const { workspace, bundles } = await fixture(t, "bundle-fsync-failure");
+  const workloads = ["EIO", "ENOSPC", "EACCES", undefined].map(
+    (_code, index) => `${WORKLOAD}.${index}`,
+  );
+  const baseline = bundle("bundle-fsync-failure", { status: "stable", workloadClasses: workloads });
+  await bundles.publish(baseline);
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore: bundles,
+    bootstrapAuthority: { bundleId: baseline.bundleId, bundleHash: baseline.bundleHash },
+  });
+  const probe = await open(workspace, "r");
+  const fileHandlePrototype = Object.getPrototypeOf(probe) as {
+    sync: () => Promise<void>;
+  };
+  const originalSync = fileHandlePrototype.sync;
+  await probe.close();
+
+  try {
+    for (const [index, code] of ["EIO", "ENOSPC", "EACCES", undefined].entries()) {
+      const injected = Object.assign(
+        new Error(`injected stable pointer directory fsync failure ${index}`),
+        code === undefined ? {} : { code },
+      );
+      fileHandlePrototype.sync = async () => { throw injected; };
+
+      await assert.rejects(
+        pointers.promote(promotion("bundle-fsync-failure", null, {
+          bootstrap: true,
+          workloadClass: workloads[index]!,
+        })),
+        (error: unknown) => error === injected,
+      );
+    }
+  } finally {
+    fileHandlePrototype.sync = originalSync;
+  }
+});
+
+test("stable pointer readers tolerate thousands of same-directory atomic replacements", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "evolution-pointer-race-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const readWorkload = "engineering.race-reader";
+  const workloads = Array.from({ length: 96 }, (_, index) => `engineering.race-${index}`);
+  const baseline = bundle("bundle-race", { status: "stable", workloadClasses: [readWorkload, ...workloads] });
+  const bundles = new ExecutionBundleStore(workspace);
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore: bundles,
+    bootstrapAuthority: { bundleId: baseline.bundleId, bundleHash: baseline.bundleHash },
+    lockTimeoutMs: 20_000,
+  });
+  await bundles.publish(baseline);
+  await pointers.promote({
+    workloadClass: readWorkload,
+    bundleId: baseline.bundleId,
+    expectedGeneration: null,
+    mode: "manual",
+    actor: "race-test",
+    reason: "establish the reader pointer",
+    bootstrap: true,
+  });
+  const readerPath = join(process.cwd(), "test", "fixtures", "stable-pointer-reader-worker.ts");
+  const readers = Array.from({ length: 4 }, () => runStablePointerWorker([
+    workspace,
+    readWorkload,
+    baseline.bundleId,
+    "600",
+  ], readerPath));
+  const writers = workloads.map((workloadClass) => pointers.promote({
+    workloadClass,
+    bundleId: baseline.bundleId,
+    expectedGeneration: null,
+    mode: "manual",
+    actor: "race-test",
+    reason: "exercise atomic state replacement",
+    bootstrap: true,
+  }));
+  await Promise.all([...readers, ...writers]);
+  assert.equal((await pointers.getAudit()).length, workloads.length + 1);
+});
+
+test("independent processes converge on one Stable Pointer bootstrap generation", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "evolution-pointer-process-race-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const baseline = bundle("bundle-process-race", { status: "stable" });
+  const bundles = new ExecutionBundleStore(workspace);
+  await bundles.publish(baseline);
+  const workerPath = join(process.cwd(), "test", "fixtures", "stable-pointer-bootstrap-worker.ts");
+
+  const results = await Promise.all(Array.from({ length: 4 }, () => runStablePointerWorker([
+    workspace,
+    baseline.bundleId,
+    baseline.bundleHash,
+    WORKLOAD,
+  ], workerPath)));
+  assert.equal(results.filter((result) => result.status === "committed").length, 1);
+  assert.equal(results.filter((result) => result.status === "conflict").length, 3);
+
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore: bundles,
+    bootstrapAuthority: { bundleId: baseline.bundleId, bundleHash: baseline.bundleHash },
+  });
+  assert.deepEqual(await pointers.get(WORKLOAD), {
+    workloadClass: WORKLOAD,
+    bundleId: baseline.bundleId,
+    bundleHash: baseline.bundleHash,
+    generation: 1,
+    activatedAt: (await pointers.get(WORKLOAD))?.activatedAt,
+  });
+});
+
+function runStablePointerWorker<T extends { status: string }>(
+  args: string[],
+  workerPath: string,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", workerPath, ...args], {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Stable Pointer worker exited ${String(code)}: ${stderr}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(stdout.trim()) as T);
+      } catch (error) {
+        reject(new Error(`Stable Pointer worker returned invalid output: ${stdout}\n${stderr}`, { cause: error }));
+      }
+    });
+  });
+}

@@ -111,7 +111,7 @@ npm start -- org <run-id>
 
 `@openai/codex-sdk`의 각 `thread.run()`은 내부적으로 별도 `codex exec` 프로세스를 실행합니다. 이를 100개 병렬화하면 CLI 프로세스, 메모리, 파일 디스크립터와 ChatGPT 인증 갱신이 동시에 경쟁합니다.
 
-Luna Swarm은 SDK를 모델 실행에 직접 사용하지 않습니다. SDK 패키지에 포함된 공식 Codex 바이너리를 찾아 **`codex app-server` 프로세스 하나**를 띄우고, 그 연결 안에서 많은 thread와 turn을 운영합니다. 모든 기획자·관리자·실무자·감사자·통합자·심의자 호출은 하나의 전역 동시성 관문을 통과합니다.
+Luna Swarm은 SDK를 모델 실행에 직접 사용하지 않습니다. SDK 패키지에 포함된 공식 Codex 바이너리로 기본 1개, 설정에 따라 여러 개의 **`codex app-server` stdio shard**를 띄웁니다. bounded supervisor가 thread affinity, shard별 inflight/queue, backpressure, circuit breaker와 shutdown drain을 관리하며, 모든 기획자·관리자·실무자·감사자·통합자·심의자 호출은 shard 진입 전에 하나의 전역 동시성 관문을 통과합니다.
 
 ## 더 똑똑하게 만드는 장치
 
@@ -273,6 +273,7 @@ stateDiagram-v2
 | `model` | `gpt-5.6-luna` | 모든 조직원이 사용할 모델 |
 | `organizationHeadcount` | `auto` | 실행 계획·동시성·검증자 수로 논리 조직 규모를 자동 산정하거나 14~256 사이 정수로 고정 |
 | `maxConcurrency` | 128 | 전역 활성 호출 상한; 최대 1,024로 설정 가능 |
+| `appServerShardCount` | 1 | 실제 Codex App Server stdio shard 수; 각 shard는 bounded inflight/queue와 thread affinity를 사용 |
 | `initialConcurrency` | 8 | 시작 활성 호출 수 |
 | `maxTasks` | 512 | architect가 만들 수 있는 DAG 작업 수 |
 | `maxTeams` | 256 | 목표별 동적 팀 수 |
@@ -318,7 +319,7 @@ stateDiagram-v2
 
 실행 계획은 고유 이름을 가진 가변형 Harness v2 조직의 revisioned Work Order로 투영됩니다. 기본 `auto` 모드는 계획의 작업 수·동시성·검증자 수에 맞춰 14~256명의 논리 조직을 산정하며, 산정된 roster는 실행에 고정되어 재시도·재개에도 같은 직원 배정을 보존합니다. `lab-128@2`는 기존 실행 호환을 위해 유지한 조직 계약 버전 이름이며 인원 제한을 뜻하지 않습니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, bounded AST 기반 Program Knowledge Graph가 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급합니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, run-pinned reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다.
 
-SQLite WAL, App Server sharding, 실제 쓰기 Tool Broker, Git worktree/Single Committer, G1 command receipt, runtime trace 자동 수집, arbitrary experiment runner는 아직 구현됐다고 주장하지 않습니다. 현재 범위와 남은 안전 경계는 [Harness v2 설계 문서](docs/HARNESS_V2.ko.md)에 명시했습니다.
+SQLite WAL, 실제 쓰기 Tool Broker, Git worktree/Single Committer, G1 command receipt, runtime trace 자동 수집, arbitrary experiment runner는 아직 구현됐다고 주장하지 않습니다. App Server는 선택적으로 여러 stdio shard를 bounded supervisor로 운영할 수 있지만, 실제 계정의 128/256 동시 호출 soak를 통과했다는 의미는 아닙니다. 현재 범위와 남은 안전 경계는 [Harness v2 설계 문서](docs/HARNESS_V2.ko.md)에 명시했습니다.
 
 ## 개발 및 검증
 
@@ -359,7 +360,7 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 - 144명 데모/실행 snapshot/SSE/정적 파일 경계와 path traversal 차단
 - 진행 중 회장 지시의 큐 저장, 안전 체크포인트 반영, 비소급 실행, 재개 시 중복 방지
 - workspace 스킬 발견·역할/부서/작업 유형 라우팅·context 상한
-- 검증된 실행 경험의 원문 비저장, 다음 실행 회수, 자동 skill ranking 적응
+- 실행 경험의 원문 비저장과 관찰 전용 기록, 독립 평가를 통과해 수동 승격된 Bundle만 다음 실행의 routing/prompt에 반영
 - UI 이벤트 Zod 검증, 실행별 seq 중복 제거와 WebSocket replay
 - durable pause/resume/cancel/concurrency와 다음 turn `OperatorInstruction` 주입
 - 고정 좌석·동서남북 착석·A* 경로·tile reservation·144/256명 밀도 정책
@@ -368,7 +369,16 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 
 현재 제한사항: 브라우저는 한 서버 프로세스가 동시에 소유한 실행 하나만 직접 제어합니다. 257명 이상은 지도에서 전원을 동시에 그리지 않고 부서/층 집계와 검색으로 접근합니다. 취소는 진행 중 모델 호출에 AbortSignal을 전달하지만 이미 승인된 결과를 삭제하거나 재실행하지 않습니다. React/Pixi 운영 UI의 직원 표시는 사람 이미지 에셋에 의존하지 않습니다.
 
+### 검증 상태와 배포 경계
+
+- 자동 테스트와 deterministic E2E는 mock backend 또는 로컬 fake App Server 프로세스를 사용합니다. 실제 ChatGPT 계정·모델 품질·과금 경로의 live 검증으로 해석하면 안 됩니다.
+- 논리 조직은 14~256명으로 산정할 수 있고 실제 호출 동시성과 분리되어 있지만, 실제 계정에서 128/256 동시 stdio soak를 수행하지 않았습니다.
+- 외부 Tool Broker, 역할별 격리 worktree, Single Committer, 실제 shell/test G1 receipt, Shadow/Canary traffic과 자동 rollback E2E는 아직 구현 완료 범위가 아닙니다.
+- 강한 단일 모델, 기존 Champion, 새 Challenger의 matched-pair 품질 비교를 수행하지 않았으므로 우수성을 주장하지 않습니다.
+
 더 자세한 설계와 불변식은 [docs/ARCHITECTURE.ko.md](docs/ARCHITECTURE.ko.md)를 참고하세요.
+
+현재 구현 범위와 출시 판정은 [2026-08-13 구현 감사 보고서](docs/IMPLEMENTATION_AUDIT_2026-08-13.ko.md)에 기록했습니다.
 
 ## 공식 참고 문서
 

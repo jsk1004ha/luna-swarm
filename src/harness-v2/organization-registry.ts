@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   HARNESS_V2_AGENT_COUNT,
   HARNESS_V2_MAX_AGENT_COUNT,
@@ -7,9 +8,11 @@ import {
   type HeadquartersId,
   type MissionCell,
   type OrganizationRegistryV2,
+  type OrganizationPluginManifest,
   type OrganizationUnitV2,
   type WorkOrderToolPolicy,
 } from "./contracts.js";
+import { canonicalJson } from "./blackboard.js";
 
 interface DivisionBlueprint {
   id: string;
@@ -132,6 +135,162 @@ interface TeamBlueprint extends DivisionBlueprint {
   headquartersMission: string;
   teamName: string;
   teamIndex: number;
+}
+
+export const BUILT_IN_ORGANIZATION_PLUGIN: Readonly<OrganizationPluginManifest> = freezeManifest({
+  schemaVersion: 1,
+  pluginId: "luna.builtin.organization",
+  pluginVersion: HARNESS_V2_ORG_VERSION,
+  departments: BLUEPRINTS.map((headquarters) => ({
+    id: headquarters.id,
+    name: headquarters.name,
+    mission: headquarters.mission,
+    divisions: headquarters.divisions.map((division) => ({
+      id: division.id,
+      name: division.name,
+      mission: division.mission,
+      teamIds: [...division.teams],
+    })),
+    roles: ["cell-lead", "specialist", "review-liaison"].map((role) => ({
+      id: role,
+      title: role.split("-").map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`).join(" "),
+      mission: `Perform the bounded ${role} responsibility for ${headquarters.name}.`,
+      toolContractId: `builtin:${headquarters.id}`,
+    })),
+  })),
+  toolContracts: BLUEPRINTS.map((headquarters) => {
+    const policy = rolePolicy(headquarters.id);
+    return {
+      id: `builtin:${headquarters.id}`,
+      tools: { allow: [...policy.tools.allow], deny: [...policy.tools.deny] },
+      filesystem: { read: [...policy.filesystem.read], write: [...policy.filesystem.write] },
+      network: policy.network,
+      allowedDomains: [...policy.allowedDomains],
+    };
+  }),
+});
+
+/** Optional declarative departments. Runtime allocation is an explicit later integration step. */
+export const SECURITY_EVOLUTION_ORGANIZATION_PLUGIN: Readonly<OrganizationPluginManifest> = freezeManifest({
+  schemaVersion: 1,
+  pluginId: "luna.builtin.security-evolution",
+  pluginVersion: "1",
+  departments: [
+    {
+      id: "security",
+      name: "Security HQ",
+      mission: "Own threat models, authority boundaries, confidentiality, and supply-chain assurance.",
+      divisions: [
+        { id: "threat-assurance", name: "Threat Assurance", mission: "Model and reproduce security threats.", teamIds: ["threat-modeling", "supply-chain-audit"] },
+      ],
+      roles: [
+        { id: "security-auditor", title: "Security Auditor", mission: "Produce evidence-bound security findings.", toolContractId: "builtin:security-readonly" },
+      ],
+    },
+    {
+      id: "evolution",
+      name: "Evolution Lab",
+      mission: "Design controlled organization experiments without self-promoting changes.",
+      divisions: [
+        { id: "controlled-evolution", name: "Controlled Evolution", mission: "Generate, evaluate, and quarantine candidates.", teamIds: ["candidate-design", "promotion-audit"] },
+      ],
+      roles: [
+        { id: "evolution-researcher", title: "Evolution Researcher", mission: "Design reproducible candidate experiments.", toolContractId: "builtin:evolution-readonly" },
+      ],
+    },
+  ],
+  toolContracts: [
+    {
+      id: "builtin:security-readonly",
+      tools: { allow: ["read", "search", "shell"], deny: ["workspace-write", "credential-read", "production-deploy"] },
+      filesystem: { read: ["workspace/**", "artifacts/**"], write: ["artifacts/findings/**"] },
+      network: "off",
+      allowedDomains: [],
+    },
+    {
+      id: "builtin:evolution-readonly",
+      tools: { allow: ["read", "search"], deny: ["workspace-write", "credential-read", "production-deploy"] },
+      filesystem: { read: ["workspace/**", "artifacts/**"], write: ["artifacts/evolution-candidates/**"] },
+      network: "off",
+      allowedDomains: [],
+    },
+  ],
+});
+
+export function validateOrganizationPluginManifest(manifest: OrganizationPluginManifest): void {
+  if (manifest.schemaVersion !== 1) throw new Error("Organization plugin schemaVersion must be 1");
+  requireManifestId(manifest.pluginId, "pluginId");
+  if (!manifest.pluginVersion.trim() || manifest.pluginVersion.length > 128) throw new Error("Organization pluginVersion is invalid");
+  if (manifest.departments.length === 0) throw new Error("Organization plugin must declare at least one department");
+  assertUnique(manifest.departments.map((department) => department.id), "department IDs");
+  assertUnique(manifest.toolContracts.map((contract) => contract.id), "tool contract IDs");
+  const toolContracts = new Set(manifest.toolContracts.map((contract) => contract.id));
+  for (const contract of manifest.toolContracts) {
+    requireManifestId(contract.id, "tool contract id");
+    assertUnique(contract.tools.allow, `${contract.id} allowed tools`);
+    assertUnique(contract.tools.deny, `${contract.id} denied tools`);
+    if (contract.tools.allow.some((tool) => ["credential-read", "production-deploy"].includes(tool))) {
+      throw new Error(`Organization plugin tool contract ${contract.id} grants a privileged tool`);
+    }
+    if (contract.tools.allow.some((tool) => contract.tools.deny.includes(tool))) throw new Error(`${contract.id} both allows and denies a tool`);
+    if (contract.filesystem.write.some((scope) => scope === "workspace/**" || scope === "/**" || /^[A-Za-z]:[\\/]/.test(scope))) {
+      throw new Error(`Organization plugin tool contract ${contract.id} grants an unbounded write scope`);
+    }
+    if (contract.network === "off" && contract.allowedDomains.length > 0) throw new Error(`${contract.id} enables domains while network is off`);
+    if (contract.network === "allowlist" && contract.allowedDomains.length === 0) throw new Error(`${contract.id} requires an explicit domain allowlist`);
+  }
+  for (const department of manifest.departments) {
+    requireManifestId(department.id, "department id");
+    requireManifestText(department.name, "department name");
+    requireManifestText(department.mission, "department mission");
+    if (department.divisions.length === 0 || department.roles.length === 0) throw new Error(`${department.id} requires divisions and roles`);
+    assertUnique(department.divisions.map((division) => division.id), `${department.id} division IDs`);
+    assertUnique(department.roles.map((role) => role.id), `${department.id} role IDs`);
+    for (const division of department.divisions) {
+      requireManifestId(division.id, "division id");
+      requireManifestText(division.name, "division name");
+      requireManifestText(division.mission, "division mission");
+      if (division.teamIds.length === 0) throw new Error(`${department.id}/${division.id} requires a team`);
+      assertUnique(division.teamIds, `${department.id}/${division.id} team IDs`);
+      for (const teamId of division.teamIds) requireManifestId(teamId, "team id");
+    }
+    for (const role of department.roles) {
+      requireManifestId(role.id, "role id");
+      requireManifestText(role.title, "role title");
+      requireManifestText(role.mission, "role mission");
+      if (!toolContracts.has(role.toolContractId)) throw new Error(`${department.id}/${role.id} references an unknown tool contract`);
+    }
+  }
+}
+
+export function organizationPluginManifestHash(manifest: OrganizationPluginManifest): `sha256:${string}` {
+  validateOrganizationPluginManifest(manifest);
+  return `sha256:${createHash("sha256").update(canonicalJson(manifest)).digest("hex")}`;
+}
+
+function freezeManifest(manifest: OrganizationPluginManifest): Readonly<OrganizationPluginManifest> {
+  validateOrganizationPluginManifest(manifest);
+  return deepFreeze(structuredClone(manifest));
+}
+
+function deepFreeze<T>(value: T): Readonly<T> {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function requireManifestId(value: string, label: string): void {
+  if (!/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value)) throw new Error(`Organization plugin ${label} is invalid`);
+}
+
+function requireManifestText(value: string, label: string): void {
+  if (!value.trim() || value.length > 1_000) throw new Error(`Organization plugin ${label} is invalid`);
+}
+
+function assertUnique(values: readonly string[], label: string): void {
+  if (new Set(values).size !== values.length) throw new Error(`Organization plugin ${label} must be unique`);
 }
 
 export interface OrganizationRegistryOptions {
