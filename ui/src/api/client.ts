@@ -6,6 +6,7 @@ import type { RunSummary, Snapshot } from "../types";
 const JSON_HEADERS = { Accept: "application/json" };
 const SNAPSHOT_RETRY_DELAYS_MS = [0, 80, 180, 360] as const;
 let disconnectCurrent: (() => void) | null = null;
+let pendingStartControl: { key: string; promise: Promise<UiControlResponse> } | null = null;
 
 export type UiControlPayload =
   | { action: "start"; goal: string; mock?: boolean; maxConcurrency?: number; requestId?: string }
@@ -71,7 +72,30 @@ export function selectBootstrapRunId(runs: RunSummary[], search: string): string
   return selectInitialRunId(runs);
 }
 
-export async function sendUiControl(payload: UiControlPayload): Promise<UiControlResponse> {
+export function sendUiControl(payload: UiControlPayload): Promise<UiControlResponse> {
+  if (payload.action !== "start") return postUiControl(payload);
+
+  const key = JSON.stringify({
+    goal: payload.goal,
+    mock: payload.mock === true,
+    maxConcurrency: payload.maxConcurrency ?? null,
+  });
+  if (pendingStartControl) {
+    if (pendingStartControl.key === key) return pendingStartControl.promise;
+    const error = new Error("새 실행을 이미 준비 중입니다. 현재 시작 요청이 끝난 뒤 다시 시도하세요.") as Error & { code?: string };
+    error.code = "RUN_ALREADY_ACTIVE";
+    return Promise.reject(error);
+  }
+
+  const request = postUiControl(payload);
+  const tracked = request.finally(() => {
+    if (pendingStartControl?.promise === tracked) pendingStartControl = null;
+  });
+  pendingStartControl = { key, promise: tracked };
+  return tracked;
+}
+
+async function postUiControl(payload: UiControlPayload): Promise<UiControlResponse> {
   const response = await fetch(apiUrl("/api/ui/control"), {
     method: "POST",
     headers: { ...JSON_HEADERS, "Content-Type": "application/json" },
