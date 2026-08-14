@@ -146,6 +146,12 @@ export function validateConfig(config: SwarmConfig): void {
       }
     }
   }
+  for (const [keyId, authority] of Object.entries(config.evolutionRolloutAuthorities ?? {})) {
+    if (!keyId.trim() || !authority.publicKeyPem.includes("BEGIN PUBLIC KEY") ||
+        (authority.authority !== "independent_evaluator" && authority.authority !== "operations")) {
+      throw new Error(`evolutionRolloutAuthorities.${keyId || "<empty>"} is invalid`);
+    }
+  }
   for (const role of ROLE_KEYS) {
     if (!config.reasoning[role]) throw new Error(`reasoning.${role} is required`);
   }

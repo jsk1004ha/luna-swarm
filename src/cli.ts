@@ -63,6 +63,20 @@ import { PairedEvaluationReceiptStore } from "./evolution/evaluation/receipt.js"
 import type { TrustedBenchmarkAuthority } from "./evolution/evaluation/quality-receipt.js";
 import { DecisionTraceStore, ObjectiveOutcomeReceiptStore } from "./evolution/trace/index.js";
 import { FailureCapsuleStore } from "./evolution/failure/index.js";
+import {
+  createDeploymentControlPlane,
+  DeploymentRuntimeRouter,
+  loadEd25519OperationsReceiptSigner,
+  RolloutStore,
+  type TrustedRolloutAuthority,
+} from "./evolution/deployment/index.js";
+import {
+  SOAK_SHARD_STAGES,
+  runShardSoak,
+  shardSoakReportJson,
+  type SoakShardStage,
+} from "./soak/index.js";
+import { RunHostToolRuntime } from "./tool-broker/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -75,6 +89,7 @@ async function main(): Promise<void> {
   if (command === "skills") return printSkills(args);
   if (command === "learning" || command === "learn") return printLearning(args);
   if (command === "evolve") return evolve(args);
+  if (command === "soak") return soak(args);
   if (command === "status") return status(args);
   if (command === "dashboard") return dashboard(args);
   if (command === "ui") return ui(args);
@@ -616,8 +631,51 @@ async function launch(options: {
     initialConcurrencyCap: options.config.maxConcurrency,
   });
   const controls = new ExecutionController(controlStore, { abortController: controller });
-  await controls.init();
-  if (options.loaded) await controls.resume();
+  let hostToolRuntime: RunHostToolRuntime | undefined;
+  let deploymentRuntime: DeploymentRuntimeRouter | undefined;
+  try {
+    await controls.init();
+    if (options.loaded) await controls.resume();
+    const generation = await options.store.generationAuthority().capture();
+    hostToolRuntime = options.mock
+      ? undefined
+      : await RunHostToolRuntime.create({
+          workspaceRoot: options.workspace,
+          runDirectory: options.store.runDirectory,
+          runId: options.store.runId,
+          generation: generation.generation,
+          stateDirectory: options.config.stateDirectory,
+        });
+    const rolloutAuthorities = evolutionRolloutAuthorities(options.config);
+    const operationsSignerKeyId = process.env.LUNA_SWARM_OPERATIONS_SIGNER_KEY_ID;
+    const operationsSignerPrivateKeyFile = process.env.LUNA_SWARM_OPERATIONS_SIGNER_PRIVATE_KEY_FILE;
+    if ((operationsSignerKeyId === undefined) !== (operationsSignerPrivateKeyFile === undefined)) {
+      throw new Error("Both LUNA_SWARM_OPERATIONS_SIGNER_KEY_ID and LUNA_SWARM_OPERATIONS_SIGNER_PRIVATE_KEY_FILE are required");
+    }
+    if (!options.mock && operationsSignerKeyId && operationsSignerPrivateKeyFile) {
+      const signer = await loadEd25519OperationsReceiptSigner({
+        keyId: operationsSignerKeyId,
+        privateKeyPath: operationsSignerPrivateKeyFile,
+        authorities: rolloutAuthorities,
+      });
+      deploymentRuntime = (await createDeploymentControlPlane({
+        workspaceDirectory: options.workspace,
+        authorities: rolloutAuthorities,
+        signer,
+      })).router;
+    } else {
+      // Public verification keys alone cannot authorize candidate traffic: the
+      // full signed telemetry/recovery loop is required before routing is enabled.
+      deploymentRuntime = undefined;
+    }
+  } catch (error) {
+    const cleanup = await Promise.allSettled([backend.close(), releaseExecutionLease()]);
+    const cleanupErrors = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError([error, ...cleanupErrors.map((result) => result.reason)], "Run initialization and cleanup failed");
+    }
+    throw error;
+  }
   const gateway = new AgentGateway({
     backend,
     config: options.config,
@@ -656,6 +714,8 @@ async function launch(options: {
       config: options.config,
       workspace: options.workspace,
       onProgress: printEvent,
+      ...(hostToolRuntime ? { hostToolRuntime } : {}),
+      ...(deploymentRuntime ? { deploymentRuntime } : {}),
     });
     managedRuntime = {
       runId: options.store.runId,
@@ -678,6 +738,7 @@ async function launch(options: {
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
     try {
+      await deploymentRuntime?.drain();
       await backend.close();
     } finally {
       if (managedRuntime) options.onRuntimeDisposed?.(managedRuntime);
@@ -824,6 +885,23 @@ async function evolve(args: string[]): Promise<void> {
     return;
   }
 
+  if (action === "rollout") {
+    const [, rolloutAction = "status", rolloutId] = positional(args);
+    if (rolloutAction !== "status" || !rolloutId) {
+      throw new Error("Usage: luna-swarm evolve rollout status <rollout-id> [--workspace .]");
+    }
+    const rollout = await new RolloutStore(workspace).read(rolloutId);
+    if (!rollout) throw new Error(`Unknown rollout: ${rolloutId}`);
+    process.stdout.write(`${JSON.stringify({
+      mode: "durable-rollout-observation",
+      readOnly: true,
+      automaticPromotion: false,
+      operatorPromotionRequired: true,
+      rollout,
+    }, null, 2)}\n`);
+    return;
+  }
+
   const bundleStore = new ExecutionBundleStore(workspace);
   const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
   const evaluationStore = new PairedEvaluationReceiptStore(workspace, {
@@ -879,6 +957,157 @@ async function evolve(args: string[]): Promise<void> {
     counts: { traces: traces.length, outcomes: outcomes.length, failures: failures.length, evaluations: evaluations.length },
     audit,
   }, null, 2)}\n`);
+}
+
+async function soak(args: string[]): Promise<void> {
+  if (!args.includes("--live-authorized")) {
+    throw new Error("Live account access is disabled unless --live-authorized is supplied explicitly");
+  }
+
+  const action = positional(args)[0];
+  if (action === "account-fingerprint") {
+    const workspace = resolve(option(args, "--workspace") ?? process.cwd());
+    const config = await loadConfig(option(args, "--config"));
+    const timeoutMs = boundedIntegerOption(
+      args,
+      "--timeout-ms",
+      Math.min(config.callTimeoutMs, 120_000),
+      1_000,
+      1_200_000,
+    );
+    const backend = liveAccountBackend(workspace, config, timeoutMs);
+    try {
+      const accountIdentityHash = await backend.accountIdentityHash();
+      process.stdout.write(`${JSON.stringify({
+        schemaVersion: 1,
+        type: "chatgpt-account-fingerprint",
+        accountIdentityHash,
+      }, null, 2)}\n`);
+    } finally {
+      await backend.close();
+    }
+    return;
+  }
+  if (action !== undefined) throw new Error(`Unknown soak command: ${action}`);
+
+  const maxStage = requiredSoakStage(args);
+  const minStage = soakStageOption(args, "--min-stage", 1);
+  if (minStage > maxStage) throw new Error("--min-stage must not exceed --max-stage");
+  const maxCalls = requiredBoundedIntegerOption(args, "--max-calls", 1, 4_096);
+  const budgetUnit = requiredOption(args, "--budget-unit");
+  const budgetPerCall = requiredBoundedNumberOption(args, "--budget-per-call", 0, 1_000_000);
+  const budgetLimit = requiredBoundedNumberOption(args, "--budget-limit", 0, 1_000_000_000);
+  if (Math.floor(budgetLimit / budgetPerCall) < 1) {
+    throw new Error("--budget-limit must authorize at least one declared --budget-per-call unit");
+  }
+  const maxRetries = boundedIntegerOption(args, "--max-retries", 0, 0, 3);
+  const retryDelayMs = boundedIntegerOption(args, "--retry-delay-ms", 1_000, 0, 60_000);
+  const maxErrorRate = boundedNumberOption(args, "--max-error-rate", 0.05, 0, 1);
+  const warmupCallsPerStage = option(args, "--warmup-calls-per-stage") === undefined
+    ? undefined
+    : requiredBoundedIntegerOption(args, "--warmup-calls-per-stage", 0, 4_096);
+  const measuredCallsPerStage = option(args, "--measured-calls-per-stage") === undefined
+    ? undefined
+    : requiredBoundedIntegerOption(args, "--measured-calls-per-stage", 1, 4_096);
+  const accountIdentityHash = canonicalEvolutionHashOption(
+    args,
+    "--account-email-sha256",
+  ) as `sha256:${string}`;
+  const authorizationExpiresAt = requiredOption(args, "--authorization-expires-at");
+
+  const workspace = resolve(option(args, "--workspace") ?? process.cwd());
+  const config = await loadConfig(option(args, "--config"));
+  const timeoutMs = boundedIntegerOption(
+    args,
+    "--timeout-ms",
+    Math.min(config.callTimeoutMs, 120_000),
+    1_000,
+    1_200_000,
+  );
+  const report = await runShardSoak({
+      stageBackendFactory: (stage) => liveSoakBackend(
+        workspace,
+        config,
+        stage,
+        timeoutMs,
+        accountIdentityHash,
+      ),
+      minStage,
+      maxStage,
+      maxCalls,
+      estimatedBudget: {
+        unit: budgetUnit,
+        perCall: budgetPerCall,
+        limit: budgetLimit,
+      },
+      provenance: "live",
+      liveAuthorized: true,
+      liveAuthorization: {
+        accountIdentityHash,
+        expiresAt: authorizationExpiresAt,
+      },
+      timeoutMs,
+      maxRetries,
+      retryDelayMs,
+      maxErrorRate,
+      ...(warmupCallsPerStage === undefined ? {} : { warmupCallsPerStage }),
+      ...(measuredCallsPerStage === undefined ? {} : { measuredCallsPerStage }),
+    });
+  process.stdout.write(`${shardSoakReportJson(report)}\n`);
+  if (report.status === "stopped") process.exitCode = 2;
+}
+
+function liveSoakBackend(
+  workspace: string,
+  config: SwarmConfig,
+  shardCount: SoakShardStage,
+  timeoutMs: number,
+  expectedAccountIdentityHash: `sha256:${string}`,
+): AgentBackend {
+  const shardConfig: SwarmConfig = {
+    ...config,
+    maxConcurrency: 1,
+    appServerShardCount: 1,
+    initialConcurrency: 1,
+    minConcurrency: 1,
+    allowNetwork: false,
+  };
+  const factory = () => new CodexAppServerBackend({
+    workspace,
+    config: shardConfig,
+    ...(process.env.LUNA_SWARM_CODEX_PATH
+      ? { codexPath: process.env.LUNA_SWARM_CODEX_PATH }
+      : {}),
+    rpcTimeoutMs: timeoutMs,
+    expectedChatGptAccountEmailSha256: expectedAccountIdentityHash,
+  });
+  return new AppServerSupervisor(factory, {
+    shardCount,
+    maxInflightPerShard: 1,
+    maxQueuePerShard: 8,
+    drainTimeoutMs: Math.min(timeoutMs, 30_000),
+  });
+}
+
+function liveAccountBackend(
+  workspace: string,
+  config: SwarmConfig,
+  timeoutMs: number,
+): CodexAppServerBackend {
+  return new CodexAppServerBackend({
+    workspace,
+    config: {
+      ...config,
+      maxConcurrency: 1,
+      initialConcurrency: 1,
+      minConcurrency: 1,
+      allowNetwork: false,
+    },
+    ...(process.env.LUNA_SWARM_CODEX_PATH
+      ? { codexPath: process.env.LUNA_SWARM_CODEX_PATH }
+      : {}),
+    rpcTimeoutMs: timeoutMs,
+  });
 }
 
 function evolutionBenchmarkAuthorities(config: SwarmConfig): Readonly<Record<string, TrustedBenchmarkAuthority>> {
@@ -1011,6 +1240,93 @@ function requiredIntegerOption(args: string[], name: string, min: number): numbe
   return value;
 }
 
+function evolutionRolloutAuthorities(config: SwarmConfig): Readonly<Record<string, TrustedRolloutAuthority>> {
+  return Object.fromEntries(Object.entries(config.evolutionRolloutAuthorities ?? {}).map(([keyId, authority]) => [keyId, {
+    publicKeyPem: authority.publicKeyPem,
+    authority: authority.authority,
+  }]));
+}
+
+function requiredBoundedIntegerOption(
+  args: string[],
+  name: string,
+  min: number,
+  max: number,
+): number {
+  const value = Number(requiredOption(args, name));
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function requiredBoundedNumberOption(
+  args: string[],
+  name: string,
+  exclusiveMin: number,
+  max: number,
+): number {
+  const value = Number(requiredOption(args, name));
+  if (!Number.isFinite(value) || value <= exclusiveMin || value > max) {
+    throw new Error(`${name} must be greater than ${exclusiveMin} and at most ${max}`);
+  }
+  return value;
+}
+
+function boundedNumberOption(
+  args: string[],
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const raw = option(args, name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${name} must be between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function boundedIntegerOption(
+  args: string[],
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const raw = option(args, name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function requiredSoakStage(args: string[]): SoakShardStage {
+  const value = requiredBoundedIntegerOption(args, "--max-stage", 1, 256);
+  if (!(SOAK_SHARD_STAGES as readonly number[]).includes(value)) {
+    throw new Error(`--max-stage must be one of ${SOAK_SHARD_STAGES.join(", ")}`);
+  }
+  return value as SoakShardStage;
+}
+
+function soakStageOption(
+  args: string[],
+  name: string,
+  fallback: SoakShardStage,
+): SoakShardStage {
+  const raw = option(args, name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || !(SOAK_SHARD_STAGES as readonly number[]).includes(value)) {
+    throw new Error(`${name} must be one of ${SOAK_SHARD_STAGES.join(", ")}`);
+  }
+  return value as SoakShardStage;
+}
+
 function canonicalEvolutionHashOption(args: string[], name: string): string {
   const value = requiredOption(args, name);
   if (!/^sha256:[a-f0-9]{64}$/.test(value)) throw new Error(`${name} must be a canonical SHA-256 digest`);
@@ -1050,6 +1366,20 @@ function positional(args: string[]): string[] {
     "--evaluation-hash",
     "--actor",
     "--reason",
+    "--max-stage",
+    "--min-stage",
+    "--max-calls",
+    "--budget-unit",
+    "--budget-per-call",
+    "--budget-limit",
+    "--timeout-ms",
+    "--max-retries",
+    "--retry-delay-ms",
+    "--max-error-rate",
+    "--warmup-calls-per-stage",
+    "--measured-calls-per-stage",
+    "--account-email-sha256",
+    "--authorization-expires-at",
   ]);
   const result: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -1104,8 +1434,11 @@ function printHelp(): void {
   luna-swarm learning [--workspace .] [--recent] [--rollback]
   luna-swarm evolve status [--workspace .]
   luna-swarm evolve bootstrap [--workspace .]
+  luna-swarm evolve rollout status <rollout-id> [--workspace .]
   luna-swarm evolve promote <bundle-id> --workload <class> --expected-generation <n> --evaluation <receipt-id> --evaluation-hash <sha256:...> --actor <name> --reason <text>
   luna-swarm evolve rollback <workload-class> --expected-generation <n> --actor <name> --reason <text>
+  luna-swarm soak account-fingerprint --live-authorized [--workspace .]
+  luna-swarm soak --live-authorized --account-email-sha256 <sha256:...> --authorization-expires-at <ISO> [--min-stage <stage>] --max-stage <1|2|4|8|16|32|64|128|256> --max-calls <1..4096> --budget-unit <label> --budget-per-call <n> --budget-limit <n> [--workspace .]
   luna-swarm init [config.json]
   luna-swarm run --goal "작업" [--workspace .] [--mock]
   luna-swarm resume <run-id> [--workspace .]
@@ -1129,6 +1462,20 @@ function printHelp(): void {
   --expected-generation <n> Stable Pointer CAS 세대
   --actor <identity>        수동 승격·롤백 실행자 감사 ID
   --reason <text>           수동 변경 사유
+  --live-authorized         허가된 실제 ChatGPT 계정 soak 실행을 명시적으로 승인
+  --account-email-sha256 <hash> account-fingerprint로 확인한 실제 계정 지문
+  --authorization-expires-at <ISO> 계정·호출·단계·예산 승인의 만료시각 (최대 24시간)
+  --min-stage <stage>       이전 성공 단계를 반복하지 않을 시작 shard 단계 (기본 1)
+  --max-stage <stage>       단계별 soak의 최대 shard 단계 (1..256, 2의 거듭제곱)
+  --max-calls <n>           재시도를 포함한 실제 모델 호출 hard limit (최대 4096)
+  --budget-unit <label>     예산 추정 단위 (예: call-credit)
+  --budget-per-call <n>     호출당 추정 예산
+  --budget-limit <n>        전체 추정 예산 hard limit
+  --timeout-ms <n>          soak 호출 제한 시간 (기본 min(callTimeoutMs, 120000))
+  --max-error-rate <0..1>   단계를 중지할 최대 오류율 (기본 0.05)
+  --max-retries <0..3>      429/timeout 재시도 횟수 (기본 0)
+  --warmup-calls-per-stage <n>   단계별 warmup 호출 수 (기본 stage 크기)
+  --measured-calls-per-stage <n> 단계별 측정 호출 수 (기본 stage 크기의 2배)
 `);
 }
 

@@ -153,9 +153,11 @@ import {
   workloadForTask,
   type EvolutionRuntimeFingerprintInput,
   type EvolutionRuntime,
+  verifyRunnableEvolutionBundle,
 } from "./evolution/runtime.js";
 import { canonicalSha256 } from "./evolution/domain/canonical.js";
 import { renderPromptModuleV1 } from "./evolution/components/prompt-module.js";
+import type { LoadedExecutionBehaviorV1 } from "./evolution/components/loader.js";
 import type { EvolutionAttemptRecord, RunBundlePin } from "./evolution/domain/bundle.js";
 import {
   DecisionTraceConflictError,
@@ -169,6 +171,11 @@ import {
   type ImmutableTraceRef,
 } from "./evolution/trace/index.js";
 import { FailureCapsuleStore } from "./evolution/failure/index.js";
+import { RunHostToolRuntime, type ToolReceipt } from "./tool-broker/index.js";
+import {
+  DeploymentRuntimeRouter,
+  type DeploymentExecutionContext,
+} from "./evolution/deployment/index.js";
 import {
   Mutex,
   errorMessage,
@@ -188,6 +195,10 @@ export interface OrchestratorOptions {
   idFactory?: () => string;
   /** Concrete build/source identity for non-Git or packaged workspaces. */
   sourceIdentity?: string;
+  /** Host-owned read/search broker. Omit only for mock or explicitly observation-only embeddings. */
+  hostToolRuntime?: RunHostToolRuntime;
+  /** Optional trusted pre-harness Shadow/Canary router. */
+  deploymentRuntime?: DeploymentRuntimeRouter;
 }
 
 export class SwarmOrchestrator {
@@ -201,6 +212,7 @@ export class SwarmOrchestrator {
   private readonly decisionTraces: DecisionTraceStore;
   private readonly outcomeReceipts: ObjectiveOutcomeReceiptStore;
   private readonly failureCapsules: FailureCapsuleStore;
+  private readonly deploymentBehaviorCache = new Map<string, Readonly<LoadedExecutionBehaviorV1>>();
   private evolutionRuntime?: EvolutionRuntime;
   private evolutionRuntimeFingerprint?: EvolutionRuntimeFingerprintInput;
   private missionPreflight?: MissionPreflightReport;
@@ -2279,48 +2291,69 @@ export class SwarmOrchestrator {
   }
 
   private async callAndRemember(request: AgentRequest, signal?: AbortSignal) {
-    const existingThreadId = this.state.threadIds[request.threadKey];
     const directiveSnapshot = [...this.activeDirectives];
+    const taskRecord = request.taskId ? this.state.tasks[request.taskId] : undefined;
     const taskAttempt = request.taskId ? this.state.tasks[request.taskId]?.evolution : undefined;
     const workloadClass = taskAttempt?.workloadClass ?? EVOLUTION_WORKLOAD;
-    const executionBundlePin = this.state.evolution?.mode === "pinned"
+    const championPin = this.state.evolution?.mode === "pinned"
       ? this.state.evolution.bundlePins[workloadClass]
       : undefined;
-    if (this.state.evolution?.mode === "pinned" && !executionBundlePin) {
+    if (this.state.evolution?.mode === "pinned" && !championPin) {
       throw new Error(`Evolution Bundle pin is missing for ${workloadClass}`);
     }
-    const executionBehavior = executionBundlePin
-      ? this.evolutionRuntime?.behaviors[workloadClass]
-      : undefined;
-    if (executionBundlePin && !executionBehavior) {
-      throw new Error(`Evolution Bundle behavior is missing for ${workloadClass}`);
-    }
-    if (taskAttempt && executionBundlePin &&
-        (taskAttempt.bundleId !== executionBundlePin.bundleId || taskAttempt.bundleHash !== executionBundlePin.bundleHash)) {
+    if (taskAttempt && championPin &&
+        (taskAttempt.bundleId !== championPin.bundleId || taskAttempt.bundleHash !== championPin.bundleHash)) {
       throw new Error(`Work Order AttemptIdentity does not match the pinned Bundle for ${workloadClass}`);
     }
-    const evolutionBoundRequest: AgentRequest = {
-      ...request,
-      ...(executionBundlePin ? { executionBundlePin } : {}),
-      ...(executionBehavior ? {
-        executionPromptModule: {
-          schemaVersion: executionBehavior.promptModule.schemaVersion,
-          moduleId: executionBehavior.promptModule.moduleId,
-          contentHash: executionBehavior.promptModule.contentHash,
-        },
-      } : {}),
-      ...(taskAttempt ? { attemptIdentity: taskAttempt } : {}),
-    };
-    const requiredPromptModule = executionBehavior
-      ? renderPromptModuleV1(executionBehavior.promptModule)
-      : undefined;
-    const harnessed = this.harness.apply(evolutionBoundRequest);
-    const directed = this.withHarnessAndDirectives(
-      harnessed.request,
-      harnessed.block,
+
+    const execute = (context?: Readonly<DeploymentExecutionContext>) => this.executeDeploymentBoundRequest({
+      request,
       directiveSnapshot,
-      requiredPromptModule,
-    );
+      taskRecord,
+      taskAttempt,
+      workloadClass,
+      executionBundlePin: context?.pin ?? championPin,
+      threadKey: context?.threadKey ?? request.threadKey,
+      sideEffectPolicy: context?.sideEffectPolicy ?? "normal",
+      signal,
+    });
+    const routed = this.options.deploymentRuntime && championPin
+      ? await this.options.deploymentRuntime.route({
+          requestId: deploymentRequestId(this.state.runId, request, taskAttempt),
+          workloadClass,
+          workloadKey: request.taskId ?? request.threadKey,
+          baseThreadKey: request.threadKey,
+          championPin,
+          execute,
+          summarize: ({ response }) => ({
+            resultDigest: canonicalSha256({ text: response.text }),
+            metrics: {
+              durationMs: response.durationMs,
+              outputBytes: Buffer.byteLength(response.text, "utf8"),
+              ...(response.costUsd === undefined ? {} : { costUsd: response.costUsd }),
+            },
+          }),
+          onDetachedError: () => {
+            void this.event({
+              type: "deployment_shadow_failed",
+              ...(request.taskId ? { taskId: request.taskId } : {}),
+              role: request.role,
+              message: "Detached candidate execution failed; champion result remained authoritative",
+            }).catch(() => undefined);
+          },
+        })
+      : {
+          value: await execute(),
+          mode: "stable_only" as const,
+          selection: "champion" as const,
+          pin: championPin,
+          threadKey: request.threadKey,
+        };
+    const { response, harnessed, directed, boundRequest } = routed.value;
+    const rolloutId = "rolloutId" in routed ? routed.rolloutId : undefined;
+    const rolloutRevision = "rolloutRevision" in routed ? routed.rolloutRevision : undefined;
+    const rolloutGeneration = "rolloutGeneration" in routed ? routed.rolloutGeneration : undefined;
+
     await this.event({
       type: "harness_selected",
       ...(request.taskId ? { taskId: request.taskId } : {}),
@@ -2336,19 +2369,226 @@ export class SwarmOrchestrator {
       harnessGates: harnessed.gates,
       message: `${harnessed.specialistId ?? request.role} · ${harnessed.skillIds.length} skills · ${harnessed.memoryIds.length} memories · ${harnessed.gates.length} gates`,
     });
+    const hostToolArtifacts = await this.persistHostToolReceipts(boundRequest, response.hostToolReceipts ?? []);
+    await this.markDirectivesApplied(directed.includedDirectives);
+    await this.commit((state) => {
+      state.threadIds[routed.threadKey] = response.threadId;
+      state.harness = this.harness.state();
+      if (request.taskId && routed.pin) {
+        const currentTask = state.tasks[request.taskId];
+        if (!currentTask) throw new Error(`Deployment task state is missing for ${request.taskId}`);
+        const deployment = {
+          schemaVersion: 1 as const,
+          mode: routed.mode,
+          selection: routed.selection,
+          bundleId: routed.pin.bundleId,
+          bundleHash: routed.pin.bundleHash,
+          ...(rolloutId ? { rolloutId } : {}),
+          ...(rolloutRevision ? { rolloutRevision } : {}),
+          ...(rolloutGeneration ? { rolloutGeneration } : {}),
+        };
+        if (currentTask.deployment && !isDeepStrictEqual(currentTask.deployment, deployment)) {
+          throw new Error(`Deployment selection changed during Work Order ${request.taskId}`);
+        }
+        currentTask.deployment = deployment;
+      }
+      if (hostToolArtifacts.length > 0 && request.taskId) {
+        const currentTask = state.tasks[request.taskId];
+        if (!currentTask || !state.harnessV2) {
+          throw new Error(`Host Tool receipt task state is missing for ${request.taskId}`);
+        }
+        const ids = new Set(currentTask.hostToolReceiptArtifactIds ?? []);
+        for (const artifact of hostToolArtifacts) {
+          state.harnessV2.artifactHeads[artifact.artifactId] = toRef(artifact);
+          ids.add(artifact.artifactId);
+        }
+        currentTask.hostToolReceiptArtifactIds = [...ids].sort();
+      }
+    });
+    if (rolloutId && routed.pin) {
+      await this.event({
+        type: "deployment_routed",
+        ...(request.taskId ? { taskId: request.taskId } : {}),
+        role: request.role,
+        status: `${routed.mode}:${routed.selection}`,
+        message: `${routed.mode} routed ${routed.selection} bundle ${routed.pin.bundleId}`,
+      });
+    }
+    if (hostToolArtifacts.length > 0) {
+      await this.event({
+        type: "host_tool_receipts_recorded",
+        ...(request.taskId ? { taskId: request.taskId } : {}),
+        ...(request.workOrderId ? { workOrderId: request.workOrderId } : {}),
+        role: request.role,
+        ...(request.department ? { department: request.department } : {}),
+        artifactIds: hostToolArtifacts.map((artifact) => artifact.artifactId).sort(),
+        message: `${hostToolArtifacts.length} authenticated read-only Host Tool receipt(s)`,
+      });
+    }
+    return response;
+  }
+
+  private async executeDeploymentBoundRequest(input: {
+    request: AgentRequest;
+    directiveSnapshot: RunDirective[];
+    taskRecord: TaskRecord | undefined;
+    taskAttempt: EvolutionAttemptRecord | undefined;
+    workloadClass: string;
+    executionBundlePin: RunBundlePin | undefined;
+    threadKey: string;
+    sideEffectPolicy: DeploymentExecutionContext["sideEffectPolicy"];
+    signal: AbortSignal | undefined;
+  }) {
+    const { request, taskRecord, taskAttempt, executionBundlePin } = input;
+    const deploymentSideEffectPolicy = input.sideEffectPolicy === "read_only_or_isolated"
+      ? "read_only_network_off" as const
+      : "normal" as const;
+    const effectivePolicy = deploymentToolPolicy(request.effectiveToolPolicy, input.sideEffectPolicy);
+    const executionBehavior = executionBundlePin
+      ? await this.executionBehaviorForPin(input.workloadClass, executionBundlePin)
+      : undefined;
+    let hostToolSession: AgentRequest["hostToolSession"];
+    if (this.options.hostToolRuntime && effectivePolicy) {
+      const workOrderId = request.workOrderId;
+      const agentId = request.agentSlotId;
+      const workOrder = workOrderId ? this.state.harnessV2?.workOrders[workOrderId] : undefined;
+      if (!workOrderId || !agentId || !workOrder || !taskRecord) {
+        throw new Error("Host Tool Broker binding requires an exact agent, Work Order, and task attempt");
+      }
+      hostToolSession = this.options.hostToolRuntime.createSession({
+        agentId,
+        workOrderId,
+        revision: workOrder.order.revision,
+        attempt: Math.max(1, taskAttempt?.executionAttempt ?? taskRecord.attempts),
+        policy: effectivePolicy,
+      });
+    }
+    const boundAttempt = taskAttempt && executionBundlePin
+      ? { ...taskAttempt, bundleId: executionBundlePin.bundleId, bundleHash: executionBundlePin.bundleHash }
+      : taskAttempt;
+    const evolutionBoundRequest: AgentRequest = {
+      ...request,
+      threadKey: input.threadKey,
+      ...(executionBundlePin ? { executionBundlePin } : {}),
+      deploymentSideEffectPolicy,
+      ...(effectivePolicy ? { effectiveToolPolicy: effectivePolicy } : {}),
+      ...(executionBehavior ? {
+        executionPromptModule: {
+          schemaVersion: executionBehavior.promptModule.schemaVersion,
+          moduleId: executionBehavior.promptModule.moduleId,
+          contentHash: executionBehavior.promptModule.contentHash,
+        },
+      } : {}),
+      ...(boundAttempt ? { attemptIdentity: boundAttempt } : {}),
+      ...(hostToolSession ? { hostToolSession } : {}),
+    };
+    const requiredPromptModule = executionBehavior
+      ? renderPromptModuleV1(executionBehavior.promptModule)
+      : undefined;
+    const harnessed = this.harness.apply(evolutionBoundRequest);
+    const directed = this.withHarnessAndDirectives(
+      harnessed.request,
+      harnessed.block,
+      input.directiveSnapshot,
+      requiredPromptModule,
+    );
     const response = await this.options.gateway.run(
       {
         ...directed.request,
-        ...(existingThreadId ? { existingThreadId } : {}),
+        ...(this.state.threadIds[input.threadKey]
+          ? { existingThreadId: this.state.threadIds[input.threadKey] }
+          : {}),
       },
-      signal,
+      input.signal,
     );
-    await this.markDirectivesApplied(directed.includedDirectives);
-    await this.commit((state) => {
-      state.threadIds[request.threadKey] = response.threadId;
-      state.harness = this.harness.state();
+    return { response, harnessed, directed, boundRequest: evolutionBoundRequest };
+  }
+
+  private async executionBehaviorForPin(
+    workloadClass: string,
+    pin: Readonly<RunBundlePin>,
+  ): Promise<Readonly<LoadedExecutionBehaviorV1>> {
+    const stable = this.evolutionRuntime?.pins[workloadClass];
+    if (stable?.bundleId === pin.bundleId && stable.bundleHash === pin.bundleHash) {
+      const behavior = this.evolutionRuntime?.behaviors[workloadClass];
+      if (!behavior) throw new Error(`Evolution Bundle behavior is missing for ${workloadClass}`);
+      return behavior;
+    }
+    const cached = this.deploymentBehaviorCache.get(pin.bundleHash);
+    if (cached) return cached;
+    if (!this.evolutionRuntime) throw new Error("Candidate Bundle cannot run without an initialized Evolution runtime");
+    if (pin.environmentDigest !== stable?.environmentDigest) {
+      throw new Error("Candidate Bundle environment does not match the run-pinned champion");
+    }
+    const bundle = await this.evolutionRuntime.bundleStore.read(pin.bundleId);
+    if (bundle.bundleHash !== pin.bundleHash || !bundle.workloadClasses.includes(workloadClass)) {
+      throw new Error("Candidate Bundle identity or workload binding is invalid");
+    }
+    const genomeHash = bundle.componentHashes.genome;
+    if (!genomeHash || !/^sha256:[a-f0-9]{64}$/.test(genomeHash)) {
+      throw new Error("Candidate Bundle is missing its immutable genome hash");
+    }
+    await this.evolutionRuntime.quarantineStore.assertPinAllowed({
+      genomeId: bundle.genomeId,
+      genomeHash: genomeHash as RunBundlePin["bundleHash"],
+      workloadClass,
     });
-    return response;
+    const behavior = await verifyRunnableEvolutionBundle(
+      this.evolutionRuntime.genomeStore,
+      bundle,
+      this.evolutionFingerprint(),
+      this.evolutionRuntime.promptModuleStore,
+    );
+    this.deploymentBehaviorCache.set(pin.bundleHash, behavior);
+    return behavior;
+  }
+
+  private async persistHostToolReceipts(
+    request: AgentRequest,
+    receipts: readonly JsonValue[],
+  ): Promise<ArtifactRevision[]> {
+    if (receipts.length === 0) return [];
+    const runtime = this.options.hostToolRuntime;
+    const taskId = request.taskId;
+    const workOrderId = request.workOrderId;
+    const agentId = request.agentSlotId;
+    const roleContract = request.roleContract;
+    const task = taskId ? this.state.tasks[taskId] : undefined;
+    const workOrder = workOrderId ? this.state.harnessV2?.workOrders[workOrderId] : undefined;
+    if (!runtime || !taskId || !workOrderId || !agentId || !roleContract || !task || !workOrder) {
+      throw new Error("Host Tool receipts cannot be admitted without their bound runtime identity");
+    }
+    const expectedAttempt = Math.max(1, task.evolution?.executionAttempt ?? task.attempts);
+    const artifacts: ArtifactRevision[] = [];
+    for (const value of receipts) {
+      if (!runtime.verifyReceipt(value)) throw new Error("Host Tool receipt signature is invalid");
+      const receipt: ToolReceipt = value;
+      if (receipt.agentId !== agentId
+        || receipt.workOrderId !== workOrderId
+        || receipt.revision !== workOrder.order.revision
+        || receipt.attempt !== expectedAttempt) {
+        throw new Error("Host Tool receipt does not match the active Work Order attempt");
+      }
+      const content = JSON.parse(JSON.stringify(receipt)) as JsonValue;
+      const artifact = await this.blackboard.put({
+        artifactId: `tool-receipt-${receipt.receiptId.replace(/^tbr-/u, "")}`,
+        kind: "evidence",
+        createdAt: receipt.completedAt,
+        createdBy: {
+          agentId,
+          teamId: roleContract.teamId,
+          workOrderId,
+        },
+        requirementIds: [...task.requirementIds].sort(),
+        inputs: [...(request.inputArtifactRefs ?? [])],
+        verificationStatus: "accepted",
+        tools: [receipt.tool],
+        commands: [],
+        content,
+      }, null);
+      artifacts.push(artifact);
+    }
+    return artifacts;
   }
 
   private async recordEvolutionTaskAttempt(taskId: string): Promise<void> {
@@ -2357,6 +2597,10 @@ export class SwarmOrchestrator {
     const runEvolution = this.state.evolution;
     const workOrder = this.state.harnessV2?.workOrders[taskId];
     if (!task || !evolution || !runEvolution || runEvolution.mode !== "pinned" || !workOrder) return;
+    // Candidate traffic is evaluated by the deployment journal and protected
+    // SLO receipts. It must never masquerade as evidence for the run-pinned
+    // champion Bundle in the ordinary Evolution outcome store.
+    if (task.deployment?.selection === "candidate") return;
     if (["running", "validating"].includes(task.status) || workOrder.state === "VALIDATION_RETRY") return;
 
     try {
@@ -2369,6 +2613,10 @@ export class SwarmOrchestrator {
         return artifact as unknown as GateReceiptArtifact;
       }))).filter((artifact): artifact is GateReceiptArtifact => Boolean(artifact));
       const outputArtifact = outputRef ? await this.blackboard.read(outputRef) : undefined;
+      const toolArtifacts = (await Promise.all((task.hostToolReceiptArtifactIds ?? []).map(async (artifactId) => {
+        const ref = this.state.harnessV2?.artifactHeads[artifactId];
+        return ref ? this.blackboard.read(ref) : undefined;
+      }))).filter((artifact): artifact is ArtifactRevision => Boolean(artifact));
       const terminal = evolutionTerminal(task.status);
       const failureClass = evolutionFailureClass(task, terminal);
       const endedAt = isoNow();
@@ -2396,7 +2644,10 @@ export class SwarmOrchestrator {
         contextManifestHash: evolution.contextManifestHash ?? canonicalSha256({ unavailable: true, attemptId: evolution.attemptId }).slice(7),
         promptComponentHashes: [...evolution.promptComponentHashes],
         memoryCapsuleIds: [...evolution.memoryCapsuleIds],
-        toolReceiptIds: [],
+        toolReceiptIds: toolArtifacts.map((artifact) => {
+          const content = artifact.content as Record<string, JsonValue>;
+          return typeof content.receiptId === "string" ? content.receiptId : artifact.artifactId;
+        }).sort(),
         outputArtifactHash: outputArtifact?.contentHash ?? null,
         validationReceiptIds: gateArtifacts.map((artifact) => artifact.artifactId).sort(),
         componentRefs: [{
@@ -2409,6 +2660,7 @@ export class SwarmOrchestrator {
           return ref ? [evolutionArtifactRef(ref)] : [];
         }),
         outputRefs: outputArtifact ? [evolutionArtifactRef(outputArtifact)] : [],
+        toolRefs: toolArtifacts.map(evolutionArtifactRef),
         validationRefs: gateArtifacts.map(evolutionArtifactRef),
         timings: {
           startedAt: evolution.startedAt,
@@ -3883,6 +4135,23 @@ function isGateReceiptArtifact(artifact: ArtifactRevision): boolean {
   return ["G0", "G1", "G2", "G3", "G4"].includes(String(gateId));
 }
 
+function deploymentToolPolicy(
+  policy: Readonly<NormalizedToolPolicy> | undefined,
+  sideEffectPolicy: DeploymentExecutionContext["sideEffectPolicy"],
+): NormalizedToolPolicy | undefined {
+  if (!policy) return undefined;
+  if (sideEffectPolicy === "normal") return structuredClone(policy);
+  return {
+    // A detached shadow may inspect the same bounded inputs, but it cannot
+    // receive shell, write, web, or any future unclassified tool capability.
+    allowedTools: policy.allowedTools.filter((tool) => tool === "read" || tool === "search"),
+    network: "off",
+    allowedDomains: [],
+    readScopes: [...policy.readScopes],
+    writeScopes: [],
+  };
+}
+
 function effectiveToolPolicy(
   contract: AgentRoleContract,
   order: WorkOrder,
@@ -4353,6 +4622,25 @@ function abortError(): Error {
   const error = new Error("Swarm run aborted");
   error.name = "AbortError";
   return error;
+}
+
+function deploymentRequestId(
+  runId: string,
+  request: Readonly<AgentRequest>,
+  attempt: Readonly<EvolutionAttemptRecord> | undefined,
+): string {
+  return `deployment-request:${canonicalSha256({
+    runId,
+    threadKey: request.threadKey,
+    role: request.role,
+    purpose: request.purpose,
+    taskId: request.taskId ?? null,
+    workOrderId: request.workOrderId ?? null,
+    agentSlotId: request.agentSlotId ?? null,
+    attemptId: attempt?.attemptId ?? null,
+    validationAttempt: attempt?.validationAttempt ?? null,
+    promptHash: canonicalSha256(request.prompt),
+  }).slice(7, 39)}`;
 }
 
 function plannerSpecialistHint(index: number): string {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +13,7 @@ import {
   BoundedStdioWriter,
 } from "../../src/backend/app-server-client.js";
 import { DEFAULT_CONFIG } from "../../src/config.js";
-import type { AgentRequest } from "../../src/backend/agent-backend.js";
+import type { AgentRequest, HostToolSession } from "../../src/backend/agent-backend.js";
 import { AgentPolicyError } from "../../src/backend/agent-backend.js";
 import { HARNESS_V2_ORG_VERSION, type AgentRoleContract } from "../../src/harness-v2/contracts.js";
 import { AgentGateway } from "../../src/runtime/gateway.js";
@@ -50,6 +51,145 @@ function request(threadKey: string, prompt: string): AgentRequest {
 function existingRequest(threadKey: string, prompt: string): AgentRequest {
   return { ...request(threadKey, prompt), existingThreadId: "missing-thread" };
 }
+
+function hostTools(
+  invoke: HostToolSession["invoke"],
+): HostToolSession {
+  return {
+    tools: [{
+      type: "function",
+      name: "read",
+      description: "Read one broker-authorized workspace text file.",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+        additionalProperties: false,
+      },
+    }],
+    invoke,
+  };
+}
+
+test("dynamic read calls reach the host session and return immutable receipts", async () => {
+  const calls: unknown[] = [];
+  const receipt = { receiptId: "receipt-1", outputHash: "sha256:test" };
+  const instance = backend();
+  try {
+    const response = await instance.run({
+      ...request("dynamic-read", "dynamic-tool-read"),
+      hostToolSession: hostTools(async (call) => {
+        calls.push(call);
+        return { content: { text: "broker-result" }, receipt };
+      }),
+    });
+    assert.equal(response.text, JSON.stringify({ text: "broker-result" }));
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0], {
+      threadId: response.threadId,
+      turnId: response.turnId,
+      callId: "dynamic-call-1",
+      tool: "read",
+      arguments: { path: "README.md" },
+    });
+    assert.deepEqual(response.hostToolReceipts, [receipt]);
+    assert.equal(Object.isFrozen(response.hostToolReceipts), true);
+    assert.equal(Object.isFrozen(response.hostToolReceipts?.[0]), true);
+    assert.equal((instance as unknown as { activeHostTools: Map<string, unknown> }).activeHostTools.size, 0);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("host-tool requests start a freshly bound thread instead of unsafe resume", async () => {
+  const instance = new CodexAppServerBackend({
+    workspace: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex, "resume-auth-error"],
+    config: DEFAULT_CONFIG,
+  });
+  try {
+    const response = await instance.run({
+      ...existingRequest("dynamic-fresh", "dynamic-tool-read"),
+      hostToolSession: hostTools(async () => ({ content: "fresh-bound-thread" })),
+    });
+    assert.equal(response.text, "fresh-bound-thread");
+    assert.notEqual(response.threadId, "missing-thread");
+  } finally {
+    await instance.close();
+  }
+});
+
+test("unknown and stale dynamic tool calls are rejected without invoking the broker", async () => {
+  let invoked = 0;
+  const session = hostTools(async () => {
+    invoked += 1;
+    return { content: "unexpected" };
+  });
+  const instance = backend();
+  try {
+    const unknown = await instance.run({
+      ...request("dynamic-unknown", "dynamic-tool-unknown"),
+      hostToolSession: session,
+    });
+    assert.equal(unknown.text, "tool-error:Host request rejected");
+    const stale = await instance.run({
+      ...request("dynamic-stale", "dynamic-tool-stale"),
+      hostToolSession: session,
+    });
+    assert.equal(stale.text, "tool-error:Host request rejected");
+    assert.equal(invoked, 0);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("host tool handlers are cleared after completion and reject late calls", async () => {
+  const stderr: string[] = [];
+  const instance = new CodexAppServerBackend({
+    workspace: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+    config: DEFAULT_CONFIG,
+    onStderr: (line) => stderr.push(line),
+  });
+  try {
+    const response = await instance.run({
+      ...request("dynamic-late", "dynamic-tool-late"),
+      hostToolSession: hostTools(async () => ({ content: "unexpected" })),
+    });
+    assert.equal(response.text, "completed-before-late-tool");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.ok(stderr.includes("TOOL_REPLY error"));
+    assert.equal((instance as unknown as { activeHostTools: Map<string, unknown> }).activeHostTools.size, 0);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("crash recycling invalidates in-flight host tool callbacks", async () => {
+  const instance = backend();
+  let calls = 0;
+  try {
+    await assert.rejects(
+      instance.run({
+        ...request("dynamic-crash", "dynamic-tool-crash"),
+        hostToolSession: hostTools(async () => {
+          calls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          return { content: "too-late" };
+        }),
+      }),
+      AppServerTransportError,
+    );
+    const recovered = await instance.run(request("dynamic-recovered", "ok"));
+    assert.equal(recovered.text, "network=false");
+    assert.equal(calls, 1);
+    assert.equal((instance as unknown as { activeHostTools: Map<string, unknown> }).activeHostTools.size, 0);
+  } finally {
+    await instance.close();
+  }
+});
 
 function backend(allowNetwork = DEFAULT_CONFIG.allowNetwork): CodexAppServerBackend {
   return new CodexAppServerBackend({
@@ -89,16 +229,49 @@ function policyRequest(
     workOrderId: `WO-${threadKey}`,
     roleContract: readOnlyRole,
     effectiveToolPolicy: {
-      allowedTools: network === "allowlist" ? ["read", "web-fetch"] : ["read"],
+      allowedTools: ["read"],
       network,
       allowedDomains: network === "allowlist" ? ["github.com"] : [],
       readScopes: ["workspace/**"],
       writeScopes: [],
     },
+    hostToolSession: hostTools(async () => ({ content: "unused" })),
   };
 }
 
-test("late turn/start after abort returns promptly and is interrupted once", { timeout: 10_000 }, async () => {
+test("live account authorization binds the expected privacy-preserving account identity", async () => {
+  const expected = `sha256:${createHash("sha256").update("chatgpt:fake@example.invalid").digest("hex")}` as `sha256:${string}`;
+  const matched = new CodexAppServerBackend({
+    workspace: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+    config: DEFAULT_CONFIG,
+    expectedChatGptAccountEmailSha256: expected,
+  });
+  try {
+    assert.equal(await matched.accountIdentityHash(), expected);
+  } finally {
+    await matched.close();
+  }
+
+  const mismatched = new CodexAppServerBackend({
+    workspace: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+    config: DEFAULT_CONFIG,
+    expectedChatGptAccountEmailSha256: `sha256:${"0".repeat(64)}`,
+  });
+  try {
+    await assert.rejects(
+      mismatched.accountIdentityHash(),
+      /does not match the authorized live account identity/,
+    );
+  } finally {
+    await mismatched.close();
+  }
+});
+
+test("late turn/start after abort returns promptly and is interrupted once", { timeout: 30_000 }, async () => {
   const stderr: string[] = [];
   let interruptObserved = false;
   let resolveInterruptCleanup!: () => void;
@@ -460,6 +633,27 @@ test("network access is disabled by default and requires explicit opt-in", async
   await enabled.close();
 });
 
+test("detached deployment policy disables network at the backend boundary", async () => {
+  const instance = backend(true);
+  try {
+    const shadow = await instance.run({
+      ...request("deployment-shadow-network-off", "echo-sandbox-policy"),
+      deploymentSideEffectPolicy: "read_only_network_off",
+    });
+    assert.deepEqual(JSON.parse(shadow.text), { type: "readOnly", networkAccess: false });
+
+    const mismatched = policyRequest("deployment-shadow-mismatch", "allowlist");
+    mismatched.deploymentSideEffectPolicy = "read_only_network_off";
+    await assert.rejects(
+      instance.run(mismatched),
+      (error: unknown) => error instanceof AgentPolicyError &&
+        error.code === "DEPLOYMENT_SIDE_EFFECT_POLICY_MISMATCH",
+    );
+  } finally {
+    await instance.close();
+  }
+});
+
 test("effective Work Order policy narrows the actual turn sandbox network permission", async () => {
   const instance = backend(true);
   try {
@@ -515,10 +709,15 @@ test("read-only App Server rejects Work Order capabilities it cannot enforce", a
       ...narrowReadRequest.effectiveToolPolicy!,
       readScopes: ["workspace/docs/**"],
     };
+    const narrowed = await instance.run(narrowReadRequest);
+    assert.deepEqual(JSON.parse(narrowed.text), { type: "readOnly", networkAccess: false });
+
+    const missingBrokerRequest = policyRequest("policy-no-broker", "off");
+    delete missingBrokerRequest.hostToolSession;
     await assert.rejects(
-      instance.run(narrowReadRequest),
+      instance.run(missingBrokerRequest),
       (error: unknown) =>
-        error instanceof AgentPolicyError && error.code === "UNENFORCEABLE_READ_SCOPE",
+        error instanceof AgentPolicyError && error.code === "MISSING_HOST_TOOL_SESSION",
     );
 
     await assert.rejects(

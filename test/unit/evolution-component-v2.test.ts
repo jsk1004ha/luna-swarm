@@ -10,6 +10,12 @@ import { createExecutionBundle, deriveOrganizationGenome } from "../../src/evolu
 import { canonicalSha256 } from "../../src/evolution/domain/canonical.js";
 import type { PairedEvaluationReceipt } from "../../src/evolution/evaluation/receipt.js";
 import {
+  type DeploymentExecutionContext,
+  type DeploymentRouteResult,
+  type DeploymentRuntimeRouteInput,
+  DeploymentRuntimeRouter,
+} from "../../src/evolution/deployment/index.js";
+import {
   PROMPT_MODULE_SCHEMA_VERSION,
   createPromptModuleV1,
   prefixPromptModuleV1,
@@ -109,6 +115,118 @@ test("a registered prompt-module challenger changes actual prompts only after th
     () => verifyRunnableEvolutionBundle(current.genomeStore, incompatible, input, current.promptModuleStore),
     /component workflow is not runnable/,
   );
+
+  const detachedShadowTasks = new Set<Promise<void>>();
+  const shadowBindingHash = canonicalSha256({
+    rolloutId: "rollout-prompt-shadow",
+    champion: champion.bundleHash,
+    candidate: challenger.bundleHash,
+  });
+  const shadowRouter = {
+    async route<T>(route: DeploymentRuntimeRouteInput<T>): Promise<Readonly<DeploymentRouteResult<T>>> {
+      const championPin = current.pins[route.workloadClass]!;
+      const championContext: DeploymentExecutionContext = {
+        mode: route.workloadClass === workload ? "shadow" : "stable_only",
+        visibility: "user_visible",
+        sideEffectPolicy: "normal",
+        threadKey: route.workloadClass === workload
+          ? `${route.baseThreadKey}:rollout-prompt-shadow:champion`
+          : route.baseThreadKey,
+        pin: {
+          ...championPin,
+          selection: "champion",
+          source: "stable_pointer",
+        },
+        ...(route.workloadClass === workload ? {
+          rolloutId: "rollout-prompt-shadow",
+          rolloutRevision: 5,
+          rolloutGeneration: 1,
+          bindingHash: shadowBindingHash,
+        } : {}),
+      };
+      if (route.workloadClass !== workload) {
+        const value = await route.execute(championContext);
+        return {
+          value,
+          mode: "stable_only",
+          selection: "champion",
+          pin: championContext.pin,
+          threadKey: championContext.threadKey,
+        };
+      }
+
+      const candidateContext: DeploymentExecutionContext = {
+        mode: "shadow",
+        visibility: "detached",
+        sideEffectPolicy: "read_only_or_isolated",
+        threadKey: `${route.baseThreadKey}:rollout-prompt-shadow:candidate`,
+        pin: {
+          selection: "candidate",
+          source: "active_rollout",
+          workloadClass: workload,
+          bundleId: challenger.bundleId,
+          bundleHash: challenger.bundleHash,
+          environmentDigest: championPin.environmentDigest,
+          pointerGeneration: championPin.pointerGeneration,
+          rolloutId: "rollout-prompt-shadow",
+          rolloutGeneration: 1,
+          bindingHash: shadowBindingHash,
+          pinnedAt: championPin.pinnedAt,
+        },
+        rolloutId: "rollout-prompt-shadow",
+        rolloutRevision: 5,
+        rolloutGeneration: 1,
+        bindingHash: shadowBindingHash,
+      };
+      const detached = Promise.resolve()
+        .then(() => route.execute(candidateContext))
+        .then(() => undefined)
+        .catch((error: unknown) => route.onDetachedError?.(error));
+      detachedShadowTasks.add(detached);
+      void detached.finally(() => detachedShadowTasks.delete(detached));
+      const value = await route.execute(championContext);
+      return {
+        value,
+        mode: "shadow",
+        selection: "champion",
+        pin: championContext.pin,
+        threadKey: championContext.threadKey,
+        rolloutId: "rollout-prompt-shadow",
+        rolloutRevision: 5,
+        rolloutGeneration: 1,
+      };
+    },
+    async drain(): Promise<void> {
+      while (detachedShadowTasks.size > 0) await Promise.all([...detachedShadowTasks]);
+    },
+  } as unknown as DeploymentRuntimeRouter;
+
+  const shadowBackend = new MockAgentBackend(demoHandler);
+  const shadowStore = new AtomicRunStore(workspace, ".state", "run-prompt-shadow");
+  await shadowStore.create();
+  const shadowState = await new SwarmOrchestrator({
+    gateway: new AgentGateway({ backend: shadowBackend, config: behaviorConfig }),
+    store: shadowStore,
+    config: behaviorConfig,
+    workspace,
+    sourceIdentity: "test-component-source",
+    deploymentRuntime: shadowRouter,
+  }).start("shadow candidate reaches a detached model boundary before promotion");
+  await shadowRouter.drain();
+  assert.equal(shadowState.status, "completed", shadowState.error);
+  const shadowCandidateCalls = shadowBackend.calls.filter((call) =>
+    call.taskId === "T1" && call.threadKey.includes(":rollout-prompt-shadow:candidate"));
+  const shadowChampionCalls = shadowBackend.calls.filter((call) =>
+    call.taskId === "T1" && call.threadKey.includes(":rollout-prompt-shadow:champion"));
+  assert.ok(shadowCandidateCalls.length > 0, "the detached candidate must reach the backend");
+  assert.ok(shadowChampionCalls.length > 0, "the user-visible champion must reach the backend");
+  assert.ok(shadowCandidateCalls.every((call) => call.executionBundlePin?.bundleId === challenger.bundleId));
+  assert.ok(shadowCandidateCalls.every((call) => /CHALLENGER_BEHAVIOR/.test(call.prompt)));
+  assert.ok(shadowChampionCalls.every((call) => call.executionBundlePin?.bundleId === champion.bundleId));
+  assert.ok(shadowChampionCalls.every((call) => !/CHALLENGER_BEHAVIOR/.test(call.prompt)));
+  assert.equal(shadowState.tasks.T1?.deployment?.selection, "champion");
+  assert.equal(shadowState.tasks.T1?.deployment?.mode, "shadow");
+
   const recordHash = canonicalSha256({ champion: champion.bundleHash, challenger: challenger.bundleHash, workload });
   const receipt = {
     receiptId: `evaluation-receipt:${recordHash.slice(7, 39)}`,

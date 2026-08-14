@@ -182,6 +182,15 @@ npm start -- evolve promote <bundle-id> -- --workload <class> --expected-generat
 npm start -- evolve rollback <workload-class> -- --expected-generation <n> \
   --actor <name> --reason <text>
 
+# 허가된 실제 ChatGPT 계정의 개인정보 비노출 지문 확인
+luna-swarm soak account-fingerprint --live-authorized --workspace .
+
+# 지문·만료·호출 수·예산에 결박된 단계별 shard soak
+luna-swarm soak --live-authorized --account-email-sha256 <sha256:...> \
+  --authorization-expires-at <ISO> --min-stage 1 --max-stage 32 \
+  --max-calls 120 --budget-unit request --budget-per-call 1 --budget-limit 120 \
+  --workspace .
+
 # Ctrl-C 등으로 중단된 실행 재개
 npm start -- resume <run-id> -- --workspace .
 
@@ -194,6 +203,8 @@ npm start -- ui --workspace . --port 4310 --open
 # 모델을 호출하지 않는 UI 시뮬레이션
 npm start -- ui --workspace . --port 4310 --mock --open
 ```
+
+Shadow/Canary 운영 제어 루프는 trusted operations signer가 명시적으로 구성된 경우에만 켜집니다. `LUNA_SWARM_OPERATIONS_SIGNER_KEY_ID`와 `LUNA_SWARM_OPERATIONS_SIGNER_PRIVATE_KEY_FILE` 중 하나만 있거나 둘 다 없으면 후보 트래픽은 열리지 않습니다. 개인키 경로와 원문 계정 식별자는 설정 파일·실행 로그·soak 보고서에 기록하지 마세요.
 
 개발 중에는 빌드 없이 `npm run dev -- <command>`를 사용할 수 있습니다.
 
@@ -313,13 +324,13 @@ stateDiagram-v2
 - 저장소나 웹 문서는 신뢰할 수 없는 증거로 취급하며, 조직 역할 헌장을 덮어쓰는 지시로 취급하지 않습니다.
 - `CODEX_HOME`은 App Server가 SQLite 상태를 만들 수 있도록 쓰기 가능해야 합니다. `doctor`가 이를 확인합니다.
 
-실제 파일 쓰기를 병렬 허용하려면 작업별 Git worktree와 단일 committer가 추가되어야 합니다. 현재 버전은 파일 충돌과 중복 side effect를 막기 위해 그 기능을 의도적으로 켜지 않았습니다.
+일반 Swarm 실행은 계속 read-only입니다. Host Tool Broker도 `read`/`search`만 허용하고, HMAC capability, durable replay/idempotency ledger, canonical path scope, credential/state deny scope, 서명 receipt를 매 호출에 강제합니다. 파일을 쓰는 코딩은 별도의 opt-in `CodingPipeline`에서만 실행됩니다. 이 경로는 hash-pinned 프로세스 executor, disposable Git clone, bounded snapshot, 보호된 check와 독립 audit receipt, plumbing-only commit 생성, target-ref CAS, Single Committer를 하나의 트랜잭션 경계로 묶습니다.
 
 ## Harness v2
 
 실행 계획은 고유 이름을 가진 가변형 Harness v2 조직의 revisioned Work Order로 투영됩니다. 기본 `auto` 모드는 계획의 작업 수·동시성·검증자 수에 맞춰 14~256명의 논리 조직을 산정하며, 산정된 roster는 실행에 고정되어 재시도·재개에도 같은 직원 배정을 보존합니다. `lab-128@2`는 기존 실행 호환을 위해 유지한 조직 계약 버전 이름이며 인원 제한을 뜻하지 않습니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, bounded AST 기반 Program Knowledge Graph가 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급합니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, run-pinned reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다.
 
-SQLite WAL, 실제 쓰기 Tool Broker, Git worktree/Single Committer, G1 command receipt, runtime trace 자동 수집, arbitrary experiment runner는 아직 구현됐다고 주장하지 않습니다. App Server는 선택적으로 여러 stdio shard를 bounded supervisor로 운영할 수 있지만, 실제 계정의 128/256 동시 호출 soak를 통과했다는 의미는 아닙니다. 현재 범위와 남은 안전 경계는 [Harness v2 설계 문서](docs/HARNESS_V2.ko.md)에 명시했습니다.
+실제 쓰기·shell·network Tool Broker, arbitrary experiment runner, 모든 Evolution component loader는 아직 구현됐다고 주장하지 않습니다. 보호된 평가는 별도 hash-pinned evaluator 프로세스가 hidden suite와 개인키를 소유하고, allowlist된 benchmark runner의 전체 실행 closure를 private copy에서 실행해 서명 receipt만 반환합니다. Shadow/Canary는 operator approval과 operations signer가 구성된 경우에만 후보 트래픽을 열며, signed SLO 위반은 stable-only 전환, 후보 quarantine, Failure Capsule을 durable exactly-once 경로로 연결합니다. App Server는 bounded multi-shard supervisor를 사용하지만 이 저장소에서 실제 계정 검증을 완료한 상한과 미검증 상한은 아래 배포 경계에 구분해 기록합니다.
 
 ## 개발 및 검증
 
@@ -371,10 +382,10 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 
 ### 검증 상태와 배포 경계
 
-- 자동 테스트와 deterministic E2E는 mock backend 또는 로컬 fake App Server 프로세스를 사용합니다. 실제 ChatGPT 계정·모델 품질·과금 경로의 live 검증으로 해석하면 안 됩니다.
-- 논리 조직은 14~256명으로 산정할 수 있고 실제 호출 동시성과 분리되어 있지만, 실제 계정에서 128/256 동시 stdio soak를 수행하지 않았습니다.
-- 외부 Tool Broker, 역할별 격리 worktree, Single Committer, 실제 shell/test G1 receipt, Shadow/Canary traffic과 자동 rollback E2E는 아직 구현 완료 범위가 아닙니다.
-- 강한 단일 모델, 기존 Champion, 새 Challenger의 matched-pair 품질 비교를 수행하지 않았으므로 우수성을 주장하지 않습니다.
+- 자동 테스트와 deterministic E2E는 mock backend 또는 로컬 fake App Server 프로세스를 사용합니다. 별도로 명시적 계정 지문·만료·호출·예산 승인을 적용한 실제 ChatGPT 계정 shard soak는 1→2→4→8→16→32 단계까지 통과했습니다. 원문 계정 식별자와 인증정보는 보고서에 저장하지 않습니다.
+- 논리 조직은 14~256명으로 산정할 수 있고 실제 호출 동시성과 분리됩니다. 이 호스트에서는 지연과 메모리 headroom을 근거로 64/128/256 live 단계를 실행하지 않았으므로 해당 용량을 주장하지 않습니다.
+- read/search Host Tool Broker, 프로세스 격리 코딩 pipeline + Single Committer E2E, 별도 protected evaluator process, durable Shadow/Canary 자동 rollback control loop가 구현되어 있습니다. 코딩은 기본 Swarm write 권한이 아니며, 배포 후보 트래픽은 trusted signer 설정이 없으면 fail-closed입니다.
+- 실제 연구 원출처 E2E와 강한 단일 모델·기존 Champion·새 Challenger의 matched-pair 품질 비교는 수행하지 않았으므로 품질 우수성을 주장하지 않습니다.
 
 더 자세한 설계와 불변식은 [docs/ARCHITECTURE.ko.md](docs/ARCHITECTURE.ko.md)를 참고하세요.
 

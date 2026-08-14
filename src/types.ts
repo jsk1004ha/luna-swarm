@@ -197,6 +197,8 @@ export interface ValidationVote {
 export interface TaskRecord extends TaskSpec {
   status: TaskStatus;
   attempts: number;
+  /** Immutable Host Tool Broker receipt artifacts collected across this task attempt. */
+  hostToolReceiptArtifactIds?: string[];
   validationRound: number;
   leaseId?: string;
   threadId?: string;
@@ -208,6 +210,17 @@ export interface TaskRecord extends TaskSpec {
   completedAt?: string;
   /** Immutable Evolution identity for the current execution attempt. */
   evolution?: EvolutionAttemptRecord;
+  /** Durable user-visible Shadow/Canary selection for this task execution chain. */
+  deployment?: {
+    schemaVersion: 1;
+    mode: "shadow" | "canary" | "stable_only";
+    selection: "champion" | "candidate";
+    bundleId: string;
+    bundleHash: string;
+    rolloutId?: string;
+    rolloutRevision?: number;
+    rolloutGeneration?: number;
+  };
 }
 
 export interface SynthesisPacket {
@@ -319,6 +332,11 @@ export interface SwarmConfig {
     evaluatorVersion: string;
     publicKeyPem: string;
     benchmarkSuites: Record<string, string>;
+  }>;
+  /** Public trust roots for rollout evidence and runtime routing authorization. */
+  evolutionRolloutAuthorities?: Record<string, {
+    publicKeyPem: string;
+    authority: "independent_evaluator" | "operations";
   }>;
   maxConcurrency: number;
   /** Independent Codex App Server transport processes. Logical roster size is unrelated. */

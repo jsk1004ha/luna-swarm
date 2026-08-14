@@ -6,9 +6,12 @@ import type { AttemptIdentity, RunBundlePin } from "../evolution/domain/bundle.j
 
 export type AgentPolicyErrorCode =
   | "MISSING_EFFECTIVE_POLICY"
+  | "MISSING_HOST_TOOL_SESSION"
+  | "HOST_TOOL_BINDING_MISMATCH"
   | "POLICY_CONTRACT_MISMATCH"
   | "UNSUPPORTED_TOOL_CAPABILITY"
   | "UNSUPPORTED_WRITE_CAPABILITY"
+  | "DEPLOYMENT_SIDE_EFFECT_POLICY_MISMATCH"
   | "UNENFORCEABLE_NETWORK_SCOPE"
   | "UNENFORCEABLE_READ_SCOPE";
 
@@ -21,6 +24,32 @@ export class AgentPolicyError extends Error {
     super(message);
     this.name = "AgentPolicyError";
   }
+}
+
+export interface HostToolSpec {
+  type: "function";
+  name: string;
+  description: string;
+  inputSchema: JsonValue;
+}
+
+export interface HostToolCall {
+  threadId: string;
+  turnId: string;
+  callId: string;
+  tool: string;
+  arguments: JsonValue;
+}
+
+export interface HostToolInvocationResult {
+  content: JsonValue | string;
+  receipt?: unknown;
+}
+
+/** A host-owned, single-turn binding that is never rendered into the prompt. */
+export interface HostToolSession {
+  tools: readonly HostToolSpec[];
+  invoke(call: HostToolCall): Promise<HostToolInvocationResult>;
 }
 
 export interface AgentRequest {
@@ -38,6 +67,8 @@ export interface AgentRequest {
   effectiveToolPolicy?: NormalizedToolPolicy;
   /** Immutable run-level bundle snapshot whose verified components authorize execution behavior. */
   executionBundlePin?: RunBundlePin;
+  /** Host-enforced deployment boundary. Shadow candidates are always read-only with network disabled. */
+  deploymentSideEffectPolicy?: "normal" | "read_only_network_off";
   /** Exact declarative prompt module loaded from the pinned Bundle. */
   executionPromptModule?: {
     schemaVersion: 1;
@@ -62,6 +93,7 @@ export interface AgentRequest {
   prompt: string;
   outputSchema?: JsonValue;
   reasoningEffort: "low" | "medium" | "high" | "xhigh";
+  hostToolSession?: HostToolSession;
   data?: unknown;
 }
 
@@ -74,6 +106,10 @@ export interface AgentResponse {
   queueWaitMs?: number;
   /** Actual backend calls made for this logical request, including retries. */
   modelTurns?: number;
+  /** Actual monetary cost observed by the backend for this logical request. Never estimated by the orchestrator. */
+  costUsd?: number;
+  /** Immutable, host-only receipts collected from successful dynamic tool calls. */
+  hostToolReceipts?: readonly JsonValue[];
 }
 
 export interface BackendInfo {

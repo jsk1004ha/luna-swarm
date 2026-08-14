@@ -16,6 +16,7 @@ interface PendingRequest {
 }
 
 type NotificationListener = (method: string, params: RpcObject) => void;
+type ServerRequestHandler = (params: RpcObject) => Promise<unknown> | unknown;
 
 export interface AppServerClientOptions {
   codexPath?: string;
@@ -27,6 +28,8 @@ export interface AppServerClientOptions {
   writerMaxMessageBytes?: number;
   writerMaxQueueBytes?: number;
   writerMaxQueueMessages?: number;
+  /** Enables protocol fields explicitly marked experimental, such as dynamic host tools. */
+  experimentalApi?: boolean;
 }
 
 export interface RpcRequestOptions<T> {
@@ -189,6 +192,7 @@ export class AppServerClient {
   private readonly pending = new Map<RpcId, PendingRequest>();
   private readonly threadListeners = new Map<string, Set<NotificationListener>>();
   private readonly fatalListeners = new Set<(error: Error) => void>();
+  private readonly serverRequestHandlers = new Map<string, ServerRequestHandler>();
   private startPromise: Promise<void> | undefined;
   private writer: BoundedStdioWriter | undefined;
   private nextId = 1;
@@ -267,7 +271,7 @@ export class AppServerClient {
       await this.request("initialize", {
         clientInfo: { name: "luna-swarm", title: "Luna Swarm", version: "0.1.0" },
         capabilities: {
-          experimentalApi: false,
+          experimentalApi: this.options.experimentalApi === true,
           requestAttestation: false,
           optOutNotificationMethods: [],
         },
@@ -372,6 +376,19 @@ export class AppServerClient {
     return () => this.fatalListeners.delete(listener);
   }
 
+  onServerRequest(method: string, handler: ServerRequestHandler): () => void {
+    if (this.closed) throw new Error("App server is closed");
+    if (this.serverRequestHandlers.has(method)) {
+      throw new Error(`Server request handler already registered: ${method}`);
+    }
+    this.serverRequestHandlers.set(method, handler);
+    return () => {
+      if (this.serverRequestHandlers.get(method) === handler) {
+        this.serverRequestHandlers.delete(method);
+      }
+    };
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -379,6 +396,7 @@ export class AppServerClient {
     this.child = undefined;
     this.writer?.close();
     this.writer = undefined;
+    this.serverRequestHandlers.clear();
     this.failAll(new Error("App server closed"));
     if (!child || child.exitCode !== null) return;
     child.kill("SIGTERM");
@@ -431,7 +449,7 @@ export class AppServerClient {
     }
 
     if (id !== undefined && typeof message.method === "string") {
-      this.handleServerRequest(id, message.method, (message.params ?? {}) as RpcObject);
+      this.handleServerRequest(child, id, message.method, (message.params ?? {}) as RpcObject);
       return;
     }
     if (typeof message.method === "string") {
@@ -444,7 +462,12 @@ export class AppServerClient {
     }
   }
 
-  private handleServerRequest(id: RpcId, method: string, _params: RpcObject): void {
+  private handleServerRequest(
+    child: ChildProcessWithoutNullStreams,
+    id: RpcId,
+    method: string,
+    params: RpcObject,
+  ): void {
     if (
       method === "item/commandExecution/requestApproval" ||
       method === "item/fileChange/requestApproval"
@@ -458,6 +481,23 @@ export class AppServerClient {
     }
     if (method === "applyPatchApproval" || method === "execCommandApproval") {
       this.write({ id, result: { decision: "denied" } });
+      return;
+    }
+    const handler = this.serverRequestHandlers.get(method);
+    if (handler) {
+      void Promise.resolve()
+        .then(() => handler(params))
+        .then(
+          (result) => {
+            if (!this.closed && this.child === child) this.write({ id, result });
+          },
+          () => {
+            if (!this.closed && this.child === child) {
+              this.write({ id, error: { code: -32000, message: "Host request rejected" } });
+            }
+          },
+        )
+        .catch(() => undefined);
       return;
     }
     this.write({
@@ -494,6 +534,7 @@ export class AppServerClient {
     this.writer = undefined;
     this.child = undefined;
     this.startPromise = undefined;
+    this.serverRequestHandlers.clear();
     this.failAll(error);
     for (const listener of this.fatalListeners) listener(error);
   }
