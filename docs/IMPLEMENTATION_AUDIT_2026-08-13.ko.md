@@ -7,10 +7,11 @@
 - 사용자 지정 감사 기준: `adbbfcafe7e36d11731aef2965f7f209b2500c0a`
 - 작업 시작 시 최신 `origin/main`: `398637d0f8ba37b3130801fa066bc61895795fae`
 - 작업 시작 시 최신 GitHub Actions: [31696979979](https://github.com/jsk1004ha/luna-swarm/actions/runs/31696979979), `398637d`, 실패
-- 최종 SHA: 이 보고서를 포함하는 로컬 `main` 커밋. 정확한 SHA는 최종 인계에서 `git rev-parse HEAD` 결과로 기록합니다.
+- 최종 검증 대상 구현 SHA: `e38319ca87054f103a1232793a4fc395d0858884`
+- 최종 GitHub Actions: [31772937090](https://github.com/jsk1004ha/luna-swarm/actions/runs/31772937090), Node `22.x`와 `20.19.0` 모두 성공
 - 환경: Windows 11 `10.0.26200`, PowerShell `7.6.3`, Node `22.16.0`, npm `10.9.2`, Git `2.50.1.windows.1`, Codex CLI `0.146.0`
 
-기준선 clean snapshot에서는 `npm ci`, `npm run check`, `npm run build`, `npm audit`가 통과했고, `npm test`는 서버 `271/272`에서 실패했습니다. 최신 원격 CI도 비-Git 임시 workspace가 ambient `GITHUB_SHA`를 source identity로 오인해 `legacy_unpinned` 대신 `pinned`가 된 동일 계열 회귀로 실패했습니다.
+기준선 clean snapshot에서는 `npm ci`, `npm run check`, `npm run build`, `npm audit`가 통과했고, `npm test`는 서버 `271/272`에서 실패했습니다. 수정 후 원격 CI는 Node `22.x`와 `20.19.0`에서 typecheck, 전체 테스트, build, production audit, package 검증을 모두 통과했습니다.
 
 ## 2. 수정한 P0/P1/P2 항목
 
@@ -120,7 +121,7 @@
 | security-sensitive focused suite | PASS — `147` 중 `146` pass + host 권한 skip `1` |
 | final independent architecture/code review | APPROVE — CRITICAL `0`, HIGH `0` |
 
-GitHub Actions는 이 문서 갱신 시점에는 새 커밋 push 전입니다. 로컬 검증과 별개로 push 뒤 Node matrix 결과를 확인해야 합니다.
+GitHub Actions [31772937090](https://github.com/jsk1004ha/luna-swarm/actions/runs/31772937090)은 Node `22.x`와 `20.19.0` 두 잡에서 typecheck, 전체 테스트, build, production audit, package 검증까지 모두 통과했습니다.
 
 ## 7. 실제 live 검증과 mock 검증의 구분
 
@@ -156,7 +157,7 @@ Deterministic mock E2E:
 
 ## 9. 남아 있는 미검증 영역
 
-- 최신 GitHub Actions green 및 로컬 Node 20.19 실제 실행
+- 로컬 Windows Node 20.19 직접 실행(원격 Linux Node 20.19 matrix는 green)
 - 더 큰 호스트에서 실계정 64/128/256 shard soak
 - 쓰기·shell·network Tool Broker와 OS credential vault
 - 코딩 pipeline의 일반 Work Order 자동 라우팅(현재는 별도 opt-in facade)
@@ -172,13 +173,12 @@ Deterministic mock E2E:
 
 **NO-GO**
 
-요청된 다섯 실행 slice는 구현되었고 live shard soak도 32단계까지 통과했습니다. 최종 독립 보안 재검토에서 CRITICAL/HIGH가 `0`이므로 로컬 merge-readiness는 승인합니다. 다만 전체 제품 출시는 최신 원격 CI, 더 큰 호스트의 64/128/256 soak, 실제 연구 E2E, production candidate 장시간 Canary, matched-pair benchmark가 남아 있어 `NO-GO`를 유지합니다.
+요청된 다섯 실행 slice는 구현되었고 live shard soak도 32단계까지 통과했으며 최신 원격 Node matrix CI도 green입니다. 최종 독립 보안 재검토에서 CRITICAL/HIGH가 `0`이므로 코드 merge-readiness는 승인합니다. 다만 전체 제품 출시는 더 큰 호스트의 64/128/256 soak, 실제 연구 E2E, production candidate 장시간 Canary, matched-pair benchmark가 남아 있어 `NO-GO`를 유지합니다.
 
 ## 11. 다음 우선순위
 
-1. 로컬 main 커밋을 원격에 올려 Node matrix CI를 green으로 확인합니다.
-2. 더 큰 전용 호스트와 새 계정·예산 승인으로 64→128→256 live soak를 계속합니다.
-3. CodingPipeline을 명시적 Work Order/운영 정책에 연결하되 일반 Swarm read-only 기본값은 유지합니다.
-4. 실제 production candidate로 장시간 Shadow→Canary→operator promotion/rollback drill을 수행합니다.
-5. 실제 연구 retrieval/snapshot/citation E2E와 matched-pair 단일 모델/Champion/Challenger benchmark를 추가합니다.
-6. plugin department runtime allocation, remaining Evolution component loader, coverage/mutation/seeded chaos 보고서를 추가합니다.
+1. 더 큰 전용 호스트와 새 계정·예산 승인으로 64→128→256 live soak를 계속합니다.
+2. CodingPipeline을 명시적 Work Order/운영 정책에 연결하되 일반 Swarm read-only 기본값은 유지합니다.
+3. 실제 production candidate로 장시간 Shadow→Canary→operator promotion/rollback drill을 수행합니다.
+4. 실제 연구 retrieval/snapshot/citation E2E와 matched-pair 단일 모델/Champion/Challenger benchmark를 추가합니다.
+5. plugin department runtime allocation, remaining Evolution component loader, coverage/mutation/seeded chaos 보고서를 추가합니다.
