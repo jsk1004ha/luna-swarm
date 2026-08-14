@@ -1,8 +1,23 @@
 # Luna Swarm
 
+[![CI](https://github.com/jsk1004ha/luna-swarm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jsk1004ha/luna-swarm/actions/workflows/ci.yml?query=branch%3Amain)
+
 ChatGPT 로그인으로 `gpt-5.6-luna`를 사용하는 **수직 조직형 다중 에이전트 오케스트레이터**입니다. 동시 호출 100은 하드 캡이 아닙니다. 기본 상한은 128, 설정 가능 상한은 1,024이며, 처음에는 8개만 실행해 계정과 서버 상태에 맞춰 적응합니다.
 
 핵심은 “같은 질문을 100번”이 아닙니다. 목표를 DAG로 나누고, 서로 다른 책임과 정보 경계를 가진 조직이 기획 → 실행 → 부서 검토 → 독립 감사 → 계층 병합 → 최종 심의를 수행합니다.
+
+## 현재 상태
+
+| 경계 | 현재 검증 상태 |
+|---|---|
+| `main` CI | Node.js 20.19.0·22.x에서 타입 검사, 전체 테스트, 빌드, production dependency audit, 패키지 검증 통과 |
+| Host 도구 | HMAC capability와 durable replay ledger를 사용하는 `read`/`search` 전용 Host Tool Broker가 App Server 호출 경계에 연결됨 |
+| 코딩 | opt-in `CodingPipeline`이 Node 22 permission process, disposable clone, protected check, 독립 audit, Single Committer CAS를 실제 Git E2E로 검증함. 일반 Work Order 자동 라우팅은 아직 열지 않음 |
+| 평가·배포 | hash-pinned 별도 evaluator process와 protected benchmark runner, signed Shadow/Canary SLO, stable-only 자동 rollback·후보 quarantine·Failure Capsule 경로 구현 |
+| 실계정 용량 | 계정 지문·만료·호출·예산 승인에 결박한 1→2→4→8→16→32 shard soak 통과. 64/128/256은 이 호스트에서 실행하지 않았으므로 지원을 주장하지 않음 |
+| 출시 판정 | 로컬 코드 병합 준비는 완료했지만, 더 큰 live soak·실제 연구 E2E·장시간 production canary·matched-pair 품질 benchmark가 남아 전체 제품 출시는 **NO-GO** |
+
+정확한 명령, 테스트 수치, live 측정치와 남은 위험은 [구현 감사 보고서](docs/IMPLEMENTATION_AUDIT_2026-08-13.ko.md)에 기록합니다.
 
 ## 5분 시작
 
@@ -346,7 +361,7 @@ npm test
 npm run build
 ```
 
-GitHub Actions도 지원되는 Node.js 22에서 같은 순서로 clean install, 타입 검사, 테스트, 빌드를 실행합니다.
+GitHub Actions는 Node.js 20.19.0과 22.x에서 clean install, 타입 검사, 전체 테스트, 빌드, production dependency audit와 package dry-run을 실행합니다.
 
 UI만 개발할 때는 터미널 두 개에서 서버와 Vite를 나눠 실행할 수 있습니다.
 
