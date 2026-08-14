@@ -8,7 +8,7 @@ import type {
 } from "./types.js";
 
 const strings: JsonValue = { type: "array", items: { type: "string" } };
-const optionalId: JsonValue = { type: "string" };
+const nullableString: JsonValue = { type: ["string", "null"] };
 
 export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
   type: "object",
@@ -26,11 +26,11 @@ export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
       maxItems: 128,
       items: {
         type: "object", additionalProperties: false,
-        required: ["statement", "classification", "falsification"],
+        required: ["id", "statement", "classification", "evidence", "falsification"],
         properties: {
-          id: optionalId, statement: { type: "string" },
+          id: nullableString, statement: { type: "string" },
           classification: { type: "string", enum: ["fact", "inference", "preference", "constraint"] },
-          evidence: { type: "string" }, falsification: { type: "string" },
+          evidence: nullableString, falsification: { type: "string" },
         },
       },
     },
@@ -47,28 +47,28 @@ export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
     requirementMutations: {
       type: "array",
       maxItems: 1024,
-      items: { type: "object", additionalProperties: false, required: ["requirementId", "mutation", "acceptanceTestIds"], properties: { id: optionalId, requirementId: { type: "string" }, mutation: { type: "string" }, acceptanceTestIds: strings } },
+      items: { type: "object", additionalProperties: false, required: ["id", "requirementId", "mutation", "acceptanceTestIds"], properties: { id: nullableString, requirementId: { type: "string" }, mutation: { type: "string" }, acceptanceTestIds: strings } },
     },
     ambiguities: {
       type: "array",
       maxItems: 128,
-      items: { type: "object", additionalProperties: false, required: ["statement", "alternatives"], properties: { id: optionalId, statement: { type: "string" }, alternatives: strings, resolution: { type: "string" } } },
+      items: { type: "object", additionalProperties: false, required: ["id", "statement", "alternatives", "resolution"], properties: { id: nullableString, statement: { type: "string" }, alternatives: strings, resolution: nullableString } },
     },
     conflicts: {
       type: "array",
       maxItems: 128,
-      items: { type: "object", additionalProperties: false, required: ["statement", "requirementIds"], properties: { id: optionalId, statement: { type: "string" }, requirementIds: strings, resolution: { type: "string" } } },
+      items: { type: "object", additionalProperties: false, required: ["id", "statement", "requirementIds", "resolution"], properties: { id: nullableString, statement: { type: "string" }, requirementIds: strings, resolution: nullableString } },
     },
     requiredBoundaryKinds: { type: "array", maxItems: 128, items: { type: "string" } },
     boundaryConditions: {
       type: "array",
       maxItems: 256,
-      items: { type: "object", additionalProperties: false, required: ["kind", "statement"], properties: { id: optionalId, kind: { type: "string" }, statement: { type: "string" } } },
+      items: { type: "object", additionalProperties: false, required: ["id", "kind", "statement"], properties: { id: nullableString, kind: { type: "string" }, statement: { type: "string" } } },
     },
     risks: {
       type: "array",
       maxItems: 128,
-      items: { type: "object", additionalProperties: false, required: ["failureMode", "falsification", "ownerTeam"], properties: { id: optionalId, failureMode: { type: "string" }, falsification: { type: "string" }, ownerTeam: { type: "string" }, mitigation: { type: "string" } } },
+      items: { type: "object", additionalProperties: false, required: ["id", "failureMode", "falsification", "ownerTeam", "mitigation"], properties: { id: nullableString, failureMode: { type: "string" }, falsification: { type: "string" }, ownerTeam: { type: "string" }, mitigation: nullableString } },
     },
   },
 };

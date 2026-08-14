@@ -111,6 +111,24 @@ test("content-derived IDs are stable and collisions fail closed", () => {
   assert.throws(() => createMissionPreflight(first), /duplicate generated or declared risk ID/);
 });
 
+test("strict structured-output nulls are normalized as absent optional values", () => {
+  const input = validInput();
+  input.assumptions[0] = { ...input.assumptions[0]!, id: null, evidence: null };
+  input.requirementMutations[0] = { ...input.requirementMutations[0]!, id: null };
+  input.ambiguities[0] = { ...input.ambiguities[0]!, id: null, resolution: null };
+  input.conflicts[0] = { ...input.conflicts[0]!, id: null, resolution: null };
+  input.boundaryConditions[0] = { ...input.boundaryConditions[0]!, id: null };
+  input.risks[0] = { ...input.risks[0]!, id: null, mitigation: null };
+
+  assert.deepEqual(validateMissionPreflightInput(input), []);
+  const report = createMissionPreflight(input);
+  assert.match(report.assumptions[0]?.id ?? "", /^ASM-/);
+  assert.equal(report.assumptions[0]?.evidence, undefined);
+  assert.equal(report.findings.find((finding) => finding.kind === "ambiguity")?.resolved, false);
+  assert.equal(report.findings.find((finding) => finding.kind === "conflict")?.resolved, false);
+  assert.equal(report.risks[0]?.mitigation, undefined);
+});
+
 test("preflight output collections are resource bounded", () => {
   const input = validInput();
   input.assumptions = Array.from({ length: 129 }, (_, index) => ({

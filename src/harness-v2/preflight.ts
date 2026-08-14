@@ -3,10 +3,10 @@ export const MISSION_PREFLIGHT_SCHEMA_VERSION = 1 as const;
 export type AssumptionClassification = "fact" | "inference" | "preference" | "constraint";
 
 export interface PreflightAssumptionInput {
-  id?: string;
+  id?: string | null;
   statement: string;
   classification: AssumptionClassification;
-  evidence?: string;
+  evidence?: string | null;
   falsification: string;
 }
 
@@ -22,38 +22,38 @@ export interface PreflightAcceptanceTestInput {
 }
 
 export interface RequirementMutationInput {
-  id?: string;
+  id?: string | null;
   requirementId: string;
   mutation: string;
   acceptanceTestIds: string[];
 }
 
 export interface PreflightAmbiguityInput {
-  id?: string;
+  id?: string | null;
   statement: string;
   alternatives: string[];
-  resolution?: string;
+  resolution?: string | null;
 }
 
 export interface PreflightConflictInput {
-  id?: string;
+  id?: string | null;
   statement: string;
   requirementIds: string[];
-  resolution?: string;
+  resolution?: string | null;
 }
 
 export interface BoundaryConditionInput {
-  id?: string;
+  id?: string | null;
   kind: string;
   statement: string;
 }
 
 export interface PreMortemRiskInput {
-  id?: string;
+  id?: string | null;
   failureMode: string;
   falsification: string;
   ownerTeam: string;
-  mitigation?: string;
+  mitigation?: string | null;
 }
 
 export interface MissionPreflightInput {
@@ -70,8 +70,12 @@ export interface MissionPreflightInput {
   risks: PreMortemRiskInput[];
 }
 
-export interface PreflightAssumption extends Omit<PreflightAssumptionInput, "id"> {
+export interface PreflightAssumption {
   id: string;
+  statement: string;
+  classification: AssumptionClassification;
+  evidence?: string;
+  falsification: string;
 }
 
 export interface PreflightFinding {
@@ -98,8 +102,12 @@ export interface RequirementSensitivity {
   mutationSensitive: boolean;
 }
 
-export interface PreMortemRisk extends Omit<PreMortemRiskInput, "id"> {
+export interface PreMortemRisk {
   id: string;
+  failureMode: string;
+  falsification: string;
+  ownerTeam: string;
+  mitigation?: string;
 }
 
 export interface MissionPreflightReport {
@@ -395,17 +403,17 @@ function normalize(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
 
-function normalizedOptional(value: string | undefined): string | undefined {
-  return value === undefined ? undefined : normalize(value);
+function normalizedOptional(value: string | null | undefined): string | undefined {
+  return value === undefined || value === null ? undefined : normalize(value);
 }
 
 function normalizedSorted(values: readonly string[]): string[] {
   return values.map(normalize).sort();
 }
 
-function copyOptional<T extends object, K extends keyof T>(value: T, key: K): Pick<T, K> | Record<string, never> {
+function copyOptional<T extends object, K extends keyof T>(value: T, key: K): { [P in K]?: string } {
   const item = value[key];
-  return typeof item === "string" ? { [key]: normalize(item) } as Pick<T, K> : {};
+  return typeof item === "string" ? { [key]: normalize(item) } as { [P in K]?: string } : {};
 }
 
 function byId<T extends { id: string }>(left: T, right: T): number {
@@ -425,7 +433,7 @@ function requireText(value: unknown, name: string, errors: string[]): void {
 }
 
 function optionalText(value: unknown, name: string, errors: string[]): void {
-  if (value !== undefined && (typeof value !== "string" || normalize(value).length === 0)) {
+  if (value !== undefined && value !== null && (typeof value !== "string" || normalize(value).length === 0)) {
     errors.push(`${name} must be non-empty when provided`);
   }
 }
@@ -456,7 +464,7 @@ function validateId(value: unknown, name: string, ids: Set<string>, errors: stri
 }
 
 function requireOptionalId(value: unknown, name: string, ids: Set<string>, errors: string[]): void {
-  if (value === undefined) return;
+  if (value === undefined || value === null) return;
   validateId(value, name, ids, errors);
 }
 
