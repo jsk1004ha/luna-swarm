@@ -255,7 +255,7 @@ test("verified evaluator entry, loader, and dependency closure execute after all
   }
 });
 
-test("runner materialization rejects hardlinks, redirected parents, and oversized integrity files", async (t) => {
+test("runner materialization copies pinned hardlinks and rejects redirected parents and oversized integrity files", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "luna-evaluator-materialize-"));
   try {
     await t.test("hardlink", async () => {
@@ -280,13 +280,14 @@ test("runner materialization rejects hardlinks, redirected parents, and oversize
       await link(source, alias);
       const executableSha256 = await computeProtectedExecutableDigest(process.execPath);
       const sourceSha256 = await computeProtectedExecutableDigest(source);
-      await assert.rejects(() => materializeAllowlistedRunner({
+      const pinnedIntegrity = await materializeAllowlistedRunner({
         rootPath: directory,
         executablePath: process.execPath,
         executableSha256,
         arguments: [source],
         integrityFiles: [{ path: source, sha256: sourceSha256 }],
-      }), /allowlist rejected/);
+      });
+      await pinnedIntegrity.cleanup();
     });
     await t.test("redirected parent", async (context) => {
       const target = join(directory, "target");

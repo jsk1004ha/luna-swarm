@@ -70,7 +70,7 @@ export async function materializeAllowlistedRunner(input: RunnerMaterializationI
     const replacements = new Map<string, string>();
     let materializedExecutable = "";
     for (const [index, source] of sources.entries()) {
-      const bytes = await readStableAllowlistedFile(source.path, source.sha256, source.limit, !source.executable);
+      const bytes = await readStableAllowlistedFile(source.path, source.sha256, source.limit);
       total += bytes.length;
       if (total > MAX_MATERIALIZED_BYTES) throw new Error("runner allowlist size rejected");
       const destination = index === 0
@@ -120,7 +120,6 @@ async function readStableAllowlistedFile(
   path: string,
   expected: Sha256,
   maxBytes: number,
-  requireSingleLink: boolean,
 ): Promise<Buffer> {
   if (!isAbsolute(path)) throw new Error("runner allowlist rejected");
   const absolute = resolve(path);
@@ -129,8 +128,10 @@ async function readStableAllowlistedFile(
   if (
     !before.isFile() ||
     before.isSymbolicLink() ||
+    // npm and hosted tool caches may expose pinned files through hardlinks.
+    // The source is never executed in place: a stable handle is hashed and its
+    // exact bytes are copied into a single-link private destination below.
     before.nlink < 1n ||
-    (requireSingleLink && before.nlink !== 1n) ||
     before.size < 1n ||
     before.size > BigInt(maxBytes)
   ) {
