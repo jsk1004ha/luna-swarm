@@ -132,7 +132,7 @@ luna-swarm evolve rollback <workload-class> \
   --reason <text>
 ```
 
-`evolve bootstrap`은 빈 workload pointer에만 기준 Bundle을 설치합니다. 경쟁 프로세스가 동시에 실행되어도 generation 1의 한 pointer 집합으로 수렴하며 기존 Stable을 덮지 않습니다.
+`evolve bootstrap`은 빈 workload pointer에 기준 Bundle을 설치합니다. 새 바이너리의 source identity가 바뀌면, 정확한 감사 이력이 `system-bootstrap` 또는 이전 `system-baseline-upgrade`인 시스템 기준 Pointer만 새 기준 Bundle로 generation-CAS 전진시킵니다. 수동 평가로 승격한 Stable Pointer는 자동으로 덮지 않고 실패 폐쇄하며, 기존 run pin과 과거 Bundle blob은 그대로 보존합니다.
 
 ## 저장 구조
 

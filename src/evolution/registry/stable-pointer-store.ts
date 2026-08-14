@@ -24,7 +24,7 @@ interface PointerState {
 }
 
 export interface StablePointerAuditEntry {
-  action: "promote" | "rollback";
+  action: "promote" | "baseline_upgrade" | "rollback";
   workloadClass: string;
   fromBundleId: string | null;
   toBundleId: string;
@@ -50,6 +50,12 @@ export interface PromotionRequest {
 export interface RollbackRequest {
   actor: string;
   reason: string;
+  activatedAt?: string;
+}
+
+export interface ShippedBaselineUpgradeRequest {
+  workloadClass: string;
+  expectedGeneration: number;
   activatedAt?: string;
 }
 
@@ -155,6 +161,84 @@ export class StablePointerStore {
         reason: request.reason,
         evaluationReceiptId,
         at: pointer.activatedAt,
+      });
+      await this.write(state);
+      return immutable(pointer);
+    });
+  }
+
+  /**
+   * Advances a pointer created by the trusted shipped-baseline path to the
+   * baseline embedded in the current binary. This is not a candidate
+   * promotion: evaluated/manual pointers are never eligible for this path.
+   */
+  async upgradeShippedBaseline(
+    request: ShippedBaselineUpgradeRequest,
+  ): Promise<Readonly<StablePointer>> {
+    requireWorkload(request.workloadClass);
+    return this.withLock(async () => {
+      const state = await this.loadUnlocked();
+      const current = state.pointers[request.workloadClass];
+      if (!current || current.generation !== request.expectedGeneration) {
+        throw new StablePointerConflictError(
+          `Expected generation ${request.expectedGeneration} but found ${String(current?.generation ?? null)}`,
+        );
+      }
+      if (!this.bootstrapAuthority) throw new Error("Shipped baseline upgrade requires runtime bootstrap authority");
+      if (current.bundleId === this.bootstrapAuthority.bundleId && current.bundleHash === this.bootstrapAuthority.bundleHash) {
+        return immutable(current);
+      }
+
+      const currentBundle = await this.bundleStore.read(current.bundleId);
+      if (currentBundle.bundleHash !== current.bundleHash) throw new Error("Evolution Stable Pointer hash mismatch");
+      const currentAudit = [...state.audit].reverse().find((entry) =>
+        entry.workloadClass === request.workloadClass &&
+        entry.generation === current.generation &&
+        entry.toBundleId === current.bundleId
+      );
+      const trustedBaselineAudit = currentAudit !== undefined &&
+        currentAudit.evaluationReceiptId === null &&
+        (
+          (currentAudit.action === "promote" && currentAudit.actor === "system-bootstrap") ||
+          (currentAudit.action === "baseline_upgrade" && currentAudit.actor === "system-baseline-upgrade")
+        );
+      if (!trustedBaselineAudit || currentBundle.status !== "stable" || currentBundle.parentBundleIds.length !== 0) {
+        throw new Error("Current Stable Pointer is not an upgradeable shipped baseline");
+      }
+
+      const nextBundle = await this.bundleStore.read(this.bootstrapAuthority.bundleId);
+      if (nextBundle.bundleHash !== this.bootstrapAuthority.bundleHash) {
+        throw new Error("Runtime-authorized shipped baseline hash mismatch");
+      }
+      if (!nextBundle.workloadClasses.includes(request.workloadClass)) {
+        throw new Error(`Bundle ${nextBundle.bundleId} does not support ${request.workloadClass}`);
+      }
+      if (nextBundle.status !== "stable" || nextBundle.parentBundleIds.length !== 0) {
+        throw new Error("Shipped baseline upgrade requires a root bundle with stable status");
+      }
+      if (state.quarantinedBundleIds[nextBundle.bundleId]) {
+        throw new QuarantinedBundleError(`Bundle ${nextBundle.bundleId} is quarantined and cannot be activated`);
+      }
+
+      const activatedAt = request.activatedAt ?? this.now().toISOString();
+      const pointer: StablePointer = {
+        workloadClass: request.workloadClass,
+        bundleId: nextBundle.bundleId,
+        bundleHash: nextBundle.bundleHash,
+        generation: current.generation + 1,
+        activatedAt,
+      };
+      state.pointers[request.workloadClass] = pointer;
+      state.audit.push({
+        action: "baseline_upgrade",
+        workloadClass: request.workloadClass,
+        fromBundleId: current.bundleId,
+        toBundleId: pointer.bundleId,
+        generation: pointer.generation,
+        actor: "system-baseline-upgrade",
+        reason: "Activate the runtime-authorized shipped baseline for the current binary",
+        evaluationReceiptId: null,
+        at: activatedAt,
       });
       await this.write(state);
       return immutable(pointer);

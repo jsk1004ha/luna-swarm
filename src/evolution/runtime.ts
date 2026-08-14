@@ -253,7 +253,21 @@ export async function initializeEvolutionRuntime(
       }
     }
     if (!pointer) throw new Error(`Evolution Stable Pointer bootstrap did not converge for ${workloadClass}`);
-    const bundle = await bundleStore.read(pointer.bundleId);
+    let bundle = await bundleStore.read(pointer.bundleId);
+    if (bundle.sourceCommit !== sourceCommitIdentity(input)) {
+      try {
+        pointer = await pointerStore.upgradeShippedBaseline({
+          workloadClass,
+          expectedGeneration: pointer.generation,
+          activatedAt: pinnedAt,
+        });
+      } catch (error) {
+        if (!(error instanceof StablePointerConflictError)) throw error;
+        pointer = await pointerStore.get(workloadClass);
+      }
+      if (!pointer) throw new Error(`Evolution Stable Pointer baseline upgrade did not converge for ${workloadClass}`);
+      bundle = await bundleStore.read(pointer.bundleId);
+    }
     if (bundle.bundleHash !== pointer.bundleHash) throw new Error("Evolution Stable Pointer hash mismatch");
     const genomeHash = bundle.componentHashes.genome;
     if (!genomeHash) throw new Error("Evolution Bundle is missing its immutable genome hash");

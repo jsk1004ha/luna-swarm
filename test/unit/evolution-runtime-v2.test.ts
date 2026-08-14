@@ -169,6 +169,77 @@ test("concurrent baseline bootstrap converges to one complete workload pin set",
   assert.equal((await left.pointerStore.getAudit()).length, EVOLUTION_WORKLOAD_CLASSES.length);
 });
 
+test("a new binary source advances only the shipped baseline while preserving old run pins", async (t) => {
+  const workspace = await workspaceFixture(t);
+  const sourceA = { ...fingerprint, sourceCommit: "source-commit-a" };
+  const sourceB = { ...fingerprint, sourceCommit: "source-commit-b" };
+  const first = await initializeEvolutionRuntime(workspace, sourceA, "2026-08-13T01:00:00.000Z");
+
+  const next = await initializeEvolutionRuntime(workspace, sourceB, "2026-08-13T02:00:00.000Z");
+
+  assert.ok(Object.values(next.bundles).every((bundle) => bundle.sourceCommit === sourceB.sourceCommit));
+  assert.ok(Object.values(next.pins).every((pin) => pin.pointerGeneration === 2));
+  assert.equal((await next.pointerStore.getAudit()).length, EVOLUTION_WORKLOAD_CLASSES.length * 2);
+  await assert.rejects(
+    () => next.pointerStore.rollback(EVOLUTION_WORKLOAD_CLASSES[0], 2, {
+      actor: "release-operator",
+      reason: "old binary baselines are not valid rollback targets",
+    }),
+    /No prior stable bundle exists/,
+  );
+
+  const restored = await restoreEvolutionRuntime(workspace, sourceA, structuredClone(first.pins));
+  assert.deepEqual(restored.pins, first.pins, "an in-flight or resumed run retains its original immutable pins");
+});
+
+test("a new binary source never replaces a manually evaluated Stable Pointer", async (t) => {
+  const workspace = await workspaceFixture(t);
+  const sourceA = { ...fingerprint, sourceCommit: "source-commit-a" };
+  const sourceB = { ...fingerprint, sourceCommit: "source-commit-b" };
+  const runtime = await initializeEvolutionRuntime(workspace, sourceA, "2026-08-13T01:00:00.000Z");
+  const protectedWorkload = EVOLUTION_WORKLOAD_CLASSES[0];
+  const champion = runtime.bundles[protectedWorkload]!;
+  const { bundleHash: _hash, ...championInput } = champion;
+  const challenger = createExecutionBundle({
+    ...structuredClone(championInput),
+    bundleId: "bundle-manually-evaluated-challenger",
+    parentBundleIds: [champion.bundleId],
+    createdAt: "2026-08-13T01:30:00.000Z",
+    status: "challenger",
+  });
+  await runtime.bundleStore.publish(challenger);
+  const recordHash = canonicalSha256({ champion: champion.bundleHash, challenger: challenger.bundleHash, protectedWorkload });
+  const receipt = {
+    receiptId: `evaluation-receipt:${recordHash.slice(7, 39)}`,
+    recordHash,
+    workloadClass: protectedWorkload,
+    champion: { bundleId: champion.bundleId, bundleHash: champion.bundleHash },
+    challenger: { bundleId: challenger.bundleId, bundleHash: challenger.bundleHash },
+    scorecard: { outcome: "PROMOTABLE" },
+  } as unknown as PairedEvaluationReceipt;
+  Object.assign(runtime.pointerStore as unknown as Record<string, unknown>, {
+    evaluationStore: { read: async () => receipt },
+  });
+  await runtime.pointerStore.promote({
+    workloadClass: protectedWorkload,
+    bundleId: challenger.bundleId,
+    expectedGeneration: 1,
+    mode: "manual",
+    actor: "release-operator",
+    reason: "paired evaluation passed",
+    evaluationReceipt: { receiptId: receipt.receiptId, contentHash: receipt.recordHash },
+  });
+
+  await assert.rejects(
+    () => initializeEvolutionRuntime(workspace, sourceB, "2026-08-13T02:00:00.000Z"),
+    /not an upgradeable shipped baseline/,
+  );
+  const pointer = await runtime.pointerStore.get(protectedWorkload);
+  assert.equal(pointer?.bundleId, challenger.bundleId);
+  assert.equal(pointer?.bundleHash, challenger.bundleHash);
+  assert.equal(pointer?.generation, 2);
+});
+
 test("a mid-run manual promotion affects only the next run snapshot", async (t) => {
   const workspace = await workspaceFixture(t);
   const first = await initializeEvolutionRuntime(workspace, fingerprint, "2026-08-13T01:00:00.000Z");

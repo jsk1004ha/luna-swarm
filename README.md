@@ -219,6 +219,8 @@ npm start -- ui --workspace . --port 4310 --open
 npm start -- ui --workspace . --port 4310 --mock --open
 ```
 
+새 바이너리는 이전 바이너리가 설치한 시스템 기준 Bundle만 현재 소스에 맞는 기준 Bundle로 원자 전진시킵니다. 수동 평가로 승격한 Stable Pointer는 자동으로 덮지 않으며, 이미 실행 중인 run은 시작 시 고정한 Bundle을 계속 사용합니다.
+
 Shadow/Canary 운영 제어 루프는 trusted operations signer가 명시적으로 구성된 경우에만 켜집니다. `LUNA_SWARM_OPERATIONS_SIGNER_KEY_ID`와 `LUNA_SWARM_OPERATIONS_SIGNER_PRIVATE_KEY_FILE` 중 하나만 있거나 둘 다 없으면 후보 트래픽은 열리지 않습니다. 개인키 경로와 원문 계정 식별자는 설정 파일·실행 로그·soak 보고서에 기록하지 마세요.
 
 개발 중에는 빌드 없이 `npm run dev -- <command>`를 사용할 수 있습니다.
