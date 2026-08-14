@@ -259,6 +259,21 @@ test("runner materialization rejects hardlinks, redirected parents, and oversize
   const directory = await mkdtemp(join(tmpdir(), "luna-evaluator-materialize-"));
   try {
     await t.test("hardlink", async () => {
+      const executableSource = join(directory, "runtime.bin");
+      const executableAlias = join(directory, "runtime-alias.bin");
+      const normalIntegrityFile = join(directory, "normal-integrity.ts");
+      await writeFile(executableSource, "pinned runtime bytes\n");
+      await link(executableSource, executableAlias);
+      await writeFile(normalIntegrityFile, "process.exit(0)\n");
+      const accepted = await materializeAllowlistedRunner({
+        rootPath: directory,
+        executablePath: executableAlias,
+        executableSha256: await computeProtectedExecutableDigest(executableAlias),
+        arguments: [normalIntegrityFile],
+        integrityFiles: [{ path: normalIntegrityFile, sha256: await computeProtectedExecutableDigest(normalIntegrityFile) }],
+      });
+      await accepted.cleanup();
+
       const source = join(directory, "source.ts");
       const alias = join(directory, "alias.ts");
       await writeFile(source, "process.exit(0)\n");

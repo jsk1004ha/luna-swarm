@@ -70,7 +70,7 @@ export async function materializeAllowlistedRunner(input: RunnerMaterializationI
     const replacements = new Map<string, string>();
     let materializedExecutable = "";
     for (const [index, source] of sources.entries()) {
-      const bytes = await readStableAllowlistedFile(source.path, source.sha256, source.limit);
+      const bytes = await readStableAllowlistedFile(source.path, source.sha256, source.limit, !source.executable);
       total += bytes.length;
       if (total > MAX_MATERIALIZED_BYTES) throw new Error("runner allowlist size rejected");
       const destination = index === 0
@@ -116,12 +116,24 @@ export async function materializeAllowlistedRunner(input: RunnerMaterializationI
   }
 }
 
-async function readStableAllowlistedFile(path: string, expected: Sha256, maxBytes: number): Promise<Buffer> {
+async function readStableAllowlistedFile(
+  path: string,
+  expected: Sha256,
+  maxBytes: number,
+  requireSingleLink: boolean,
+): Promise<Buffer> {
   if (!isAbsolute(path)) throw new Error("runner allowlist rejected");
   const absolute = resolve(path);
   const parents = await captureParentIdentities(absolute);
   const before = await lstat(absolute, { bigint: true });
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.size < 1n || before.size > BigInt(maxBytes)) {
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    before.nlink < 1n ||
+    (requireSingleLink && before.nlink !== 1n) ||
+    before.size < 1n ||
+    before.size > BigInt(maxBytes)
+  ) {
     throw new Error("runner allowlist rejected");
   }
   if (resolve(await realpath(absolute)) !== absolute) throw new Error("runner allowlist rejected");

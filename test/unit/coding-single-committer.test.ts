@@ -155,7 +155,12 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   })).stdout.trim();
 }
 
-test("public coding pipeline executes the complete protected production path", { timeout: 60_000 }, async (t) => {
+test("public coding pipeline executes the complete protected production path", {
+  timeout: 60_000,
+  skip: Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) < 22
+    ? "requires the Node.js 22+ permission-model runtime"
+    : false,
+}, async (t) => {
   const repository = await mkdtemp(join(tmpdir(), "luna-coding-pipeline-"));
   t.after(() => rm(repository, { recursive: true, force: true }));
   await git(repository, "init", "-b", "main");
@@ -207,7 +212,12 @@ test("public coding pipeline executes the complete protected production path", {
   assert.deepEqual(await readdir(join(manager.stateRoot, "worktrees")), []);
 });
 
-test("coding pipeline never integrates failed checks, failed audits, or timed-out executors and always disposes", { timeout: 120_000 }, async (t) => {
+test("coding pipeline never integrates failed checks, failed audits, or timed-out executors and always disposes", {
+  timeout: 120_000,
+  skip: Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) < 22
+    ? "requires the Node.js 22+ permission-model runtime"
+    : false,
+}, async (t) => {
   const repository = await mkdtemp(join(tmpdir(), "luna-coding-pipeline-fail-"));
   t.after(() => rm(repository, { recursive: true, force: true }));
   await git(repository, "init", "-b", "main");
