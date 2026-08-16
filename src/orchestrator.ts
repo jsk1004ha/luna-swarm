@@ -28,6 +28,7 @@ import {
   finalCriticPrompt,
   finalPrompt,
   managerPrompt,
+  missionPreflightCorrectionPrompt,
   missionPreflightPrompt,
   plannerPrompt,
   teamCorporatePrompt,
@@ -555,25 +556,45 @@ export class SwarmOrchestrator {
     } else {
       const missionId = `mission:${this.state.runId}`;
       await this.event({ type: "mission_preflight_started", status: "analyzing" });
-      const response = await this.callAndRemember({
+      const requestPreflight = async (prompt: string) => this.callAndRemember({
         threadKey: "mission-preflight",
         role: "planner",
         corporateRole: "chief_of_staff",
         department: "executive",
         purpose: "mission_preflight",
         specialistHint: "requirements-risk-analyst",
-        prompt: corporatePrompt("chief_of_staff", missionPreflightPrompt(this.state.goal, missionId)),
+        prompt: corporatePrompt("chief_of_staff", prompt),
         outputSchema: MISSION_PREFLIGHT_INPUT_SCHEMA,
         reasoningEffort: this.options.config.reasoning.planner,
         data: { goal: this.state.goal, missionId },
       }, signal);
-      const analysis = parseJsonResponse<Omit<MissionPreflightInput, "missionId" | "objective">>(response.text);
-      const input: MissionPreflightInput = {
-        ...analysis,
-        missionId,
-        objective: this.state.goal,
+      const createReport = (responseText: string): MissionPreflightReport => {
+        const analysis = parseJsonResponse<Omit<MissionPreflightInput, "missionId" | "objective">>(responseText);
+        return createMissionPreflight({
+          ...analysis,
+          missionId,
+          objective: this.state.goal,
+        });
       };
-      this.missionPreflight = createMissionPreflight(input);
+
+      const response = await requestPreflight(missionPreflightPrompt(this.state.goal, missionId));
+      try {
+        this.missionPreflight = createReport(response.text);
+      } catch (error) {
+        const validationError = errorMessage(error);
+        if (!validationError.startsWith("Invalid mission preflight:")) throw error;
+        await this.event({
+          type: "mission_preflight_retrying",
+          status: "correcting",
+          message: validationError.slice(0, 300),
+        });
+        const corrected = await requestPreflight(missionPreflightCorrectionPrompt(
+          this.state.goal,
+          missionId,
+          validationError,
+        ));
+        this.missionPreflight = createReport(corrected.text);
+      }
       await this.commit((state) => {
         state.harnessV2 ??= emptyHarnessV2State();
         state.harnessV2.missionPreflight = structuredClone(this.missionPreflight!);

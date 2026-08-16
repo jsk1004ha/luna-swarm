@@ -32,6 +32,23 @@ test("mission preflight model output excludes host-owned identity fields", () =>
   assert.equal("objective" in MISSION_PREFLIGHT_INPUT_SCHEMA.properties, false);
 });
 
+test("mission preflight schema rejects untraced tests and single-requirement conflicts", () => {
+  assert.ok(isObject(MISSION_PREFLIGHT_INPUT_SCHEMA));
+  assert.ok(isObject(MISSION_PREFLIGHT_INPUT_SCHEMA.properties));
+  const acceptanceTests = MISSION_PREFLIGHT_INPUT_SCHEMA.properties.acceptanceTests;
+  const conflicts = MISSION_PREFLIGHT_INPUT_SCHEMA.properties.conflicts;
+  assert.ok(isObject(acceptanceTests));
+  assert.ok(isObject(acceptanceTests.items));
+  assert.ok(isObject(acceptanceTests.items.properties));
+  assert.ok(isObject(acceptanceTests.items.properties.requirementIds));
+  assert.equal(acceptanceTests.items.properties.requirementIds.minItems, 1);
+  assert.ok(isObject(conflicts));
+  assert.ok(isObject(conflicts.items));
+  assert.ok(isObject(conflicts.items.properties));
+  assert.ok(isObject(conflicts.items.properties.requirementIds));
+  assert.equal(conflicts.items.properties.requirementIds.minItems, 2);
+});
+
 function visit(value: JsonValue, path: string, errors: string[]): void {
   if (!isObject(value)) return;
   if (value.type === "object" && isObject(value.properties)) {

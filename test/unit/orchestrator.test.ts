@@ -111,6 +111,51 @@ test("mission preflight identity is host-bound when the model paraphrases the ob
   }
 });
 
+test("mission preflight corrects one semantically invalid structured response before planning", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-preflight-correction-"));
+  const runId = "run-preflight-correction";
+  let preflightCalls = 0;
+  try {
+    const backend = new MockAgentBackend(async (request) => {
+      const output = await demoHandler(request);
+      if (request.purpose !== "mission_preflight") return output;
+      preflightCalls += 1;
+      if (preflightCalls !== 1) return output;
+      const invalid = structuredClone(output as MissionPreflightInput);
+      invalid.acceptanceTests[0]!.requirementIds = [];
+      invalid.conflicts.push({
+        id: "CONFLICT-SINGLE-REQUIREMENT",
+        statement: "One requirement has an internal scope concern",
+        requirementIds: [invalid.requirements[0]!.id],
+        resolution: null,
+      });
+      return invalid;
+    });
+    const store = await createdRunStore(workspace, ".state", runId);
+    const gateway = new AgentGateway({ backend, config: config() });
+    const orchestrator = new SwarmOrchestrator({
+      gateway,
+      store,
+      config: config(),
+      workspace,
+      sourceIdentity: "build:test-preflight-correction",
+    });
+
+    const state = await orchestrator.start("의미 검증 오류를 교정한다");
+
+    assert.equal(state.status, "completed", state.error);
+    assert.equal(preflightCalls, 2);
+    const preflightRequests = backend.calls.filter((request) => request.purpose === "mission_preflight");
+    assert.equal(preflightRequests.length, 2);
+    assert.match(preflightRequests[1]!.prompt, /complete replacement object/);
+    assert.match(preflightRequests[1]!.prompt, /requirementIds must not be empty/);
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { type: string });
+    assert.ok(events.some((event) => event.type === "mission_preflight_retrying"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("a non-Git workspace without build identity runs in observation-only mode", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-orch-unpinned-"));
   const previousGithubSha = process.env.GITHUB_SHA;

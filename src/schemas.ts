@@ -8,6 +8,8 @@ import type {
 } from "./types.js";
 
 const strings: JsonValue = { type: "array", items: { type: "string" } };
+const nonEmptyStrings: JsonValue = { type: "array", minItems: 1, items: { type: "string" } };
+const conflictingRequirementIds: JsonValue = { type: "array", minItems: 2, items: { type: "string" } };
 const nullableString: JsonValue = { type: ["string", "null"] };
 
 export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
@@ -34,13 +36,15 @@ export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
     },
     requirements: {
       type: "array",
+      minItems: 1,
       maxItems: 256,
       items: { type: "object", additionalProperties: false, required: ["id", "statement"], properties: { id: { type: "string" }, statement: { type: "string" } } },
     },
     acceptanceTests: {
       type: "array",
+      minItems: 1,
       maxItems: 512,
-      items: { type: "object", additionalProperties: false, required: ["id", "statement", "requirementIds"], properties: { id: { type: "string" }, statement: { type: "string" }, requirementIds: strings } },
+      items: { type: "object", additionalProperties: false, required: ["id", "statement", "requirementIds"], properties: { id: { type: "string" }, statement: { type: "string" }, requirementIds: nonEmptyStrings } },
     },
     requirementMutations: {
       type: "array",
@@ -50,12 +54,12 @@ export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
     ambiguities: {
       type: "array",
       maxItems: 128,
-      items: { type: "object", additionalProperties: false, required: ["id", "statement", "alternatives", "resolution"], properties: { id: nullableString, statement: { type: "string" }, alternatives: strings, resolution: nullableString } },
+      items: { type: "object", additionalProperties: false, required: ["id", "statement", "alternatives", "resolution"], properties: { id: nullableString, statement: { type: "string" }, alternatives: conflictingRequirementIds, resolution: nullableString } },
     },
     conflicts: {
       type: "array",
       maxItems: 128,
-      items: { type: "object", additionalProperties: false, required: ["id", "statement", "requirementIds", "resolution"], properties: { id: nullableString, statement: { type: "string" }, requirementIds: strings, resolution: nullableString } },
+      items: { type: "object", additionalProperties: false, required: ["id", "statement", "requirementIds", "resolution"], properties: { id: nullableString, statement: { type: "string" }, requirementIds: conflictingRequirementIds, resolution: nullableString } },
     },
     requiredBoundaryKinds: { type: "array", maxItems: 128, items: { type: "string" } },
     boundaryConditions: {
