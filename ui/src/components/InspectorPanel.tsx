@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { sendUiControl } from "../api/client";
 import { avatarInitials, standingAvatarIndex } from "../data/avatar";
 import { DEPARTMENT_META } from "../data/mock";
-import { companyRoster, useCompanyStore } from "../store/companyStore";
+import { companyRoster, eventBelongsToAgent, taskBelongsToAgent, useCompanyStore } from "../store/companyStore";
 
 type InspectorTab = "overview" | "task" | "result" | "dependencies" | "harness" | "log";
 const TABS: Array<[InspectorTab, string]> = [["overview", "개요"], ["task", "작업"], ["result", "결과"], ["dependencies", "의존성"], ["harness", "하네스"], ["log", "로그"]];
@@ -29,8 +29,8 @@ export function InspectorPanel({ initialTab = "overview" }: { initialTab?: Inspe
     <header className="panel-head"><span><small>AGENT INSPECTOR</small><strong>에이전트 정보</strong></span></header>
     <div className="inspector-empty-state"><span aria-hidden="true">◎</span><h2>직원을 선택하세요</h2><p>조직도의 책임자나 하위 에이전트를 선택하면 실제 업무, 의존성, 검증 게이트와 하네스 근거가 표시됩니다.</p></div>
   </aside> : null;
-  const events = snapshot.events.filter((event) => event.agentId === agent.id).slice(0, 12);
-  const outputs = (snapshot.outputs ?? []).filter((output) => output.agentId === agent.id || Boolean(agent.taskId && output.taskId === agent.taskId));
+  const events = snapshot.events.filter((event) => eventBelongsToAgent(event, agent)).slice(0, 12);
+  const outputs = (snapshot.outputs ?? []).filter((output) => output.agentId === agent.id || taskBelongsToAgent(output.taskId, agent));
   const departmentMembers = companyRoster(snapshot).filter((candidate) => candidate.department === agent.department);
   const readOnly = snapshot.observation?.readOnly ?? snapshot.control?.readOnly ?? true;
   const runControl = async (payload: Parameters<typeof sendUiControl>[0]) => {

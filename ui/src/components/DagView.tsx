@@ -1,4 +1,4 @@
-import { useCompanyStore } from "../store/companyStore";
+import { agentForTask, companyRoster, useCompanyStore } from "../store/companyStore";
 import type { WorkOrderV2Summary } from "../types";
 
 const columns = [
@@ -8,11 +8,22 @@ const columns = [
   { id: "done", label: "통합", match: (progress: number, activity: string) => activity === "done" || progress >= 80 },
 ];
 
+const ATTENTION_WORK_ORDER_STATES = new Set([
+  "BLOCKED",
+  "REWORK_REQUIRED",
+  "INTERRUPTED",
+  "CANCELLED",
+  "FAILED",
+  "REMOTE_UNKNOWN",
+  "UNKNOWN_SIDE_EFFECT",
+]);
+
 export function DagView() {
   const snapshot = useCompanyStore((state) => state.snapshot);
   const selectAgent = useCompanyStore((state) => state.selectAgent);
   const workOrders = snapshot?.workOrders ?? [];
   const taskAgents = snapshot?.agents.filter((agent) => agent.taskId) ?? [];
+  const roster = companyRoster(snapshot);
   const intelligence = snapshot?.intelligenceV2;
   return <section className="secondary-view" aria-labelledby="dag-view-title">
     <header className="view-heading"><span><small>WORK DAG</small><h2 id="dag-view-title">업무 의존성과 검증 흐름</h2></span><p>업무는 대기→실행→검증→통합 순서로 이동합니다. 차단 항목은 검증 게이트에 남습니다.</p></header>
@@ -30,8 +41,9 @@ export function DagView() {
           return <section key={column.id} className="dag-column" aria-labelledby={`dag-${column.id}`}>
             <header><span>{String(columnIndex + 1).padStart(2, "0")}</span><h3 id={`dag-${column.id}`}>{column.label}</h3><em>{orders.length}</em></header>
             <div>{orders.slice(0, 18).map((order) => {
-              const ownerAgent = taskAgents.find((agent) => agent.id === order.owner || agent.teamId === order.owner);
-              const blocked = ["BLOCKED", "REWORK_REQUIRED", "FAILED", "REMOTE_UNKNOWN", "UNKNOWN_SIDE_EFFECT"].includes(order.state);
+              const ownerAgent = roster.find((agent) => agent.id === order.owner || agent.teamId === order.owner)
+                ?? agentForTask(snapshot, order.id);
+              const blocked = ATTENTION_WORK_ORDER_STATES.has(order.state);
               const progress = workOrderProgress(order.state);
               return <button key={order.id} className={blocked ? "is-blocked" : ""} onClick={() => ownerAgent && selectAgent(ownerAgent.id)} disabled={!ownerAgent} aria-label={`${order.objective}, 상태 ${order.state}`}>
                 <span><strong>{order.objective}</strong><small>{order.owner} · {order.id} r{order.revision}</small><small>게이트 {order.gates.join(", ") || "없음"} · 산출물 {order.artifacts.length}개</small></span>
@@ -44,7 +56,7 @@ export function DagView() {
         const tasks = taskAgents.filter((agent) => column.match(agent.progress, agent.activity));
         return <section key={column.id} className="dag-column" aria-labelledby={`dag-${column.id}`}>
           <header><span>{String(columnIndex + 1).padStart(2, "0")}</span><h3 id={`dag-${column.id}`}>{column.label}</h3><em>{tasks.length}</em></header>
-          <div>{tasks.slice(0, 18).map((agent) => <button key={agent.id} className={agent.activity === "blocked" ? "is-blocked" : ""} onClick={() => selectAgent(agent.id)}><span><strong>{agent.taskTitle}</strong><small>{agent.name} · {agent.department}</small></span><em>{agent.progress}%</em><i><b style={{ width: `${agent.progress}%` }} /></i></button>)}</div>
+          <div>{tasks.slice(0, 18).map((agent) => { const ownerAgent = agentForTask(snapshot, agent.taskId, agent.principalAgentId); return <button key={agent.id} className={agent.activity === "blocked" ? "is-blocked" : ""} onClick={() => ownerAgent && selectAgent(ownerAgent.id)} disabled={!ownerAgent}><span><strong>{agent.taskTitle}</strong><small>{agent.name} · {agent.department}</small></span><em>{agent.progress}%</em><i><b style={{ width: `${agent.progress}%` }} /></i></button>; })}</div>
           {!tasks.length && <p>현재 항목 없음</p>}
         </section>;
       })}
@@ -58,7 +70,7 @@ function StatusCard({ label, value, detail, tone }: { label: string; value: stri
 
 function workOrderColumn(order: WorkOrderV2Summary): string {
   if (["ACCEPTED", "INTEGRATED"].includes(order.state)) return "done";
-  if (["SUBMITTED", "VALIDATING", "REWORK_REQUIRED", "VALIDATION_RETRY", "FAILED", "REMOTE_UNKNOWN", "UNKNOWN_SIDE_EFFECT"].includes(order.state)) return "review";
+  if (["SUBMITTED", "VALIDATING", "VALIDATION_RETRY"].includes(order.state) || ATTENTION_WORK_ORDER_STATES.has(order.state)) return "review";
   if (["LEASED", "EXECUTING"].includes(order.state)) return "active";
   return "queued";
 }

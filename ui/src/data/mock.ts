@@ -90,6 +90,8 @@ export function createMockSnapshot(count = 30, organizationHeadcount = count): S
         { id: teamId, name: `Team ${Math.floor(index / 4) + 1}`, kind: "team" as const },
         { id: cellId, name: "Cell 01", kind: "cell" as const },
       ],
+      ownedWorkOrderIds: agent.taskId ? [agent.taskId] : [],
+      reviewedWorkOrderIds: [],
       workOrderIds: agent.taskId ? [agent.taskId] : [],
     };
   });

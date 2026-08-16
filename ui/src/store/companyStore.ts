@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Activity, Agent, CompanyEvent, ConnectionState, DepartmentId, RunSummary, Snapshot, ViewMode } from "../types";
+import type { Activity, Agent, CompanyEvent, ConnectionState, DepartmentId, LogicalAgent, RunSummary, Snapshot, ViewMode } from "../types";
 
 type MobilePanel = "directory" | "events" | null;
 
@@ -88,4 +88,51 @@ export function filteredAgents(state: Pick<CompanyState, "snapshot" | "selectedD
 /** The logical company directory is distinct from runtime concurrency seats. */
 export function companyRoster(snapshot: Snapshot | null | undefined): Agent[] {
   return snapshot?.logicalAgents ?? snapshot?.agents ?? [];
+}
+
+export function taskBelongsToAgent(taskId: string | undefined, agent: Agent): boolean {
+  if (!taskId) return false;
+  const ownedWorkOrderIds = (agent as Partial<LogicalAgent>).ownedWorkOrderIds;
+  const reviewedWorkOrderIds = (agent as Partial<LogicalAgent>).reviewedWorkOrderIds;
+  if (Array.isArray(ownedWorkOrderIds) && Array.isArray(reviewedWorkOrderIds) &&
+    (ownedWorkOrderIds.length > 0 || reviewedWorkOrderIds.length > 0)) {
+    return ownedWorkOrderIds.includes(taskId);
+  }
+  if (taskId === agent.taskId) return true;
+  const workOrderIds = (agent as Partial<LogicalAgent>).workOrderIds;
+  return Array.isArray(workOrderIds) && workOrderIds.includes(taskId);
+}
+
+export function agentForTask(
+  snapshot: Snapshot | null | undefined,
+  taskId: string | undefined,
+  principalAgentId?: string,
+): Agent | undefined {
+  const roster = companyRoster(snapshot);
+  if (principalAgentId) {
+    const principal = roster.find((agent) => agent.id === principalAgentId);
+    if (principal) return principal;
+  }
+  if (!taskId) return undefined;
+  const authoritativeOwnerId = snapshot?.workOrders?.find((order) => order.id === taskId)?.owner;
+  if (authoritativeOwnerId) {
+    const authoritativeOwner = roster.find((agent) => agent.id === authoritativeOwnerId);
+    if (authoritativeOwner) return authoritativeOwner;
+  }
+  if (!snapshot?.workOrders) {
+    const legacyOwner = roster.find((agent) => agent.taskId === taskId);
+    if (legacyOwner) return legacyOwner;
+  }
+  return roster.find((agent) => taskBelongsToAgent(taskId, agent));
+}
+
+export function eventBelongsToAgent(event: CompanyEvent, agent: Agent): boolean {
+  if (event.agentId === agent.id) return true;
+  return taskBelongsToAgent(event.taskId, agent);
+}
+
+export function agentForEvent(snapshot: Snapshot | null | undefined, event: CompanyEvent): Agent | undefined {
+  const roster = companyRoster(snapshot);
+  return roster.find((agent) => event.agentId === agent.id)
+    ?? agentForTask(snapshot, event.taskId);
 }

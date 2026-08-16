@@ -7,6 +7,7 @@ const status = z.enum(["active", "waiting", "blocked", "done", "idle"]);
 
 export const agentSchema = z.object({
   id: z.string(),
+  principalAgentId: z.string().optional(),
   name: z.string(),
   avatar: z.object({
     seed: z.string(), base: z.string(), skin: z.string(), hair: z.string(),
@@ -53,6 +54,8 @@ export const logicalAgentSchema = agentSchema.extend({
     id: z.string(), name: z.string(), kind: z.enum(["headquarters", "division", "team", "cell"]),
   })).length(4),
   workOrderId: z.string().optional(),
+  ownedWorkOrderIds: z.array(z.string()),
+  reviewedWorkOrderIds: z.array(z.string()),
   workOrderIds: z.array(z.string()),
 });
 

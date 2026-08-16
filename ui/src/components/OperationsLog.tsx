@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useCompanyStore } from "../store/companyStore";
+import { agentForEvent, useCompanyStore } from "../store/companyStore";
 
 type LogFilter = "all" | "active" | "review" | "output" | "problem" | "done";
 
@@ -9,10 +9,9 @@ export function OperationsLog() {
   const setEventOpen = useCompanyStore((state) => state.setEventOpen);
   const [filter, setFilter] = useState<LogFilter>("all");
   const rows = useMemo(() => {
-    const agents = new Map(snapshot?.agents.map((agent) => [agent.id, agent]) ?? []);
     const outputTaskIds = new Set((snapshot?.outputs ?? []).flatMap((output) => output.taskId ? [output.taskId] : []));
     return (snapshot?.events ?? [])
-      .map((event) => ({ event, agent: event.agentId ? agents.get(event.agentId) : undefined, isOutput: isOutputEvent(event.type) || Boolean(event.taskId && outputTaskIds.has(event.taskId) && event.severity === "success") }))
+      .map((event) => ({ event, agent: agentForEvent(snapshot, event), isOutput: isOutputEvent(event.type) || Boolean(event.taskId && outputTaskIds.has(event.taskId) && event.severity === "success") }))
       .filter(({ event, agent, isOutput }) => {
         if (filter === "all") return true;
         if (filter === "output") return isOutput;

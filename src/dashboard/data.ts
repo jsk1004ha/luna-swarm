@@ -9,6 +9,8 @@ import {
   HARNESS_V2_MIN_AGENT_COUNT,
   type HarnessV2RunState,
   type OrganizationRegistryV2,
+  type WorkOrderRecordV2,
+  type WorkOrderState,
 } from "../harness-v2/contracts.js";
 import { isValidRunId } from "../store.js";
 import type {
@@ -45,6 +47,7 @@ export interface DashboardAvatar {
 
 export interface DashboardAgent {
   id: string;
+  principalAgentId?: string;
   name: string;
   avatar: DashboardAvatar;
   department: Department;
@@ -97,6 +100,8 @@ export interface DashboardLogicalAgent extends DashboardAgent {
   cellId: string;
   lineage: Array<{ id: string; name: string; kind: "headquarters" | "division" | "team" | "cell" }>;
   workOrderId?: string;
+  ownedWorkOrderIds: string[];
+  reviewedWorkOrderIds: string[];
   workOrderIds: string[];
 }
 
@@ -478,7 +483,7 @@ export function createDemoSnapshot(nowInput: Date | string | number = new Date()
     const id = `demo-agent-${String(index + 1).padStart(3, "0")}`;
     return {
       id,
-      ...agentIdentity(id),
+      ...demoAgentIdentity(id),
       department,
       rank: RANKS[index % RANKS.length]!,
       role: demoRole(department),
@@ -503,7 +508,7 @@ export function createDemoSnapshot(nowInput: Date | string | number = new Date()
       },
     };
   });
-  ensureUniqueAgentNames(agents);
+  ensureUniqueDemoAgentNames(agents);
   const events: DashboardEvent[] = Array.from({ length: 18 }, (_, index) => {
     const agent = agents[(tick + index * 11) % agents.length]!;
     const at = new Date(now.getTime() - index * 9_000).toISOString();
@@ -642,6 +647,12 @@ interface OrderedRunEvent {
   ordinal: number;
 }
 
+interface DashboardTaskIdentity {
+  agentId: string;
+  name: string;
+  taskTitle: string;
+}
+
 async function readEventTail(path: string, expectedRunId: string): Promise<OrderedRunEvent[]> {
   let text: string;
   let handle;
@@ -693,6 +704,10 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
       latestHarnessByTask.set(event.taskId, event);
     }
   }
+  const taskIdentityByTask = new Map(tasks.map((task) => {
+    const agentId = state.harnessV2?.workOrders[task.id]?.assignedAgentId ?? `agent-${task.id}`;
+    return [task.id, { agentId, name: agentId, taskTitle: task.title } satisfies DashboardTaskIdentity] as const;
+  }));
   const seatCount = Math.min(MAX_AGENTS, Math.max(tasks.length, state.config.maxConcurrency));
   const agents: DashboardAgent[] = tasks.slice(0, seatCount).map((task, index) =>
     taskAgent(
@@ -703,6 +718,7 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
       now,
       state.tasks,
       state.teams[task.teamId],
+      state.harnessV2?.workOrders[task.id]?.assignedAgentId,
     ),
   );
   for (let index = agents.length; index < seatCount; index += 1) {
@@ -710,7 +726,7 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
     const id = `capacity-${String(index + 1).padStart(3, "0")}`;
     agents.push({
       id,
-      ...agentIdentity(id),
+      ...canonicalAgentIdentity(id),
       department,
       rank: "staff",
       role: "capacity_agent",
@@ -721,7 +737,6 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
       isActive: false,
     });
   }
-  ensureUniqueAgentNames(agents);
   const agentByTask = new Map(
     agents.flatMap((agent) => (agent.taskId ? [[agent.taskId, agent] as const] : [])),
   );
@@ -730,10 +745,10 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
     .map(({ event }) => dashboardEvent(
       event,
       resolvedEventId(event, legacyIdOccurrences),
-      agentByTask.get(event.taskId ?? ""),
+      taskIdentityByTask.get(event.taskId ?? ""),
     ))
     .reverse();
-  const outputs = dashboardOutputs(state, agentByTask, orderedEvents);
+  const outputs = dashboardOutputs(state, taskIdentityByTask, orderedEvents);
   const lastActivityAt = latestActivityAt(state.updatedAt, orderedEvents);
   const staleAfterMs = Math.max(state.config.callTimeoutMs + 60_000, 120_000);
   const isStale = !isTerminalRunStatus(state.status) &&
@@ -809,7 +824,7 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
   if (!state.harnessV2) return snapshot;
   return {
     ...snapshot,
-    logicalAgents: logicalAgentsForDashboard(agents, state.harnessV2),
+    logicalAgents: logicalAgentsForDashboard(agents, state.harnessV2, "real"),
     ...dashboardHarnessV2(state.harnessV2),
   };
 }
@@ -903,6 +918,7 @@ function dashboardHarnessV2(harnessV2: NonNullable<RunState["harnessV2"]>): Pick
 function logicalAgentsForDashboard(
   runtimeAgents: readonly DashboardAgent[],
   harnessV2?: NonNullable<RunState["harnessV2"]>,
+  mode: "real" | "demo" = "real",
 ): DashboardLogicalAgent[] {
   const registry = registryForDashboard(harnessV2, runtimeAgents.length);
   const units = new Map(registry.units.map((unit) => [unit.id, unit]));
@@ -913,27 +929,31 @@ function logicalAgentsForDashboard(
   for (const record of records) {
     workOrdersByOwner.set(record.assignedAgentId, [...(workOrdersByOwner.get(record.assignedAgentId) ?? []), record]);
   }
-  const reviewerOrders = new Map<string, NonNullable<RunState["harnessV2"]>["workOrders"][string]>();
+  const reviewerOrders = new Map<string, WorkOrderRecordV2[]>();
   for (const record of records) {
     for (const reviewerId of record.reviewerAgentIds) {
-      if (["SUBMITTED", "VALIDATING", "VALIDATION_RETRY"].includes(record.state)) reviewerOrders.set(reviewerId, record);
+      if (["SUBMITTED", "VALIDATING", "VALIDATION_RETRY"].includes(record.state)) {
+        reviewerOrders.set(reviewerId, [...(reviewerOrders.get(reviewerId) ?? []), record]);
+      }
     }
   }
 
   const logicalAgents = registry.agents.map((slot, index): DashboardLogicalAgent => {
     const ownedRecords = workOrdersByOwner.get(slot.agentId) ?? [];
-    const owned = ownedRecords.find((candidate) => !["INTEGRATED", "CANCELLED", "FAILED"].includes(candidate.state)) ?? ownedRecords[0];
-    const reviewed = reviewerOrders.get(slot.agentId);
-    const record = owned ?? reviewed;
+    const reviewedRecords = reviewerOrders.get(slot.agentId) ?? [];
+    const owned = selectDashboardWorkOrder(ownedRecords);
+    const reviewed = selectDashboardWorkOrder(reviewedRecords);
+    const reviewing = Boolean(reviewed && (!owned || dashboardWorkOrderRank(reviewed.state) < dashboardWorkOrderRank(owned.state)));
+    const record = reviewing ? reviewed : owned;
     // Legacy/demo snapshots have no slot assignment. Pairing by stable registry order
     // keeps the roster useful without conflating the two arrays in the API.
     const runtime = record ? runtimeByTask.get(record.order.id) : harnessV2 ? undefined : runtimeAgents[index];
     const state = record?.state;
-    const logicalStatus: DashboardLogicalAgentStatus = reviewed
+    const logicalStatus: DashboardLogicalAgentStatus = reviewing
       ? "reviewing"
       : state === "ACCEPTED" || state === "INTEGRATED"
         ? "completed"
-        : state === "FAILED" || state === "CANCELLED" || state === "BLOCKED" || state === "REWORK_REQUIRED" || state === "UNKNOWN_SIDE_EFFECT"
+        : state === "FAILED" || state === "CANCELLED" || state === "BLOCKED" || state === "REWORK_REQUIRED" || state === "INTERRUPTED" || state === "REMOTE_UNKNOWN" || state === "UNKNOWN_SIDE_EFFECT"
           ? "blocked"
           : state === "EXECUTING" || state === "LEASED"
             ? "working"
@@ -949,14 +969,14 @@ function logicalAgentsForDashboard(
                       ? "assigned"
                       : "available";
     const department = departmentForSlot(slot.headquartersId, slot.divisionId);
-    const activity: DashboardActivity = reviewed
+    const activity: DashboardActivity = reviewing
       ? "reviewing"
       : runtime?.activity ?? (logicalStatus === "working" ? "working" : logicalStatus === "completed" ? "done" : logicalStatus === "blocked" ? "blocked" : "idle");
     const status = statusForActivity(activity);
     const lineageIds = [`hq:${slot.headquartersId}`, slot.divisionId, slot.teamId, slot.cellId];
     return {
       id: slot.agentId,
-      ...agentIdentity(slot.agentId),
+      ...(mode === "demo" ? demoAgentIdentity(slot.agentId) : canonicalAgentIdentity(slot.agentId)),
       department,
       rank: slot.role === "cell-lead" ? "section_chief" : slot.role === "review-liaison" ? "assistant_manager" : "staff",
       role: slot.title,
@@ -979,11 +999,52 @@ function logicalAgentsForDashboard(
         const unit = units.get(id);
         return unit ? [{ id: unit.id, name: unit.name, kind: unit.kind }] : [];
       }),
-      workOrderIds: ownedRecords.map((candidate) => candidate.order.id),
+      ownedWorkOrderIds: ownedRecords.map((candidate) => candidate.order.id),
+      reviewedWorkOrderIds: reviewedRecords.map((candidate) => candidate.order.id),
+      workOrderIds: [...new Set([...ownedRecords, ...reviewedRecords].map((candidate) => candidate.order.id))],
     };
   });
-  ensureUniqueAgentNames(logicalAgents);
+  if (mode === "demo") ensureUniqueDemoAgentNames(logicalAgents);
   return logicalAgents;
+}
+
+function selectDashboardWorkOrder(records: readonly WorkOrderRecordV2[]): WorkOrderRecordV2 | undefined {
+  return records.reduce<WorkOrderRecordV2 | undefined>((selected, candidate) => {
+    if (!selected) return candidate;
+    const rankDifference = dashboardWorkOrderRank(candidate.state) - dashboardWorkOrderRank(selected.state);
+    if (rankDifference < 0) return candidate;
+    if (rankDifference > 0) return selected;
+    return candidate.order.priority < selected.order.priority
+      || (candidate.order.priority === selected.order.priority && candidate.order.id.localeCompare(selected.order.id) < 0)
+      ? candidate
+      : selected;
+  }, undefined);
+}
+
+function dashboardWorkOrderRank(state: WorkOrderState): number {
+  switch (state) {
+    case "BLOCKED":
+    case "REWORK_REQUIRED":
+    case "INTERRUPTED":
+    case "CANCELLED":
+    case "REMOTE_UNKNOWN":
+    case "UNKNOWN_SIDE_EFFECT":
+    case "FAILED":
+      return 0;
+    case "SUBMITTED":
+    case "VALIDATING":
+    case "VALIDATION_RETRY":
+      return 1;
+    case "LEASED":
+    case "EXECUTING":
+      return 2;
+    case "READY":
+      return 3;
+    case "ACCEPTED":
+      return 4;
+    case "INTEGRATED":
+      return 5;
+  }
 }
 
 function departmentForSlot(headquartersId: string, divisionId: string): Department {
@@ -1002,15 +1063,21 @@ function taskAgent(
   now: Date,
   tasks: Record<string, TaskRecord>,
   team: TeamRecord | undefined,
+  assignedAgentId?: string,
 ): DashboardAgent {
   const activity = event ? activityForEvent(event, task) : activityForTask(task);
   const status = statusForActivity(activity);
   const elapsed = task.startedAt ? Math.max(0, now.getTime() - Date.parse(task.startedAt)) : 0;
   const dynamic = Math.min(76, 22 + Math.floor(elapsed / 10_000));
+  // The task row keeps a unique UI key even when one principal owns several Work
+  // Orders. Its visible identity still comes from the Harness assignment; legacy
+  // runs without an assignment expose the explicit task-agent ID.
   const id = `agent-${task.id}`;
+  const identityId = assignedAgentId ?? id;
   const agent: DashboardAgent = {
     id,
-    ...agentIdentity(id),
+    ...(assignedAgentId ? { principalAgentId: assignedAgentId } : {}),
+    ...canonicalAgentIdentity(identityId),
     department: task.department,
     rank: task.assigneeRank,
     role: task.ownerRole,
@@ -1054,7 +1121,7 @@ function taskAgent(
 
 function dashboardOutputs(
   state: RunState,
-  agentByTask: Map<string, DashboardAgent>,
+  taskIdentityByTask: ReadonlyMap<string, DashboardTaskIdentity>,
   orderedEvents: OrderedRunEvent[],
 ): DashboardOutput[] {
   const latestEventAtByTask = new Map<string, string>();
@@ -1064,7 +1131,7 @@ function dashboardOutputs(
   const outputs: DashboardOutput[] = [];
   for (const task of Object.values(state.tasks)) {
     if (!task.result) continue;
-    const agent = agentByTask.get(task.id);
+    const identity = taskIdentityByTask.get(task.id);
     const status: DashboardOutputStatus = task.status === "accepted"
       ? "ready"
       : ["failed", "blocked", "cancelled", "retry_wait"].includes(task.status)
@@ -1084,15 +1151,15 @@ function dashboardOutputs(
       department: task.department,
       taskId: task.id,
       teamId: task.teamId,
-      ...(agent ? { agentId: agent.id } : {}),
+      ...(identity ? { agentId: identity.agentId } : {}),
     });
   }
   for (const team of Object.values(state.teams)) {
     if (!team.packet) continue;
-    const leadAgent = Object.values(state.tasks)
+    const leadIdentity = Object.values(state.tasks)
       .filter((task) => task.teamId === team.id)
-      .map((task) => agentByTask.get(task.id))
-      .find((agent): agent is DashboardAgent => Boolean(agent));
+      .map((task) => taskIdentityByTask.get(task.id))
+      .find((identity): identity is DashboardTaskIdentity => Boolean(identity));
     outputs.push({
       id: `team:${team.id}`,
       kind: "team",
@@ -1106,11 +1173,14 @@ function dashboardOutputs(
       sourceTaskIds: team.packet.sourceTaskIds.slice(0, MAX_AGENTS),
       department: team.department,
       teamId: team.id,
-      ...(leadAgent ? { agentId: leadAgent.id } : {}),
+      ...(leadIdentity ? { agentId: leadIdentity.agentId } : {}),
     });
   }
   if (state.final) {
-    const executive = [...agentByTask.values()].find((agent) => agent.department === "executive");
+    const executiveIdentity = Object.values(state.tasks)
+      .filter((task) => task.department === "executive")
+      .map((task) => taskIdentityByTask.get(task.id))
+      .find((identity): identity is DashboardTaskIdentity => Boolean(identity));
     outputs.push({
       id: `final:${state.runId}`,
       kind: "final",
@@ -1123,7 +1193,7 @@ function dashboardOutputs(
       checkCount: state.final.requirementsCoverage.filter((item) => item.covered).length,
       sourceTaskIds: state.final.sourceTaskIds.slice(0, MAX_AGENTS),
       department: "executive",
-      ...(executive ? { agentId: executive.id } : {}),
+      ...(executiveIdentity ? { agentId: executiveIdentity.agentId } : {}),
     });
   }
   const kindPriority: Record<DashboardOutputKind, number> = { final: 0, team: 1, task: 2 };
@@ -1155,23 +1225,29 @@ function reviewStatusForTask(task: TaskRecord): NonNullable<DashboardAgent["runt
   return "pending";
 }
 
-function agentIdentity(id: string): Pick<DashboardAgent, "name" | "avatar"> {
+function avatarIdentity(id: string): DashboardAvatar {
   const hash = createHash("sha256").update(id).digest();
   return {
-    name: employeeName(hash.readUInt32BE(0)),
-    avatar: {
-      seed: hash.toString("hex").slice(0, 16),
-      base: AVATAR_BASES[hash[4]! % AVATAR_BASES.length]!,
-      skin: AVATAR_SKINS[hash[5]! % AVATAR_SKINS.length]!,
-      hair: AVATAR_HAIR[hash[6]! % AVATAR_HAIR.length]!,
-      outfit: AVATAR_OUTFITS[hash[7]! % AVATAR_OUTFITS.length]!,
-      accessory: AVATAR_ACCESSORIES[hash[8]! % AVATAR_ACCESSORIES.length]!,
-      body: AVATAR_BODIES[hash[9]! % AVATAR_BODIES.length]!,
-    },
+    seed: hash.toString("hex").slice(0, 16),
+    base: AVATAR_BASES[hash[4]! % AVATAR_BASES.length]!,
+    skin: AVATAR_SKINS[hash[5]! % AVATAR_SKINS.length]!,
+    hair: AVATAR_HAIR[hash[6]! % AVATAR_HAIR.length]!,
+    outfit: AVATAR_OUTFITS[hash[7]! % AVATAR_OUTFITS.length]!,
+    accessory: AVATAR_ACCESSORIES[hash[8]! % AVATAR_ACCESSORIES.length]!,
+    body: AVATAR_BODIES[hash[9]! % AVATAR_BODIES.length]!,
   };
 }
 
-function ensureUniqueAgentNames(agents: DashboardAgent[]): void {
+function canonicalAgentIdentity(id: string): Pick<DashboardAgent, "name" | "avatar"> {
+  return { name: id, avatar: avatarIdentity(id) };
+}
+
+function demoAgentIdentity(id: string): Pick<DashboardAgent, "name" | "avatar"> {
+  const hash = createHash("sha256").update(id).digest();
+  return { name: employeeName(hash.readUInt32BE(0)), avatar: avatarIdentity(id) };
+}
+
+function ensureUniqueDemoAgentNames(agents: DashboardAgent[]): void {
   const used = new Set<string>();
   const nameCount = FAMILY_NAMES.length * GIVEN_NAMES.length;
   for (const agent of [...agents].sort((left, right) => left.id.localeCompare(right.id))) {
@@ -1227,7 +1303,7 @@ function buildSnapshot(
     mode,
     run,
     agents,
-    logicalAgents: logicalAgentsForDashboard(agents),
+    logicalAgents: logicalAgentsForDashboard(agents, undefined, mode),
     departments,
     metrics: {
       totalAgents: agents.length,
@@ -1283,20 +1359,20 @@ function registryForDashboard(
   });
 }
 
-function dashboardEvent(event: StoredRunEvent, id: string, agent?: DashboardAgent): DashboardEvent {
+function dashboardEvent(event: StoredRunEvent, id: string, identity?: DashboardTaskIdentity): DashboardEvent {
   const activity = activityForEvent(event);
   return {
     id,
     at: event.at,
     type: event.type,
-    title: `${eventTitle(event.type)}${agent ? ` · ${agent.name}` : ""}`,
-    message: event.message ?? (agent?.taskTitle || event.status || event.type),
+    title: `${eventTitle(event.type)}${identity ? ` · ${identity.name}` : ""}`,
+    message: event.message ?? (identity?.taskTitle || event.status || event.type),
     category: eventCategory(event.type),
     severity: eventSeverity(event),
     ...(event.status ? { status: event.status } : {}),
     ...(event.department ? { department: event.department } : {}),
     ...(event.taskId ? { taskId: event.taskId } : {}),
-    ...(agent ? { agentId: agent.id } : {}),
+    ...(identity ? { agentId: identity.agentId } : {}),
     ...(event.role ? { role: event.role } : {}),
     ...(event.corporateRole ? { corporateRole: event.corporateRole } : {}),
     ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),

@@ -2570,7 +2570,10 @@ export class SwarmOrchestrator {
     await this.commit((state) => {
       state.threadIds[routed.threadKey] = response.threadId;
       state.harness = this.harness.state();
-      if (request.taskId && routed.pin) {
+      // Deployment provenance on the task belongs to the artifact-producing
+      // worker attempt. Review calls may legitimately observe a newer rollout
+      // state (for example shadow -> rolled_back) without changing that artifact.
+      if (request.taskId && routed.pin && request.role === "worker") {
         const currentTask = state.tasks[request.taskId];
         if (!currentTask) throw new Error(`Deployment task state is missing for ${request.taskId}`);
         const deployment = {

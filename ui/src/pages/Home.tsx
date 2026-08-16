@@ -32,7 +32,7 @@ import { refreshRuns, sendUiControl, switchRun, type UiControlPayload } from "..
 import { DagView } from "../components/DagView";
 import { avatarInitials } from "../data/avatar";
 import { DEPARTMENT_META } from "../data/mock";
-import { companyRoster, filteredAgents, useCompanyStore } from "../store/companyStore";
+import { agentForTask, companyRoster, eventBelongsToAgent, filteredAgents, useCompanyStore } from "../store/companyStore";
 import type { Activity, Agent, CompanyEvent, Department, DepartmentId, ViewMode } from "../types";
 
 const navItems: Array<{ label: string; icon: typeof LayoutDashboard; view?: ViewMode }> = [
@@ -160,6 +160,10 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
 
   const activeAgent = companyRoster(snapshot).find((agent) => agent.id === selectedAgentId) ?? null;
+  const activeAgentEvents = useMemo(
+    () => activeAgent ? (snapshot?.events ?? []).filter((event) => eventBelongsToAgent(event, activeAgent)) : [],
+    [activeAgent, snapshot?.events],
+  );
   const readOnly = snapshot?.observation?.readOnly ?? snapshot?.control?.readOnly ?? true;
   const runMode = snapshot?.control?.mode;
   const isPaused = runMode === "paused";
@@ -238,6 +242,11 @@ export default function Home() {
     setDrawerTab("current");
     setDrawerInstruction("");
     selectAgent(id);
+  };
+
+  const openTaskAgent = (task: Agent) => {
+    const agent = agentForTask(snapshot, task.taskId, task.principalAgentId);
+    if (agent) openAgent(agent.id);
   };
 
   const openActivity = () => {
@@ -330,7 +339,7 @@ export default function Home() {
         </section>
 
         <section className="lower-grid">
-          <article className="card work-card"><div className="card-header"><div><p className="label">ACTIVE WORK</p><h2>Task queue <span className="count-badge">{activeTasks.length}</span></h2></div><button className="text-action" onClick={() => { setActivityPage(false); setActiveNav("Task board"); setView("dag"); }}>View all <ArrowUpRight size={14} /></button></div><div className="work-table"><div className="table-head"><span>Task</span><span>Owner</span><span>Status</span><span>Progress</span></div>{activeTasks.slice(0, 8).map((agent) => { const state = activityMeta(agent.activity); return <button className="table-row" key={agent.taskId ?? agent.id} onClick={() => openAgent(agent.id)}><span><b>{agent.taskTitle}</b><small>{DEPARTMENT_META[agent.department].name}</small></span><span>{agent.name}</span><span><i className={`state-dot ${state.tone}`} />{state.label}</span><span><i className="row-progress"><b style={{ width: `${agent.progress}%` }} /></i><em>{agent.progress}%</em></span></button>; })}</div></article>
+          <article className="card work-card"><div className="card-header"><div><p className="label">ACTIVE WORK</p><h2>Task queue <span className="count-badge">{activeTasks.length}</span></h2></div><button className="text-action" onClick={() => { setActivityPage(false); setActiveNav("Task board"); setView("dag"); }}>View all <ArrowUpRight size={14} /></button></div><div className="work-table"><div className="table-head"><span>Task</span><span>Owner</span><span>Status</span><span>Progress</span></div>{activeTasks.slice(0, 8).map((agent) => { const state = activityMeta(agent.activity); return <button className="table-row" key={agent.taskId ?? agent.id} onClick={() => openTaskAgent(agent)}><span><b>{agent.taskTitle}</b><small>{DEPARTMENT_META[agent.department].name}</small></span><span>{agent.name}</span><span><i className={`state-dot ${state.tone}`} />{state.label}</span><span><i className="row-progress"><b style={{ width: `${agent.progress}%` }} /></i><em>{agent.progress}%</em></span></button>; })}</div></article>
           <article className="card activity-card"><div className="card-header"><div><p className="label">EXECUTION TIMELINE</p><h2>Live event flow <span className={`timeline-status ${connectionClass} ${connection}`}><i />{connection}</span></h2></div><button className="subtle-action" onClick={openActivity} aria-label="전체 활동 보기"><ActivityIcon size={16} /></button></div><div className="timeline-list">{events.map((event, index) => <div className="timeline-event" key={event.id}><span className={`timeline-mark ${eventTone(event)}`}><i /></span><div><b>{event.title}</b><small>{event.message}</small></div><time>{formatTime(event.at)}</time>{index < events.length - 1 && <em />}</div>)}</div></article>
         </section>
         </>}
@@ -342,12 +351,12 @@ export default function Home() {
     {activeAgent && <><button className="drawer-scrim" aria-label="작업 상세 닫기" onClick={() => selectAgent(null)} /><aside className="agent-drawer" role="dialog" aria-modal="true" aria-label={`${activeAgent.name} 작업 상세`}>
       <header className="drawer-header"><div><p className="label">AGENT WORK DETAIL</p><h2>Current task</h2></div><button className="drawer-close" onClick={() => selectAgent(null)}><X size={18} /></button></header>
       <div className="drawer-agent"><Avatar agent={activeAgent} /><div><h3>{activeAgent.name}</h3><p>{activeAgent.role} · {DEPARTMENT_META[activeAgent.department].name}</p><span className={`state-pill ${activityMeta(activeAgent.activity).tone}`}><i />{activityMeta(activeAgent.activity).label}</span></div></div>
-      <div className="drawer-tabs"><button className={drawerTab === "current" ? "active" : ""} onClick={() => setDrawerTab("current")}>Current work</button><button className={drawerTab === "history" ? "active" : ""} onClick={() => setDrawerTab("history")}>Assignment history <span>{snapshot?.events.filter((event) => event.agentId === activeAgent.id).length ?? 0}</span></button></div>
+      <div className="drawer-tabs"><button className={drawerTab === "current" ? "active" : ""} onClick={() => setDrawerTab("current")}>Current work</button><button className={drawerTab === "history" ? "active" : ""} onClick={() => setDrawerTab("history")}>Assignment history <span>{activeAgentEvents.length}</span></button></div>
       {drawerTab === "current" ? <><section className="drawer-task"><div className="drawer-task-meta"><span className="coordinate-chip">{activeAgent.taskId ?? activeAgent.id}</span><span>{formatDate(snapshot?.run.updatedAt)}</span></div><h4>{activeAgent.taskTitle || "현재 배정 없음"}</h4><p>{activeAgent.message || "실행 계약과 검증 흐름에 따라 작업합니다."}</p><div className="drawer-progress"><div><span>Completion</span><b>{activeAgent.progress}%</b></div><div className="progress-track"><i style={{ width: `${activeAgent.progress}%` }} /></div></div></section>
         <section className="drawer-controls"><p className="label">WORK CONTROL</p><div className="status-control"><span>Runtime status</span><select value={activeAgent.activity} disabled><option>{activityMeta(activeAgent.activity).label}</option></select></div><div className="assignment-control"><span>Send instruction</span><div><input value={drawerInstruction} onChange={(event) => setDrawerInstruction(event.target.value)} placeholder="다음 안전한 turn에 전달" disabled={readOnly || busy || !activeAgent.taskId} /><button disabled={readOnly || busy || !activeAgent.taskId || !drawerInstruction.trim()} onClick={() => void runControl({ action: "instruction", runId: snapshot!.run.id, taskId: activeAgent.taskId!, text: drawerInstruction.trim(), trigger: "next_turn" }).then(() => setDrawerInstruction(""))}><Send size={14} />Send</button></div></div><div className="assignment-control"><span>Task priority</span><div><input type="number" min="0" max="100" step="1" value={priority} onChange={(event) => setPriority(event.target.value)} placeholder={String(activeAgent.runtime?.priority ?? 0)} disabled={readOnly || busy || !activeAgent.taskId} /><button disabled={readOnly || busy || !activeAgent.taskId || !priority} onClick={() => void runControl({ action: "priority", runId: snapshot!.run.id, taskId: activeAgent.taskId!, value: Number(priority) })}>Apply</button></div></div></section>
         <section className="drawer-checklist"><p className="label">RUNTIME</p><div className="done"><span><Check size={12} /></span><p>{activeAgent.runtime?.taskStatus ?? activeAgent.status}</p></div><div className={activeAgent.runtime?.reviewStatus === "accepted" ? "done" : "pending"}><span>{activeAgent.runtime?.reviewStatus === "accepted" ? <Check size={12} /> : 2}</span><p>Review: {activeAgent.runtime?.reviewStatus ?? "pending"}</p></div><div className="pending"><span>3</span><p>Attempts: {activeAgent.runtime?.attempts ?? 0}/{activeAgent.runtime?.maxAttempts ?? 0}</p></div></section>
-        <section className="drawer-context"><p className="label">REPORTING CONTEXT</p><dl><div><dt>DEPARTMENT</dt><dd>{DEPARTMENT_META[activeAgent.department].name}</dd></div><div><dt>DEPENDENCIES</dt><dd>{activeAgent.runtime?.dependencies.length ?? 0}</dd></div><div><dt>LAST EVENT</dt><dd>{snapshot?.events.find((event) => event.agentId === activeAgent.id)?.seq ?? "—"}</dd></div></dl></section>
-        <button className="drawer-directive" disabled={readOnly || busy || !activeAgent.taskId} onClick={() => activeAgent.taskId && window.confirm("이 작업을 취소할까요?") && void runControl({ action: "cancel_task", runId: snapshot!.run.id, taskId: activeAgent.taskId })}><X size={15} />Cancel this task</button></> : <section className="assignment-history"><div className="history-header"><div><p className="label">TIME-ORDERED HISTORY</p><b>Runtime events</b></div><span>{snapshot?.events.filter((event) => event.agentId === activeAgent.id).length ?? 0} entries</span></div>{snapshot?.events.filter((event) => event.agentId === activeAgent.id).slice(0, 20).map((event, index, list) => <div className="history-entry" key={event.id}><i /><div><b>{event.title}</b><small>{event.message}</small></div><time>{formatTime(event.at)}</time>{index < list.length - 1 && <em />}</div>)}</section>}
+        <section className="drawer-context"><p className="label">REPORTING CONTEXT</p><dl><div><dt>DEPARTMENT</dt><dd>{DEPARTMENT_META[activeAgent.department].name}</dd></div><div><dt>DEPENDENCIES</dt><dd>{activeAgent.runtime?.dependencies.length ?? 0}</dd></div><div><dt>LAST EVENT</dt><dd>{activeAgentEvents[0]?.seq ?? "—"}</dd></div></dl></section>
+        <button className="drawer-directive" disabled={readOnly || busy || !activeAgent.taskId} onClick={() => activeAgent.taskId && window.confirm("이 작업을 취소할까요?") && void runControl({ action: "cancel_task", runId: snapshot!.run.id, taskId: activeAgent.taskId })}><X size={15} />Cancel this task</button></> : <section className="assignment-history"><div className="history-header"><div><p className="label">TIME-ORDERED HISTORY</p><b>Runtime events</b></div><span>{activeAgentEvents.length} entries</span></div>{activeAgentEvents.slice(0, 20).map((event, index, list) => <div className="history-entry" key={event.id}><i /><div><b>{event.title}</b><small>{event.message}</small></div><time>{formatTime(event.at)}</time>{index < list.length - 1 && <em />}</div>)}</section>}
     </aside></>}
   </div>;
 }

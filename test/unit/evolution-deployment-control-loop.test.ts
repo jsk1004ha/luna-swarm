@@ -226,6 +226,8 @@ test("actual orchestrator candidate telemetry auto-rolls back and restart replay
   }).start("exercise real orchestrator telemetry rollback");
   await plane.router.drain();
   assert.equal(state.status, "completed", state.error);
+  assert.equal(state.tasks.T1?.deployment?.mode, "shadow");
+  assert.equal(state.tasks.T1?.deployment?.selection, "champion");
   const candidateCalls = backend.calls.filter((call) => call.executionBundlePin?.bundleId === candidate.bundleId);
   const championCalls = backend.calls.filter((call) => call.executionBundlePin?.bundleId === champion.bundleId);
   assert.ok(candidateCalls.length > 0);

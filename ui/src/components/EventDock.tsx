@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCompanyStore } from "../store/companyStore";
+import { agentForEvent, useCompanyStore } from "../store/companyStore";
 import type { CompanyEvent } from "../types";
 
 const categories = [
@@ -38,8 +38,9 @@ export function EventDock() {
   const handleEvent = (eventId: string) => {
     const event = events.find((candidate) => candidate.id === eventId);
     setSelectedEventId(eventId);
-    if (event?.agentId) {
-      selectAgent(event.agentId);
+    const agent = event ? agentForEvent(snapshot, event) : undefined;
+    if (agent) {
+      selectAgent(agent.id);
       setView("org");
     }
   };
@@ -60,7 +61,7 @@ export function EventDock() {
             <VirtualEventHistory events={filtered} selectedId={selected?.id} onSelect={handleEvent} />
           </div>
           <article className="event-detail">
-            {selected ? <><span className={`severity-label ${selected.severity}`}>{selected.severity}</span><time>{new Date(selected.at).toLocaleString("ko-KR")}</time><h3>{selected.title}</h3><p>{selected.message}</p><dl><div><dt>유형</dt><dd>{selected.type}</dd></div><div><dt>카테고리</dt><dd>{selected.category}</dd></div>{selected.department && <div><dt>부서</dt><dd>{selected.department}</dd></div>}{selected.specialistId && <div><dt>전문 역할</dt><dd>{selected.specialistId}</dd></div>}</dl>{selected.agentId && <button className="detail-action" onClick={() => handleEvent(selected.id)}>직원 지도에서 보기</button>}</> : <p>선택한 카테고리에 사건이 없습니다.</p>}
+            {selected ? <><span className={`severity-label ${selected.severity}`}>{selected.severity}</span><time>{new Date(selected.at).toLocaleString("ko-KR")}</time><h3>{selected.title}</h3><p>{selected.message}</p><dl><div><dt>유형</dt><dd>{selected.type}</dd></div><div><dt>카테고리</dt><dd>{selected.category}</dd></div>{selected.department && <div><dt>부서</dt><dd>{selected.department}</dd></div>}{selected.specialistId && <div><dt>전문 역할</dt><dd>{selected.specialistId}</dd></div>}</dl>{agentForEvent(snapshot, selected) && <button className="detail-action" onClick={() => handleEvent(selected.id)}>직원 지도에서 보기</button>}</> : <p>선택한 카테고리에 사건이 없습니다.</p>}
           </article>
         </div>
       </section>

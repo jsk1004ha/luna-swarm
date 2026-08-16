@@ -220,14 +220,30 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
     },
   };
   await writeStateEnvelope(runDirectory, state);
+  await writeFile(join(runDirectory, "events.jsonl"), `${JSON.stringify({
+    eventId: "event-assigned-agent",
+    at: "2026-08-11T00:00:02.500Z",
+    runId,
+    type: "task_started",
+    taskId: "task-1",
+    department: "engineering",
+    status: "running",
+  })}\n`, "utf8");
 
   try {
     const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
     assert.equal(snapshot.organizationV2?.totalAgents, 128);
     assert.equal(snapshot.logicalAgents.length, 128);
     assert.equal(new Set(snapshot.logicalAgents.map((agent) => agent.name)).size, 128);
+    assert.ok(snapshot.logicalAgents.every((agent) => agent.name === agent.id));
     assert.ok(snapshot.logicalAgents.every((agent) => agent.lineage.map(({ kind }) => kind).join("/") === "headquarters/division/team/cell"));
     const assigned = snapshot.logicalAgents.find((agent) => agent.id === "luna-001");
+    assert.equal(assigned?.name, "luna-001");
+    assert.equal(snapshot.agents[0]?.id, "agent-task-1");
+    assert.equal(snapshot.agents[0]?.principalAgentId, "luna-001");
+    assert.equal(snapshot.agents[0]?.name, "luna-001");
+    assert.equal(snapshot.events[0]?.agentId, "luna-001");
+    assert.equal(snapshot.events[0]?.title, "업무 시작 · luna-001");
     assert.equal(assigned?.workOrderId, "task-1");
     assert.equal(assigned?.runtime?.taskStatus, "running");
     assert.equal(snapshot.logicalAgents.find((agent) => agent.id === "luna-105")?.logicalStatus, "reviewing");
@@ -279,6 +295,114 @@ test("real snapshot exposes the run-pinned adaptive Harness v2 roster", async ()
     assert.equal(snapshot.logicalAgents.length, 31);
     assert.equal(snapshot.organizationV2?.headquarters.reduce((sum, item) => sum + item.allocation, 0), 31);
     assert.equal(new Set(snapshot.logicalAgents.map((agent) => agent.id)).size, 31);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("real roster keeps task rows unique and surfaces the highest-attention Work Order per agent", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-multi-order-agent-"));
+  const runId = "run-multi-order-agent";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  const state = realState(workspace, runId);
+  const acceptedTask = state.tasks["task-1"]!;
+  acceptedTask.status = "accepted";
+  acceptedTask.completedAt = "2026-08-11T00:00:01.000Z";
+  const blockedTask: TaskRecord = {
+    ...acceptedTask,
+    id: "task-2",
+    title: "차단 원인 해소",
+    priority: 2,
+    status: "blocked",
+    completedAt: "2026-08-11T00:00:02.000Z",
+  };
+  const interruptedTask: TaskRecord = { ...blockedTask, id: "task-3", title: "중단 복구", priority: 3 };
+  const remoteUnknownTask: TaskRecord = { ...blockedTask, id: "task-4", title: "원격 상태 확인", priority: 4 };
+  state.tasks = {
+    "task-1": acceptedTask,
+    "task-2": blockedTask,
+    "task-3": interruptedTask,
+    "task-4": remoteUnknownTask,
+  };
+  state.config = { ...state.config, maxConcurrency: 2 };
+  state.harnessV2 = {
+    orgVersion: "lab-128@2",
+    organizationHeadcount: 31,
+    organizationReviewerSlots: 3,
+    workOrders: {
+      "task-1": dashboardWorkOrder(acceptedTask, "ACCEPTED", "luna-001"),
+      "task-2": dashboardWorkOrder(blockedTask, "BLOCKED", "luna-001"),
+      "task-3": dashboardWorkOrder(interruptedTask, "INTERRUPTED", "luna-002"),
+      "task-4": dashboardWorkOrder(remoteUnknownTask, "REMOTE_UNKNOWN", "luna-003"),
+    },
+    artifactHeads: {}, councils: {}, missionCells: {}, messages: [],
+  };
+  await writeStateEnvelope(runDirectory, state);
+
+  try {
+    const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
+    assert.equal(new Set(snapshot.agents.map((agent) => agent.id)).size, snapshot.agents.length);
+    assert.deepEqual(snapshot.agents.filter((agent) => agent.taskId).map((agent) => agent.name), ["luna-001", "luna-001", "luna-002", "luna-003"]);
+    const principal = snapshot.logicalAgents.find((agent) => agent.id === "luna-001");
+    assert.equal(principal?.logicalStatus, "blocked");
+    assert.equal(principal?.taskId, "task-2");
+    assert.deepEqual(principal?.ownedWorkOrderIds, ["task-1", "task-2"]);
+    assert.deepEqual(principal?.reviewedWorkOrderIds, []);
+    assert.deepEqual(principal?.workOrderIds, ["task-1", "task-2"]);
+    assert.equal(snapshot.logicalAgents.find((agent) => agent.id === "luna-002")?.logicalStatus, "blocked");
+    assert.equal(snapshot.logicalAgents.find((agent) => agent.id === "luna-003")?.logicalStatus, "blocked");
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("events and outputs beyond the 256 visible task rows retain authoritative agent identity", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-bounded-rows-"));
+  const runId = "run-bounded-rows";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  const state = realState(workspace, runId);
+  const template = state.tasks["task-1"]!;
+  state.tasks = Object.fromEntries(Array.from({ length: 257 }, (_, offset) => {
+    const ordinal = offset + 1;
+    const id = `task-${String(ordinal).padStart(3, "0")}`;
+    return [id, { ...template, id, title: `작업 ${ordinal}`, priority: ordinal, status: "planned" } satisfies TaskRecord];
+  }));
+  const lastTask = state.tasks["task-257"]!;
+  lastTask.status = "accepted";
+  lastTask.completedAt = "2026-08-11T00:00:03.000Z";
+  lastTask.result = {
+    taskId: lastTask.id,
+    summary: "후반 작업 완료",
+    claims: [], evidence: ["receipt"], deliverables: ["artifact"], checks: ["verified"], uncertainties: [], confidence: 1,
+  };
+  state.config = { ...state.config, maxConcurrency: 1 };
+  state.harnessV2 = {
+    orgVersion: "lab-128@2",
+    organizationHeadcount: 31,
+    organizationReviewerSlots: 3,
+    workOrders: { "task-257": dashboardWorkOrder(lastTask, "ACCEPTED", "luna-007") },
+    artifactHeads: {}, councils: {}, missionCells: {}, messages: [],
+  };
+  await writeStateEnvelope(runDirectory, state);
+  await writeFile(join(runDirectory, "events.jsonl"), `${JSON.stringify({
+    eventId: "event-task-257",
+    at: "2026-08-11T00:00:03.000Z",
+    runId,
+    type: "task_completed",
+    taskId: "task-257",
+    department: "engineering",
+    status: "accepted",
+  })}\n`, "utf8");
+
+  try {
+    const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
+    assert.equal(snapshot.agents.length, 256);
+    assert.equal(snapshot.agents.some((agent) => agent.taskId === "task-257"), false);
+    assert.equal(snapshot.events[0]?.agentId, "luna-007");
+    assert.equal(snapshot.events[0]?.title, "Task Completed · luna-007");
+    assert.equal(snapshot.outputs.find((output) => output.taskId === "task-257")?.agentId, "luna-007");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -435,6 +559,8 @@ test("real snapshot maps task state, event tail, and idle concurrency capacity",
     assert.equal(snapshot.agents.length, 3);
     const agent = snapshot.agents.find((candidate) => candidate.taskId === "task-1");
     assert.ok(agent);
+    assert.equal(agent.principalAgentId, undefined);
+    assert.equal(snapshot.logicalAgents.find((candidate) => candidate.taskId === "task-1")?.ownedWorkOrderIds.length, 0);
     assert.equal(agent.activity, "reviewing");
     assert.equal(agent.message, "검증 보완 필요");
     assert.equal(agent.capability?.specialistId, "software-executor");
@@ -682,6 +808,7 @@ test("real employee identity remains stable when task ordering changes", async (
     );
     assert.equal(reordered.agents.length, 256);
     assert.equal(new Set(reordered.agents.map((agent) => agent.name)).size, 256);
+    assert.ok(reordered.agents.every((agent) => agent.name === agent.id));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -808,6 +935,44 @@ test("command-enabled dashboards refuse non-loopback binds", () => {
     /loopback host/i,
   );
 });
+
+function dashboardWorkOrder(
+  task: TaskRecord,
+  state: NonNullable<RunState["harnessV2"]>["workOrders"][string]["state"],
+  assignedAgentId: string,
+): NonNullable<RunState["harnessV2"]>["workOrders"][string] {
+  return {
+    order: {
+      id: task.id,
+      revision: 1,
+      missionId: "mission-dashboard",
+      requirementIds: [...task.requirementIds],
+      objective: task.objective,
+      constraints: [],
+      nonGoals: [],
+      ownerTeam: "hq:engineering/division:software-systems/team:system-architecture",
+      reviewerPool: ["hq:quality/division:verification/team:unit-testing"],
+      risk: "standard",
+      dependencies: [...task.dependencies],
+      inputArtifactIds: [],
+      deliverables: [task.deliverable],
+      acceptanceTests: [...task.acceptanceCriteria],
+      requiredGateIds: ["G0", "G2", "G3"],
+      toolPolicy: { allowedTools: ["read", "search"], network: "off", allowedDomains: [], readScopes: ["workspace/**"], writeScopes: [] },
+      maxExecutionAttempts: 2,
+      maxValidationAttempts: 2,
+      priority: task.priority,
+    },
+    state,
+    assignedAgentId,
+    reviewerAgentIds: ["luna-021"],
+    executionRevision: 1,
+    executionAttempts: 1,
+    validationAttempts: 0,
+    artifactIds: [],
+    updatedAt: "2026-08-11T00:00:02.000Z",
+  };
+}
 
 function realState(workspace: string, runId: string): RunState {
   const task: TaskRecord = {

@@ -27,6 +27,7 @@ export interface AvatarProfile {
 
 export interface Agent {
   id: string;
+  principalAgentId?: string;
   name: string;
   avatar: AvatarProfile;
   department: DepartmentId;
@@ -71,6 +72,8 @@ export interface LogicalAgent extends Agent {
   cellId: string;
   lineage: Array<{ id: string; name: string; kind: "headquarters" | "division" | "team" | "cell" }>;
   workOrderId?: string;
+  ownedWorkOrderIds: string[];
+  reviewedWorkOrderIds: string[];
   workOrderIds: string[];
 }
 

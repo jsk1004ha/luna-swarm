@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCompanyStore } from "../store/companyStore";
+import { agentForTask, companyRoster, useCompanyStore } from "../store/companyStore";
 import type { OutputArtifact } from "../types";
 
 export function ResultRibbon() {
@@ -25,12 +25,16 @@ export function ResultRibbon() {
       <em>{snapshot?.outputs?.length ?? 0}개 생성</em>
     </header>
     <div className="result-ribbon-list">
-      {outputs.map((output) => <ResultCard
-        key={output.id}
-        output={output}
-        arriving={arrivalId === output.id}
-        onSelect={output.agentId ? () => selectAgent(output.agentId!) : undefined}
-      />)}
+      {outputs.map((output) => {
+        const owner = companyRoster(snapshot).find((agent) => agent.id === output.agentId)
+          ?? agentForTask(snapshot, output.taskId);
+        return <ResultCard
+          key={output.id}
+          output={output}
+          arriving={arrivalId === output.id}
+          onSelect={owner ? () => selectAgent(owner.id) : undefined}
+        />;
+      })}
       {!outputs.length && <div className="result-ribbon-empty"><i aria-hidden="true">◇</i><span><strong>아직 생성된 결과물이 없습니다</strong><small>직원이 산출물을 저장하면 검증 상태와 함께 이곳에 표시됩니다.</small></span></div>}
     </div>
   </section>;

@@ -59,7 +59,7 @@ npm start -- ui --workspace . --mock --open
 
 기본 주소는 `http://127.0.0.1:4310`입니다. UI 구조와 시각 기준은 제공된 `luna-swarm-command-center.zip`의 `Home.tsx`와 `index.css`입니다. Luna는 그 단일 workspace shell의 값과 handler만 실제 실행 데이터로 연결하며, 새 기능도 같은 내비게이션·카드·조직도·drawer·directive 문법 안에서 확장합니다. 기존 대시보드 셸을 겹쳐 렌더링하지 않습니다. REST 초기 snapshot 이후 `/api/ui/events` WebSocket에서 실행별 `seq`를 이어받고, 재연결 시 마지막 `seq` 이후 사건을 replay합니다.
 
-저장소와 런타임 UI에는 사람 사진이나 캐릭터 sprite 같은 래스터 이미지 에셋을 두지 않습니다. 로고와 summary 장식은 CSS로, 직원은 이니셜·부서색·상태 배지로 표시합니다. 운영 화면은 조직도, Task board, 실행 timeline과 검증 가능한 세부 정보에 집중합니다.
+저장소와 런타임 UI에는 사람 사진이나 캐릭터 sprite 같은 래스터 이미지 에셋을 두지 않습니다. 로고와 summary 장식은 CSS로, 직원은 이니셜·부서색·상태 배지로 표시합니다. REAL 모드의 직원명·이벤트·산출물 소유자는 Work Order에 고정된 `luna-###` agent ID를 동일하게 사용하며, 한국어 합성 이름은 DEMO 모드에서만 사용합니다. 운영 화면은 조직도, Task board, 실행 timeline과 검증 가능한 세부 정보에 집중합니다.
 
 UI 서버가 시작한 실행은 `소유 실행`으로 표시되어 일시정지·재개·전체 취소·동시성 cap·다음 turn 지시·시작 전 작업 우선순위/취소를 제어할 수 있습니다. 별도 CLI에서 시작한 실행은 동일한 상태와 사건을 관찰하되 `외부 실행 · 관찰 전용`으로 표시합니다. 제어 API는 loopback Host/Origin을 확인하며, 비-loopback bind에는 `--token`이 필요합니다.
 
