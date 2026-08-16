@@ -36,6 +36,30 @@ function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
 }
 
+const DELIVERABLE_CONNECTORS = new Set(["and", "및", "그리고"]);
+
+function deliverableTokens(value: string): string[] {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .map((token) => {
+      const characters = [...token];
+      return characters.length >= 3 && (characters.at(-1) === "와" || characters.at(-1) === "과")
+        ? characters.slice(0, -1).join("")
+        : token;
+    })
+    .filter((token) => token.length > 0 && !DELIVERABLE_CONNECTORS.has(token));
+}
+
+function deliverableIsRepresented(contract: string, deliverables: readonly string[]): boolean {
+  const required = deliverableTokens(contract);
+  if (required.length === 0) return false;
+  const represented = new Set(deliverables.flatMap(deliverableTokens));
+  return required.every((token) => represented.has(token));
+}
+
 function claimsFrom(content: unknown): StructuralClaim[] {
   const claims = object(content)?.claims;
   if (!Array.isArray(claims)) return [];
@@ -79,6 +103,15 @@ function structuralCase(caseSpec: ExampleCase, content: unknown): OracleObservat
   if (predicate?.predicate === "deliverable-present" && typeof predicate.deliverable === "string") {
     const deliverables = stringArray(object(content)?.deliverables) ?? [];
     return { outputs: [{ input: caseSpec.input, actual: deliverables.includes(predicate.deliverable) }] };
+  }
+  if (predicate?.predicate === "deliverable-represented" && typeof predicate.deliverable === "string") {
+    const deliverables = stringArray(object(content)?.deliverables) ?? [];
+    return {
+      outputs: [{
+        input: caseSpec.input,
+        actual: deliverableIsRepresented(predicate.deliverable, deliverables),
+      }],
+    };
   }
   return undefined;
 }

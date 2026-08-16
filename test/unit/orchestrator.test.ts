@@ -772,7 +772,13 @@ test("missing accepted work prevents false final requirement coverage", async ()
     const cfg = config();
     const store = await createdRunStore(workspace, ".state", "run-manager");
     const gateway = new AgentGateway({ backend, config: cfg });
-    const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
+    const orchestrator = new SwarmOrchestrator({
+      gateway,
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-manager-negative-trace",
+    });
     const state = await orchestrator.start("manager gate goal");
     assert.equal(state.status, "failed");
     assert.equal(state.tasks.T1?.status, "failed");
@@ -780,6 +786,65 @@ test("missing accepted work prevents false final requirement coverage", async ()
     assert.equal(state.tasks.T3?.status, "blocked");
     assert.equal(state.final, undefined);
     assert.match(state.error ?? "", /Final coverage gate failed/);
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string; taskId?: string; message?: string });
+    assert.equal(events.filter((event) => event.type === "task_rework" && event.taskId === "T1").length, 1);
+    assert.equal(events.filter((event) => event.type === "task_failed" && event.taskId === "T1").length, 1);
+    assert.equal(events.filter((event) => event.type === "evolution_trace_recorded" && event.taskId === "T1").length, 2);
+    assert.equal(events.some((event) => event.type === "evolution_trace_failed" && event.taskId === "T1"), false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("zero accepted tasks surface the causal root failures instead of a generic terminal error", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-root-failure-"));
+  try {
+    const failingPlan = demoPlan("root failure diagnostics");
+    for (const task of failingPlan.tasks) task.maxAttempts = 1;
+    const backend = new MockAgentBackend(async (request) => {
+      if (["candidate_plan", "architect_plan", "architect_repair"].includes(request.purpose)) {
+        return structuredClone(failingPlan);
+      }
+      if (request.purpose === "manager_review") {
+        const data = request.data as {
+          validatorId: string;
+          task: { acceptanceCriteria: string[] };
+        };
+        return {
+          validatorId: data.validatorId,
+          verdict: "reject",
+          criteria: data.task.acceptanceCriteria.map((criterion) => ({
+            criterion,
+            passed: false,
+            note: "forced root rejection",
+          })),
+          issues: ["causal root validation failure"],
+          confidence: 0.9,
+        };
+      }
+      return demoHandler(request);
+    });
+    const cfg = config();
+    const store = await createdRunStore(workspace, ".state", "run-root-failure");
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-root-failure-diagnostics",
+    }).start(failingPlan.goal);
+
+    assert.equal(state.status, "failed");
+    assert.match(state.error ?? "", /No task result passed validation/);
+    assert.match(state.error ?? "", /T1 \(핵심 조사\).*causal root validation failure/);
+    assert.match(state.error ?? "", /T2 \(반례 탐색\).*causal root validation failure/);
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string; taskId?: string; message?: string });
+    assert.equal(events.filter((event) => event.type === "task_failed").length, 2);
+    assert.equal(events.some((event) => event.type === "task_rework"), false);
+    assert.equal(events.some((event) => event.type === "evolution_trace_failed"), false);
+    assert.match(events.find((event) => event.type === "run_failed")?.message ?? "", /T1 \(핵심 조사\)/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

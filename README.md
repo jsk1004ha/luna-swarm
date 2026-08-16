@@ -357,6 +357,15 @@ npm test
 npm run build
 ```
 
+### 실패 진단과 재실행
+
+- `node dist/src/cli.js ...`로 실행할 때는 소스 수정 뒤 `npm run build`로 `dist`를 갱신해야 합니다. 이미 `failed`로 종료된 실행은 증거 원장을 덮어쓰지 않으므로, 새 빌드로 UI 서버를 다시 시작한 뒤 새 실행을 생성합니다.
+- Mission Preflight의 구조화 응답이 계약을 어기면 한 번의 제한된 교정 호출을 수행하고, 그래도 실패하면 잘못된 필드 경로를 그대로 표시합니다.
+- 기본 G2 산출물 Oracle은 하나의 계약 문구가 여러 실제 산출물 항목으로 구체화될 수 있음을 인정하되, 계약의 모든 의미 토큰이 실제 항목 전체에 구조적으로 나타나야 통과합니다. 기존 사용자 정의 `deliverable-present` Oracle의 exact-match 의미는 유지됩니다.
+- rework가 필요하면 이전 revision의 산출물 reference를 음성 Outcome Trace가 기록될 때까지 보존하고, 다음 실행 revision이 `ready`가 될 때만 비웁니다. 따라서 재작업 전환 때문에 검증 증거가 사라지지 않습니다.
+- 모든 작업이 거절되면 `No task result passed validation`만 출력하지 않고, 실패한 작업과 실제 validator/Gate/Council 사유를 최대 3건까지 최종 오류와 `run_failed` 이벤트에 포함합니다. 재시도 한도가 끝난 작업은 `task_rework`가 아니라 `task_failed`로 기록됩니다.
+- Host Tool 세션이 없는 App Server 호출에는 도구를 호출하지 말라는 명시적 지시를 넣습니다. 이 경계에서 예상되는 정확한 `code-mode host is disabled` 진단만 운영 stderr에서 제거하며, 인증·rate limit·transport 등 다른 오류는 그대로 보존합니다.
+
 GitHub Actions는 Node.js 20.19.0과 22.x에서 clean install, 타입 검사, 전체 테스트, 빌드, production dependency audit와 package dry-run을 실행합니다.
 
 UI만 개발할 때는 터미널 두 개에서 서버와 Vite를 나눠 실행할 수 있습니다.
@@ -385,7 +394,7 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 - 실행 경험의 원문 비저장과 관찰 전용 기록, 독립 평가를 통과해 수동 승격된 Bundle만 다음 실행의 routing/prompt에 반영
 - UI 이벤트 Zod 검증, 실행별 seq 중복 제거와 WebSocket replay
 - durable pause/resume/cancel/concurrency와 다음 turn `OperatorInstruction` 주입
-- 고정 좌석·동서남북 착석·A* 경로·tile reservation·144/256명 밀도 정책
+- 실행별 가변 roster 좌석·동서남북 착석·A* 경로·tile reservation·고밀도 조직 표시 정책
 - 진행률-only snapshot의 Pixi 장면 재생성 방지, 정적 회사 레이어 1회 mount, 에셋 없는 도형 마커의 안정적 변형
 - 10,000건 사건 가상 목록과 외부 실행 관찰 전용 제어 거부
 

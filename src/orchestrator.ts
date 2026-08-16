@@ -481,7 +481,7 @@ export class SwarmOrchestrator {
       const accepted = Object.values(this.state.tasks).filter(
         (task) => task.status === "accepted" && task.result,
       );
-      if (accepted.length === 0) throw new Error("No task result passed validation");
+      if (accepted.length === 0) throw this.noAcceptedTaskFailure();
       await this.commit((state) => {
         state.status = "reducing";
       });
@@ -538,6 +538,17 @@ export class SwarmOrchestrator {
       if (!cancelled && !interrupted) await this.recordLearningProgress();
       return this.getState();
     }
+  }
+
+  private noAcceptedTaskFailure(): Error {
+    const orderedTaskIds = this.state.plan?.tasks.map((task) => task.id) ?? Object.keys(this.state.tasks).sort();
+    const causalFailures = orderedTaskIds
+      .map((taskId) => this.state.tasks[taskId])
+      .filter((task): task is TaskRecord => task?.status === "failed")
+      .slice(0, 3)
+      .map((task) => `${task.id} (${task.title}): ${truncate(task.error || "failed without a recorded cause", 360)}`);
+    if (causalFailures.length === 0) return new Error("No task result passed validation");
+    return new Error(`No task result passed validation. Causal task failures: ${causalFailures.join(" | ")}`);
   }
 
   private async ensureMissionIntelligence(signal?: AbortSignal): Promise<void> {
@@ -1656,6 +1667,16 @@ export class SwarmOrchestrator {
       council.snapshot.decision.adoptedOption === "accept"
     );
     const accepted = semanticPassed && gateEvaluation.passed && councilAllowsAcceptance;
+    const rejectionReasons = [
+      ...feedback,
+      ...gateEvaluation.blockers,
+      ...(!councilAllowsAcceptance
+        ? [`Council outcome ${council?.snapshot.decision?.outcome ?? "UNRESOLVED"} did not adopt acceptance`]
+        : []),
+    ].filter(Boolean);
+    if (!accepted && rejectionReasons.length === 0) {
+      rejectionReasons.push("검증 정족수 미달: 독립적으로 다시 작성할 것");
+    }
     await this.commit((state) => {
       const current = state.tasks[taskId];
       if (!current || current.leaseId !== leaseId || current.status === "accepted") return;
@@ -1716,26 +1737,14 @@ export class SwarmOrchestrator {
         }
       } else if (current.attempts < current.maxAttempts) {
         current.status = "retry_wait";
-        current.feedback.push(
-          ...(feedback.length ? feedback : gateEvaluation.blockers.length > 0
-            ? gateEvaluation.blockers
-            : !councilAllowsAcceptance
-              ? [`Council outcome ${council?.snapshot.decision?.outcome ?? "UNRESOLVED"} did not adopt acceptance`]
-            : ["검증 정족수 미달: 독립적으로 다시 작성할 것"]),
-        );
+        current.feedback.push(...rejectionReasons);
         const v2 = state.harnessV2?.workOrders[taskId];
         if (v2?.state === "VALIDATING") {
           state.harnessV2!.workOrders[taskId] = transitionWorkOrder(v2, "REWORK_REQUIRED");
         }
       } else {
         current.status = "failed";
-        current.error = [
-          ...feedback,
-          ...gateEvaluation.blockers,
-          ...(!councilAllowsAcceptance
-            ? [`Council outcome ${council?.snapshot.decision?.outcome ?? "UNRESOLVED"} did not adopt acceptance`]
-            : []),
-        ].filter(Boolean).join("; ") || "Validation quorum not reached";
+        current.error = rejectionReasons.join("; ") || "Validation quorum not reached";
         const v2 = state.harnessV2?.workOrders[taskId];
         if (v2?.state === "VALIDATING") {
           state.harnessV2!.workOrders[taskId] = transitionWorkOrder(v2, "FAILED", {
@@ -1759,13 +1768,19 @@ export class SwarmOrchestrator {
     }
     await this.gateEvent(task, oracleGate.gateReceipt);
     if (semanticReceipt) await this.gateEvent(task, semanticReceipt);
+    const validationStatus = this.state.tasks[taskId]?.status ?? "unknown";
     await this.event({
-      type: accepted ? "task_accepted" : "task_rework",
+      type: accepted ? "task_accepted" : validationStatus === "failed" ? "task_failed" : "task_rework",
       taskId,
       corporateRole: task.ownerRole,
       department: task.department,
-      status: this.state.tasks[taskId]?.status ?? "unknown",
-      message: `manager ${managerAccepted ? "accept" : "not-accepted"}; audit ${accepts}/${launched} accepts (${launched}/${count} called)`,
+      status: validationStatus,
+      message: truncate(
+        `manager ${managerAccepted ? "accept" : "not-accepted"}; audit ${accepts}/${launched} accepts (${launched}/${count} called)${
+          accepted ? "" : `; ${rejectionReasons.join("; ")}`
+        }`,
+        300,
+      ),
     });
     try {
       const candidate = await this.persistKnowledgeCapsule(

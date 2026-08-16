@@ -129,8 +129,10 @@ test("validation retry preserves revision/artifacts while rework starts a new ex
   const validatingAgain = transitionWorkOrder(retry, "VALIDATING");
   const rework = transitionWorkOrder(validatingAgain, "REWORK_REQUIRED", { error: "deterministic failure" });
   assert.equal(rework.executionRevision, 2);
-  assert.deepEqual(rework.artifactIds, []);
+  assert.deepEqual(rework.artifactIds, ["artifact-1"]);
   assert.equal(rework.validationAttempts, 0);
+  const readyForNewExecution = transitionWorkOrder(rework, "READY");
+  assert.deepEqual(readyForNewExecution.artifactIds, []);
   assert.equal(record.executionRevision, 1);
   assert.deepEqual(record.artifactIds, ["artifact-1"]);
 });

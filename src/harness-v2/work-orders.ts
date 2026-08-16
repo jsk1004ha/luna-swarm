@@ -306,10 +306,15 @@ export function transitionWorkOrder(record: WorkOrderRecordV2, nextState: WorkOr
     if (next.validationAttempts >= next.order.maxValidationAttempts) throw new Error("Validation attempt budget is exhausted");
     next.validationAttempts += 1;
   }
+  if (record.state === "REWORK_REQUIRED" && nextState === "READY") {
+    // Retain the rejected attempt's canonical output until its immutable
+    // Evolution trace has been recorded. Clear it only when a new execution
+    // revision is actually made ready, so stale output cannot be reused.
+    next.artifactIds = [];
+  }
   if (nextState === "REWORK_REQUIRED") {
     next.executionRevision += 1;
     next.validationAttempts = 0;
-    next.artifactIds = [];
   }
   return next;
 }

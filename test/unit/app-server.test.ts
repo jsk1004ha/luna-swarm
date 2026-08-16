@@ -71,6 +71,26 @@ function hostTools(
   };
 }
 
+test("tool-less calls explicitly forbid code mode and expected denied-tool diagnostics stay out of operator logs", async () => {
+  const stderr: string[] = [];
+  const instance = new CodexAppServerBackend({
+    workspace: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex, "emit-disabled-code-mode-diagnostic"],
+    config: DEFAULT_CONFIG,
+    onStderr: (line) => stderr.push(line),
+  });
+  try {
+    const response = await instance.run(request("no-tools", "echo-developer-instructions"));
+    assert.match(response.text, /No tools are available for this call/);
+    assert.match(response.text, /Do not invoke code mode or any other tool/);
+    assert.equal(stderr.some((line) => line.includes("code-mode host is disabled")), false);
+    assert.ok(stderr.includes("ERROR retained app-server diagnostic"));
+  } finally {
+    await instance.close();
+  }
+});
+
 test("dynamic read calls reach the host session and return immutable receipts", async () => {
   const calls: unknown[] = [];
   const receipt = { receiptId: "receipt-1", outputHash: "sha256:test" };

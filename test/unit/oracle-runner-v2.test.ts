@@ -55,6 +55,46 @@ test("trusted runner inspects exact artifact structure and ignores worker oracle
   assert.doesNotThrow(() => validateOracleReceipt(receipt, forged.suite, output, observationReceipt));
 });
 
+test("default structural deliverable checks accept detailed entries that collectively represent a compound contract", () => {
+  const compound = input();
+  compound.workOrder.deliverables = ["범위 결정 레지스터와 미해결 결정 목록"];
+  const forged = forgeOracleSuite(compound);
+  const complete = artifact({
+    deliverables: [
+      "범위 결정 레지스터\n- 기준 시스템: Luna Swarm\n- 대상 사용자: 운영자",
+      "미해결 결정 목록\n1. 실제 경쟁 제품 비교 범위\n2. 모션 그래픽 구현 방식",
+    ],
+    evidence: ["scope registry and open decisions are both present"],
+    checks: ["compound deliverable coverage checked"],
+    claims: [{
+      statement: "The scope registry is linked to its open decisions",
+      support: "Both detailed deliverable entries are present",
+      requirementIds: ["REQ-A"],
+      evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
+    }],
+  });
+  assert.equal(
+    evaluateOracleSuite(forged.suite, complete, runArtifactStructuralOracles(forged.suite, complete)).passed,
+    true,
+  );
+
+  const missingHalf = artifact({
+    deliverables: ["범위 결정 레지스터\n- 기준 시스템: Luna Swarm"],
+    evidence: ["scope registry only"],
+    checks: ["compound deliverable coverage checked"],
+    claims: [{
+      statement: "Only the scope registry exists",
+      support: "The open-decision list is absent",
+      requirementIds: ["REQ-A"],
+      evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
+    }],
+  });
+  assert.equal(
+    evaluateOracleSuite(forged.suite, missingHalf, runArtifactStructuralOracles(forged.suite, missingHalf)).passed,
+    false,
+  );
+});
+
 test("missing receipt cannot pass and fabricated or rebound receipts are rejected", () => {
   const forged = forgeOracleSuite(input());
   const output = artifact({ deliverables: ["patch"], evidence: [], checks: ["test-1"], claims: [{ statement: "done", support: "test", requirementIds: ["REQ-A"], evidenceRefs: [{ kind: "check", ordinal: 0 }] }] });

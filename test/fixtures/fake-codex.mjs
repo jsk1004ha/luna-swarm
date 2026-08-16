@@ -9,6 +9,7 @@ let maximumActive = 0;
 let nextToolCall = 1;
 const interrupted = new Set();
 const threadTools = new Map();
+const threadInstructions = new Map();
 const pendingToolCalls = new Map();
 let experimentalApi = false;
 const neverAccount = process.argv.includes("never-account");
@@ -19,6 +20,10 @@ const lines = createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 const reportActive = () => process.stderr.write(`ACTIVE ${active} MAX ${maximumActive}\n`);
 process.stderr.write(`SERVER_START ${process.pid}\n`);
+if (process.argv.includes("emit-disabled-code-mode-diagnostic")) {
+  process.stderr.write("2026-08-16T15:55:00.695357Z ERROR codex_core::tools::router: error=code-mode host is disabled\n");
+  process.stderr.write("ERROR retained app-server diagnostic\n");
+}
 
 lines.on("line", (line) => {
   const message = JSON.parse(line);
@@ -61,6 +66,7 @@ lines.on("line", (line) => {
     }
     const threadId = params.threadId ?? `thread-${nextThread++}`;
     threadTools.set(threadId, params.dynamicTools ?? []);
+    threadInstructions.set(threadId, params.developerInstructions ?? "");
     setTimeout(() => send({ id, result: { thread: { id: threadId } } }), 30);
   } else if (method === "turn/start") {
     const turnId = `turn-${nextTurn++}`;
@@ -132,7 +138,9 @@ lines.on("line", (line) => {
       } else if (!delayed) {
         const text = params.input?.[0]?.text === "echo-sandbox-policy"
           ? JSON.stringify(params.sandboxPolicy)
-          : `network=${String(params.sandboxPolicy?.networkAccess)}`;
+          : params.input?.[0]?.text === "echo-developer-instructions"
+            ? threadInstructions.get(params.threadId) ?? ""
+            : `network=${String(params.sandboxPolicy?.networkAccess)}`;
         send({ method: "item/completed", params: {
           threadId: params.threadId,
           turnId,

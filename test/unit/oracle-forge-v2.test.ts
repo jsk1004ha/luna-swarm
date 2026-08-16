@@ -134,7 +134,7 @@ test("ordinary preflight inputs forge without hidden reveal material", () => {
   assert.deepEqual(forged.suite.oracles.map((oracle) => oracle.kind), ["example", "example", "example"]);
   const inputs = forged.suite.oracles.flatMap((oracle) => oracle.kind === "example" ? oracle.spec.cases.map((item) => item.input) : []);
   assert.deepEqual(inputs, [
-    { predicate: "deliverable-present", deliverable: "patch" },
+    { predicate: "deliverable-represented", deliverable: "patch" },
     { predicate: "requirement-claim-evidence", requirementId: "REQ-1" },
     { predicate: "requirement-claim-evidence", requirementId: "REQ-2" },
   ]);

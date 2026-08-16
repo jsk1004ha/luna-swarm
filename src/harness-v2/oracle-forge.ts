@@ -405,9 +405,9 @@ function defaultBlueprints(input: OracleForgeInput): OracleBlueprint[] {
   }));
   for (const deliverable of input.workOrder.deliverables) blueprints.push({
     kind: "example",
-    description: `Deliverable ${deliverable} is present exactly in the output artifact`,
+    description: `Deliverable ${deliverable} is structurally represented in the output artifact deliverables`,
     requirementIds: requirements,
-    spec: { cases: [{ name: `deliverable-${hash(deliverable).slice(0, 8)}`, input: { predicate: "deliverable-present", deliverable }, expected: true }] },
+    spec: { cases: [{ name: `deliverable-${hash(deliverable).slice(0, 8)}`, input: { predicate: "deliverable-represented", deliverable }, expected: true }] },
   });
   return blueprints;
 }
