@@ -25,6 +25,13 @@ test("all structured-output object schemas require every declared property", () 
   assert.deepEqual(errors, []);
 });
 
+test("mission preflight model output excludes host-owned identity fields", () => {
+  assert.ok(isObject(MISSION_PREFLIGHT_INPUT_SCHEMA));
+  assert.ok(isObject(MISSION_PREFLIGHT_INPUT_SCHEMA.properties));
+  assert.equal("missionId" in MISSION_PREFLIGHT_INPUT_SCHEMA.properties, false);
+  assert.equal("objective" in MISSION_PREFLIGHT_INPUT_SCHEMA.properties, false);
+});
+
 function visit(value: JsonValue, path: string, errors: string[]): void {
   if (!isObject(value)) return;
   if (value.type === "object" && isObject(value.properties)) {

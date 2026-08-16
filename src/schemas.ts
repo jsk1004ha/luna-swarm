@@ -14,13 +14,11 @@ export const MISSION_PREFLIGHT_INPUT_SCHEMA: JsonValue = {
   type: "object",
   additionalProperties: false,
   required: [
-    "missionId", "objective", "assumptions", "requirements", "acceptanceTests",
+    "assumptions", "requirements", "acceptanceTests",
     "requirementMutations", "ambiguities", "conflicts", "requiredBoundaryKinds",
     "boundaryConditions", "risks",
   ],
   properties: {
-    missionId: { type: "string" },
-    objective: { type: "string" },
     assumptions: {
       type: "array",
       maxItems: 128,

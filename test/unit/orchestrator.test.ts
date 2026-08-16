@@ -18,6 +18,7 @@ import { DecisionTraceStore, ObjectiveOutcomeReceiptStore } from "../../src/evol
 import { organizationRegistryV2 } from "../../src/harness-v2/organization-registry.js";
 import { forgeOracleSuite } from "../../src/harness-v2/oracle-forge.js";
 import { createWorkOrderRecord, workOrderFromTask } from "../../src/harness-v2/work-orders.js";
+import type { MissionPreflightInput } from "../../src/harness-v2/preflight.js";
 import { companySnapshot } from "../../src/organization.js";
 import { AgentCallError, AgentGateway } from "../../src/runtime/gateway.js";
 import { AtomicRunStore } from "../../src/store.js";
@@ -72,6 +73,39 @@ test("start readiness is signalled only after persisted state and the run-start 
       }),
       /stop-after-ready/,
     );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("mission preflight identity is host-bound when the model paraphrases the objective", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-preflight-identity-"));
+  const runId = "run-preflight-identity";
+  const goal = "사용자 원문 목표는 그대로 보존한다";
+  try {
+    const backend = new MockAgentBackend(async (request) => {
+      const output = await demoHandler(request);
+      if (request.purpose !== "mission_preflight") return output;
+      return {
+        ...(output as MissionPreflightInput),
+        objective: "사용자 목표를 실행 가능한 요구사항으로 정리한다",
+      };
+    });
+    const store = await createdRunStore(workspace, ".state", runId);
+    const gateway = new AgentGateway({ backend, config: config() });
+    const orchestrator = new SwarmOrchestrator({
+      gateway,
+      store,
+      config: config(),
+      workspace,
+      sourceIdentity: "build:test-preflight-identity",
+    });
+
+    const state = await orchestrator.start(goal);
+
+    assert.equal(state.status, "completed", state.error);
+    assert.equal(state.harnessV2?.missionPreflight?.missionId, `mission:${runId}`);
+    assert.equal(state.harnessV2?.missionPreflight?.objective, goal);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

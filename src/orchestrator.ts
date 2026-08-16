@@ -567,10 +567,12 @@ export class SwarmOrchestrator {
         reasoningEffort: this.options.config.reasoning.planner,
         data: { goal: this.state.goal, missionId },
       }, signal);
-      const input = parseJsonResponse<MissionPreflightInput>(response.text);
-      if (input.missionId !== missionId || input.objective.trim() !== this.state.goal.trim()) {
-        throw new Error("Mission preflight identity does not match the active mission");
-      }
+      const analysis = parseJsonResponse<Omit<MissionPreflightInput, "missionId" | "objective">>(response.text);
+      const input: MissionPreflightInput = {
+        ...analysis,
+        missionId,
+        objective: this.state.goal,
+      };
       this.missionPreflight = createMissionPreflight(input);
       await this.commit((state) => {
         state.harnessV2 ??= emptyHarnessV2State();
