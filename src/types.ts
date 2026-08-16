@@ -417,6 +417,22 @@ export interface SwarmConfig {
   allowNetwork: boolean;
   ephemeralThreads: boolean;
   stateDirectory: string;
+  /** Bounded, lossless cold-storage policy for the workspace state directory. */
+  storageMaintenance: {
+    enabled: boolean;
+    autoCompact: boolean;
+    /** Advisory high-water mark used by storage inspection and compaction planning. */
+    maxStateBytes: number;
+    /** Terminal runs newer than this remain unpacked. */
+    minArchiveAgeHours: number;
+    /** Most recently updated terminal runs that always remain unpacked. */
+    keepRecentRuns: number;
+    /** Bounds automatic maintenance latency after a run finishes. */
+    maxRunsPerPass: number;
+    /** Fail-closed archive input bounds. */
+    maxArchiveFiles: number;
+    maxArchiveBytes: number;
+  };
   harnessEnabled: boolean;
   maxSkillsPerCall: number;
   maxSkillChars: number;

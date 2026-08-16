@@ -32,6 +32,16 @@ export const DEFAULT_CONFIG: SwarmConfig = {
   allowNetwork: false,
   ephemeralThreads: true,
   stateDirectory: ".luna-swarm",
+  storageMaintenance: {
+    enabled: true,
+    autoCompact: true,
+    maxStateBytes: 5 * 1024 * 1024 * 1024,
+    minArchiveAgeHours: 7 * 24,
+    keepRecentRuns: 20,
+    maxRunsPerPass: 2,
+    maxArchiveFiles: 100_000,
+    maxArchiveBytes: 2 * 1024 * 1024 * 1024,
+  },
   harnessEnabled: true,
   maxSkillsPerCall: 3,
   maxSkillChars: 6_000,
@@ -79,6 +89,11 @@ export async function loadConfig(
       ...DEFAULT_CONFIG.reasoning,
       ...(fromFile.reasoning ?? {}),
       ...(overrides.reasoning ?? {}),
+    },
+    storageMaintenance: {
+      ...DEFAULT_CONFIG.storageMaintenance,
+      ...(fromFile.storageMaintenance ?? {}),
+      ...(overrides.storageMaintenance ?? {}),
     },
   };
   validateConfig(config);
@@ -134,6 +149,18 @@ export function validateConfig(config: SwarmConfig): void {
   if (typeof config.ephemeralThreads !== "boolean") {
     throw new Error("ephemeralThreads must be a boolean");
   }
+  if (typeof config.storageMaintenance.enabled !== "boolean") {
+    throw new Error("storageMaintenance.enabled must be a boolean");
+  }
+  if (typeof config.storageMaintenance.autoCompact !== "boolean") {
+    throw new Error("storageMaintenance.autoCompact must be a boolean");
+  }
+  intInRange("storageMaintenance.maxStateBytes", config.storageMaintenance.maxStateBytes, 16 * 1024 * 1024, 1024 * 1024 * 1024 * 1024);
+  intInRange("storageMaintenance.minArchiveAgeHours", config.storageMaintenance.minArchiveAgeHours, 0, 24 * 365 * 10);
+  intInRange("storageMaintenance.keepRecentRuns", config.storageMaintenance.keepRecentRuns, 0, 10_000);
+  intInRange("storageMaintenance.maxRunsPerPass", config.storageMaintenance.maxRunsPerPass, 1, 100);
+  intInRange("storageMaintenance.maxArchiveFiles", config.storageMaintenance.maxArchiveFiles, 1, 1_000_000);
+  intInRange("storageMaintenance.maxArchiveBytes", config.storageMaintenance.maxArchiveBytes, 1024 * 1024, 1024 * 1024 * 1024 * 1024);
   if (config.sourceIdentity !== undefined && !config.sourceIdentity.trim()) {
     throw new Error("sourceIdentity must be a non-empty concrete build identity when provided");
   }

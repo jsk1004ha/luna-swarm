@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -23,6 +23,30 @@ test("help documents the credential gate and bounded live soak inputs", async ()
   assert.match(result.stdout, /--max-stage <1\|2\|4\|8\|16\|32\|64\|128\|256>/);
   assert.match(result.stdout, /--budget-limit <n>/);
   assert.match(result.stdout, /evolve rollout status <rollout-id>/);
+  assert.match(result.stdout, /storage status/);
+  assert.match(result.stdout, /storage gc \[--dry-run\]/);
+  assert.match(result.stdout, /storage restore <run-id>/);
+});
+
+test("storage status and dry-run inspect an empty workspace without mutating it", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-cli-storage-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+
+  const status = await runCli(["storage", "status", "--workspace", workspace]);
+  assert.equal(status.code, 0, status.stderr);
+  const statusOutput = JSON.parse(status.stdout) as {
+    inspection: { totalBytes: number; rawRuns: { count: number }; archives: { count: number } };
+  };
+  assert.equal(statusOutput.inspection.totalBytes, 0);
+  assert.equal(statusOutput.inspection.rawRuns.count, 0);
+  assert.equal(statusOutput.inspection.archives.count, 0);
+
+  const dryRun = await runCli(["storage", "gc", "--dry-run", "--workspace", workspace]);
+  assert.equal(dryRun.code, 0, dryRun.stderr);
+  const report = JSON.parse(dryRun.stdout) as { dryRun: boolean; actions: unknown[] };
+  assert.equal(report.dryRun, true);
+  assert.deepEqual(report.actions, []);
+  assert.deepEqual(await readdir(workspace), []);
 });
 
 test("soak refuses to instantiate a live backend without explicit authorization", async () => {

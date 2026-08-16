@@ -77,6 +77,7 @@ import {
   type SoakShardStage,
 } from "./soak/index.js";
 import { RunHostToolRuntime } from "./tool-broker/index.js";
+import { RunStorageCollisionError, StorageManager } from "./storage/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -90,6 +91,7 @@ async function main(): Promise<void> {
   if (command === "learning" || command === "learn") return printLearning(args);
   if (command === "evolve") return evolve(args);
   if (command === "soak") return soak(args);
+  if (command === "storage") return storage(args);
   if (command === "status") return status(args);
   if (command === "dashboard") return dashboard(args);
   if (command === "ui") return ui(args);
@@ -143,6 +145,15 @@ async function ui(args: string[]): Promise<void> {
       initialConcurrency: Math.min(config.initialConcurrency, maxConcurrency),
     };
     validateConfig(runConfig);
+    const storage = storageManager(workspace, runConfig);
+    try {
+      await storage.assertRunIdAvailable(runId);
+    } catch (error) {
+      if (error instanceof RunStorageCollisionError) {
+        return { accepted: false, runId, code: error.code, message: error.message };
+      }
+      throw error;
+    }
     const store = new AtomicRunStore(workspace, runConfig.stateDirectory, runId);
     try {
       await store.create();
@@ -332,6 +343,10 @@ async function dashboard(args: string[]): Promise<void> {
         const runConfig: SwarmConfig = {
           ...DEFAULT_CONFIG,
           ...state.config,
+          storageMaintenance: {
+            ...DEFAULT_CONFIG.storageMaintenance,
+            ...(state.config.storageMaintenance ?? {}),
+          },
           reasoning: {
             ...DEFAULT_CONFIG.reasoning,
             ...state.config.reasoning,
@@ -384,6 +399,15 @@ async function dashboard(args: string[]): Promise<void> {
         initialConcurrency: Math.min(config.initialConcurrency, maxConcurrency),
       };
       validateConfig(runConfig);
+      const storage = storageManager(workspace, runConfig);
+      try {
+        await storage.assertRunIdAvailable(runId);
+      } catch (error) {
+        if (error instanceof RunStorageCollisionError) {
+          return { accepted: false, runId, message: error.message };
+        }
+        throw error;
+      }
       const store = new AtomicRunStore(workspace, runConfig.stateDirectory, runId);
       try {
         await store.create();
@@ -574,6 +598,8 @@ async function runNew(args: string[]): Promise<void> {
   const overrides = concurrencyOverrides(args);
   const config = await loadConfig(option(args, "--config"), overrides);
   const runId = option(args, "--run-id") ?? makeRunId();
+  const storage = storageManager(workspace, config);
+  await storage.assertRunIdAvailable(runId);
   const store = new AtomicRunStore(workspace, config.stateDirectory, runId);
   await store.create();
   await launch({ goal, workspace, config, store, mock: args.includes("--mock") });
@@ -593,6 +619,10 @@ async function resume(args: string[]): Promise<void> {
     ...DEFAULT_CONFIG,
     ...state.config,
     ...concurrencyOverrides(args),
+    storageMaintenance: {
+      ...DEFAULT_CONFIG.storageMaintenance,
+      ...(state.config.storageMaintenance ?? {}),
+    },
     reasoning: {
       ...DEFAULT_CONFIG.reasoning,
       ...state.config.reasoning,
@@ -743,7 +773,69 @@ async function launch(options: {
     } finally {
       if (managedRuntime) options.onRuntimeDisposed?.(managedRuntime);
       await releaseExecutionLease();
+      await runAutomaticStorageMaintenance(storageManager(options.workspace, options.config), "after-run");
     }
+  }
+}
+
+async function storage(args: string[]): Promise<void> {
+  const [action = "status", runId] = positional(args);
+  const workspace = resolve(option(args, "--workspace") ?? process.cwd());
+  const config = await loadConfig(option(args, "--config"));
+  const manager = storageManager(workspace, config);
+  if (action === "status") {
+    process.stdout.write(`${JSON.stringify({
+      policy: config.storageMaintenance,
+      inspection: await manager.inspect(),
+    }, null, 2)}\n`);
+    return;
+  }
+  if (action === "gc") {
+    const report = await manager.maintain({ dryRun: args.includes("--dry-run") });
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+  if (action === "restore") {
+    if (!runId) throw new Error("Usage: luna-swarm storage restore <run-id> [--workspace .]");
+    const restored = await manager.restoreRun(runId);
+    process.stdout.write(`${JSON.stringify({
+      runId: restored.runId,
+      runDirectory: restored.runDirectory,
+      status: restored.manifest.terminalStatus,
+      fileCount: restored.manifest.fileCount,
+      restoredBytes: restored.manifest.uncompressedBytes,
+    }, null, 2)}\n`);
+    return;
+  }
+  throw new Error(`Unknown storage action: ${action}`);
+}
+
+function storageManager(workspace: string, config: SwarmConfig): StorageManager {
+  return new StorageManager({
+    workspace,
+    stateDirectory: config.stateDirectory,
+    policy: config.storageMaintenance,
+    learningHistoryRuns: config.learningHistoryRuns,
+  });
+}
+
+async function runAutomaticStorageMaintenance(
+  manager: StorageManager,
+  phase: "after-run",
+): Promise<void> {
+  try {
+    const report = await manager.maintainAfterRun();
+    if (!report) return;
+    const applied = report.actions.filter((action) => action.status === "applied").length;
+    const failed = report.actions.filter((action) => action.status === "failed").length;
+    if (applied > 0 || failed > 0 || report.after.budget.overBudget) {
+      process.stdout.write(
+        `[storage_maintenance] ${phase} · applied=${applied} failed=${failed} reclaimed=${report.reclaimedBytes}B total=${report.after.totalBytes}B\n`,
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[storage_maintenance_failed] ${phase} — ${message}\n`);
   }
 }
 
@@ -1440,6 +1532,9 @@ function printHelp(): void {
   luna-swarm evolve rollback <workload-class> --expected-generation <n> --actor <name> --reason <text>
   luna-swarm soak account-fingerprint --live-authorized [--workspace .]
   luna-swarm soak --live-authorized --account-email-sha256 <sha256:...> --authorization-expires-at <ISO> [--min-stage <stage>] --max-stage <1|2|4|8|16|32|64|128|256> --max-calls <1..4096> --budget-unit <label> --budget-per-call <n> --budget-limit <n> [--workspace .]
+  luna-swarm storage status [--workspace .]
+  luna-swarm storage gc [--dry-run] [--workspace .]
+  luna-swarm storage restore <run-id> [--workspace .]
   luna-swarm init [config.json]
   luna-swarm run --goal "작업" [--workspace .] [--mock]
   luna-swarm resume <run-id> [--workspace .]
@@ -1458,6 +1553,7 @@ function printHelp(): void {
   --json                    스킬 카탈로그를 JSON으로 출력
   --recent                  최근 학습 경험 메타데이터 20개 포함
   --rollback                직전 검증된 학습 정책 또는 안전 기준선으로 복구
+  --dry-run                 저장소 정리 대상을 계산만 하고 파일은 변경하지 않음
   --evaluation <receipt>    PROMOTABLE paired 평가 영수증
   --evaluation-hash <hash>  평가 영수증의 canonical SHA-256
   --expected-generation <n> Stable Pointer CAS 세대

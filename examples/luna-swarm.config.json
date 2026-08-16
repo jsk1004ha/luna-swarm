@@ -28,6 +28,16 @@
   "allowNetwork": false,
   "ephemeralThreads": true,
   "stateDirectory": ".luna-swarm",
+  "storageMaintenance": {
+    "enabled": true,
+    "autoCompact": true,
+    "maxStateBytes": 5368709120,
+    "minArchiveAgeHours": 168,
+    "keepRecentRuns": 20,
+    "maxRunsPerPass": 2,
+    "maxArchiveFiles": 100000,
+    "maxArchiveBytes": 2147483648
+  },
   "harnessEnabled": true,
   "maxSkillsPerCall": 3,
   "maxSkillChars": 6000,

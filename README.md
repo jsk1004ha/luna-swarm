@@ -169,6 +169,12 @@ npm start -- run --goal "..." -- --workspace .
 npm start -- status
 npm start -- status <run-id>
 
+# 로컬 상태 저장소 용량 확인, 무변경 정리 계획, 실제 정리와 복원
+npm start -- storage status -- --workspace .
+npm start -- storage gc --dry-run -- --workspace .
+npm start -- storage gc -- --workspace .
+npm start -- storage restore <run-id> -- --workspace .
+
 # 실행별 수직 조직도
 npm start -- org <run-id>
 
@@ -251,6 +257,8 @@ Shadow/Canary 운영 제어 루프는 trusted operations signer가 명시적으�
 
 <workspace>/.luna-swarm/learning/runs/<run-id>.json
 <workspace>/.luna-swarm/learning/policy.json
+<workspace>/.luna-swarm/archives/runs/<run-id>.luna.gz
+<workspace>/.luna-swarm/archives/runs/<run-id>.manifest.json
 <workspace>/.luna-swarm/evolution/
   genomes/
   bundles/
@@ -267,6 +275,10 @@ Shadow/Canary 운영 제어 루프는 trusted operations signer가 명시적으�
 `commands.jsonl`은 대시보드에서 보낸 회장 지시의 append-only 원본이고, `commands.applied`는 실제 모델 프롬프트에 포함된 지시 ID를 기록합니다. `commands.closed`는 종료 barrier가 명령 접수를 원자적으로 닫는 표식입니다. 명령 append와 종료는 실행별 파일 락으로 직렬화되므로, 종료가 먼저면 API가 지시를 거부하고 명령이 먼저면 마지막 judge가 반드시 읽습니다. 잠금에는 PID·시각·고유 토큰을 기록하며 강제 종료로 남은 잠금만 자동 회수하고 살아 있는 소유자는 시간만으로 탈취하지 않습니다. 쓰다 끊긴 마지막 명령 레코드와 누락된 `directive_queued` 이벤트는 재개 시 원본 로그에서 복구합니다. 웹 서버는 `state.json`을 직접 수정하지 않습니다.
 
 `learning/runs/*.json`은 모델 가중치가 아니라 과거 실행의 작은 로컬 ledger입니다. 원문 목표, 프롬프트, 응답, 코드, URL, 인증정보를 저장하지 않으며 모든 현재·과거 레코드를 `weak_observation`으로 취급합니다. 이 데이터는 진단과 표시에는 남지만 specialist/skill 순위, memory recall, Stable Pointer 승격에는 영향을 주지 않습니다. `learningAutoApply=true`는 설정 검증 단계에서 거부됩니다.
+
+스토리지 유지관리자는 `.luna-swarm`을 hot/cold 계층으로 관리합니다. 기본값은 최근 종료 실행 20개와 7일 이내 실행을 원본 상태로 유지하고, 그보다 오래된 `completed`·`partial`·`failed`·`cancelled` 실행을 한 번에 최대 2개씩 무손실 framed gzip으로 옮깁니다. `planning`·`running`·`reducing`·`judging`·`interrupted` 실행, 활성 lock이 있는 실행, Evolution Objective Outcome이 참조하는 실행은 자동 정리하지 않습니다. Outcome registry가 손상되었거나 파일 경계가 불확실하면 삭제 없이 fail-closed합니다.
+
+아카이브는 파일별 크기·모드·SHA-256 manifest를 가지며, symlink·junction·hardlink·경로 탈출·대소문자 충돌을 거부합니다. 원본은 archive 전체 검증 후 동일 볼륨 quarantine으로 이동하고, 이동된 tree를 다시 검증한 뒤에만 삭제합니다. `storage restore`는 파일을 byte-for-byte 복원하므로 event replay와 Blackboard provenance가 유지됩니다. 자동 유지관리는 실행 lease가 해제된 뒤 bounded pass로 동작해 새 실행 승인을 지연시키지 않으며, `storage gc --dry-run`은 lock이나 디렉터리도 만들지 않습니다. `learning/runs`의 비권위 관찰 record는 `learningHistoryRuns` 개수까지만 유지하지만 Evolution registry·Knowledge Capsule·권위 증거는 의미 요약으로 대체하거나 삭제하지 않습니다.
 
 실행에 영향을 주는 유일한 진화 경로는 `.luna-swarm/evolution`입니다. 새 실행은 workload별 Stable Pointer를 한 번 snapshot하고, 각 Work Order의 retry·validation·resume은 저장된 `bundleId`와 `bundleHash`를 계속 사용합니다. Decision Trace는 원시 채팅 대신 입력·컴포넌트·도구·출력·검증 reference와 실제 측정 가능한 timing만 기록하며 secret·PII·환경변수 값은 제거합니다. Objective Outcome은 원본 Trace와 실제 G0/G2/G3 증거를 역참조하고, paired evaluation 점수는 보호된 benchmark evaluator의 quality receipt까지 검증합니다. Git이 아닌 작업공간은 `sourceIdentity`를 설정할 수 있고, 없으면 본 작업은 관찰 전용으로 계속되지만 승격 근거에는 포함되지 않습니다. 승격은 actor·reason·expected generation·검증 receipt를 모두 요구하는 명시적 `evolve promote`에서만 가능하며, 현재 실행에는 영향을 주지 않고 다음 실행부터 적용됩니다. 자세한 계약은 [Evolution Harness v2](docs/EVOLUTION_HARNESS_V2.ko.md)를 참고하세요.
 
@@ -324,6 +336,7 @@ stateDiagram-v2
 | `maxMemoriesPerCall` | 4 | 한 호출에 회수하는 과거 경험 상한 |
 | `maxMemoryChars` | 3,000 | 경험 회수 블록 문자 예산 |
 | `learningHistoryRuns` | 200 | 시작 시 읽는 과거 실행 record 상한 |
+| `storageMaintenance` | 자동, 5 GiB | 무손실 cold archive, 보존 기간·최근 실행 수·pass당 처리량·복원 안전 상한을 묶은 로컬 저장소 정책 |
 | `learningMinSamples` | 3 | 관측 성과를 스킬 순위에 반영하기 위한 최소 표본 |
 
 예시는 [examples/luna-swarm.config.json](examples/luna-swarm.config.json)에 있습니다.
@@ -395,6 +408,7 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 - 목표별 직급/팀 트리, 깊이별 병렬 보고, 전 계층 출처 보존
 - crash/resume에서 accepted cache와 orphan lease 교체
 - checksum을 가진 원자적 상태 저장
+- 종료 실행의 무손실 gzip cold archive, dry-run, 명시적 복원, outcome 참조 보호와 run ID 충돌 방지
 - 144명 데모/실행 snapshot/SSE/정적 파일 경계와 path traversal 차단
 - 진행 중 회장 지시의 큐 저장, 안전 체크포인트 반영, 비소급 실행, 재개 시 중복 방지
 - workspace 스킬 발견·역할/부서/작업 유형 라우팅·context 상한
