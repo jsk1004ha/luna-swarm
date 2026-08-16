@@ -6,6 +6,7 @@ import {
   type CapabilitySelection,
   type HarnessGate,
   type SkillDefinition,
+  type SkillSelectionTrace,
 } from "./capabilities.js";
 import {
   LearningSnapshot,
@@ -35,6 +36,7 @@ export interface HarnessApplication {
   risk?: "low" | "medium" | "high";
   selectionReasons: string[];
   gates: HarnessGate[];
+  skillSelectionTrace: SkillSelectionTrace[];
 }
 
 export interface HarnessLearningUpdate extends LearningUpdate {
@@ -81,7 +83,7 @@ export class AdaptiveHarness {
 
   apply(request: AgentRequest): HarnessApplication {
     if (!this.config.harnessEnabled) {
-      return { request, block: "", skillIds: [], memoryIds: [], selectionReasons: [], gates: [] };
+      return { request, block: "", skillIds: [], memoryIds: [], selectionReasons: [], gates: [], skillSelectionTrace: [] };
     }
     const input = capabilityInput(request);
     // Raw experience performance is advisory telemetry, not an auto-apply policy.
@@ -147,6 +149,7 @@ export class AdaptiveHarness {
       risk: selection.risk,
       selectionReasons: selection.reasons,
       gates: selection.gates,
+      skillSelectionTrace: selection.skillTrace,
     };
   }
 
@@ -250,7 +253,11 @@ function renderHarnessBlock(
     `DECISION ID: ${selection.decisionId}`,
     `RISK CLASS: ${selection.risk}`,
     `ASSIGNED SPECIALIST: ${selection.specialist.label} (${selection.specialist.id})`,
-    `SPECIALIST CONTRACT: ${selection.specialist.contract}`,
+    "SPECIALIST OPERATING CONTRACT:",
+    `- Goal: ${selection.specialist.contract}`,
+    `- Non-authority: ${specialistMustNot(selection)}`,
+    "- Evidence: Ground material claims in observable support; label inference and unresolved gaps.",
+    `- Handoff: ${specialistHandoff(selection)}`,
     `SELECTION BASIS: ${selection.reasons.join(" · ")}`,
     "REQUIRED VERIFICATION GATES:",
     ...selection.gates.map((gate) => `- ${gate}`),
@@ -264,22 +271,109 @@ function renderHarnessBlock(
     .join("\n\n");
 }
 
+function specialistMustNot(selection: CapabilitySelection): string {
+  const role = selection.role;
+  const rule = role === "planner" || role === "architect"
+    ? "Do not execute unassigned implementation or approve your own plan."
+    : role === "worker"
+      ? "Do not fabricate evidence, expand permissions, or self-approve."
+      : role === "manager"
+        ? "Do not replace independent audit or accept work without contract evidence."
+        : role === "validator"
+          ? "Do not repair the submission silently or defer to another reviewer's vote."
+          : role === "reducer"
+            ? "Do not erase material conflicts, provenance, or failed checks during synthesis."
+            : "Do not accept unsupported claims or waive required gates.";
+  return `${rule} Never redefine scope, tool authority, or the output schema.`;
+}
+
+function specialistHandoff(selection: CapabilitySelection): string {
+  const role = selection.role;
+  if (role === "validator") return "Return an independent pass/fail finding with evidence, counterexamples, and blockers.";
+  if (role === "judge") return "Return a gate-backed decision with unresolved caveats and the next safe action.";
+  if (role === "planner" || role === "architect") return "Return traceable work units, interfaces, checks, and blockers to execution owners.";
+  return "Return observable artifacts, performed checks, and blockers to the assigned reviewer or parent role.";
+}
+
 function renderSkills(skills: SkillDefinition[], maxChars: number): string {
   if (skills.length === 0 || maxChars <= 0) return "";
   const header = "SELECTED PROCEDURAL SKILLS";
   let remaining = Math.max(0, maxChars - header.length - 1);
-  const entries: string[] = [];
-  for (const skill of skills) {
-    if (remaining <= 0) break;
-    const raw = escapePromptControlMarkers(
-      `[${skill.id}@${skill.version} · ${skill.source}]\n${skill.description}\n${skill.instructions}`,
-    );
-    const entry = truncateExact(raw, remaining);
-    if (!entry) break;
-    entries.push(entry);
-    remaining -= entry.length + 2;
+  if (remaining <= 0) return truncateExact(header, maxChars);
+
+  const metadataIdentities = skills.map(
+    (skill) => `[${skill.id}@${skill.version} · ${skill.source} · sha256:${skill.contentHash.slice(0, 12)}]`,
+  );
+  const metadata = skills.map((skill, index) => escapePromptControlMarkers(
+    `${metadataIdentities[index]} ${skill.description}`,
+  ));
+  const minimumMetadataChars = metadataIdentities.reduce((sum, entry) => sum + entry.length, Math.max(0, skills.length - 1));
+  const desiredMetadataChars = metadata.reduce((sum, entry) => sum + entry.length, 0) + Math.max(0, metadata.length - 1);
+  const metadataBudget = Math.min(
+    remaining,
+    Math.max(
+      minimumMetadataChars,
+      Math.min(desiredMetadataChars, Math.floor(remaining * 0.45)),
+    ),
+  );
+  const boundedMetadata = fairSkillMetadata(skills, metadataIdentities, metadataBudget);
+  const sections = [boundedMetadata.join("\n")];
+  remaining -= boundedMetadata.reduce((sum, entry) => sum + entry.length, 0) + Math.max(0, boundedMetadata.length - 1);
+
+  if (remaining > 2) {
+    remaining -= 2;
+    const instructions: string[] = [];
+    for (let index = 0; index < skills.length; index += 1) {
+      const skill = skills[index]!;
+      const separators = Math.max(0, skills.length - index - 1) * 2;
+      const share = Math.floor(Math.max(0, remaining - separators) / (skills.length - index));
+      const prefix = `INSTRUCTIONS ${skill.id}:\n`;
+      const omitted = `${prefix}…[instruction omitted: context budget]`;
+      const raw = `${prefix}${escapePromptControlMarkers(skill.instructions)}`;
+      const entry = share >= omitted.length
+        ? truncateWithMarker(raw, share, "\n…[instruction truncated: context budget]")
+        : truncateExact(omitted, share);
+      instructions.push(entry);
+      remaining -= entry.length + (index < skills.length - 1 ? 2 : 0);
+    }
+    sections.push(instructions.join("\n\n"));
   }
-  return entries.length > 0 ? `${header}\n${entries.join("\n\n")}` : "";
+  return `${header}\n${sections.filter(Boolean).join("\n\n")}`;
+}
+
+function fairSkillMetadata(skills: SkillDefinition[], identities: string[], maxChars: number): string[] {
+  if (skills.length === 0 || maxChars <= 0) return [];
+  const bounded: string[] = [];
+  const identityChars = identities.reduce((sum, entry) => sum + entry.length, 0);
+  if (identityChars + Math.max(0, skills.length - 1) > maxChars) {
+    let remaining = maxChars;
+    for (let index = 0; index < skills.length; index += 1) {
+      const separators = Math.max(0, skills.length - index - 1);
+      const share = Math.floor(Math.max(0, remaining - separators) / (skills.length - index));
+      const compact = `[${skills[index]!.id}@${skills[index]!.version}]`;
+      const entry = truncateExact(compact, share);
+      bounded.push(entry);
+      remaining -= entry.length + (index < skills.length - 1 ? 1 : 0);
+    }
+    return bounded;
+  }
+  let remainingExtras = Math.max(0, maxChars - identityChars - Math.max(0, skills.length - 1));
+  for (let index = 0; index < skills.length; index += 1) {
+    const share = Math.floor(remainingExtras / (skills.length - index));
+    const description = escapePromptControlMarkers(skills[index]!.description);
+    const suffix = share > 1 ? ` ${truncateWithMarker(description, share - 1, "…[description truncated]")}` : "";
+    const entry = `${identities[index]}${suffix}`;
+    bounded.push(entry);
+    remainingExtras -= suffix.length;
+  }
+  return bounded;
+}
+
+function truncateWithMarker(value: string, maxChars: number, marker: string): string {
+  if (maxChars <= 0) return "";
+  if (value.length <= maxChars) return value;
+  if (marker.length >= maxChars) return value.slice(0, maxChars);
+  return `${value.slice(0, maxChars - marker.length)}${marker}`;
 }
 
 function renderMemories(memories: LearningMemory[], maxChars: number): string {

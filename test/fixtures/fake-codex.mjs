@@ -10,6 +10,7 @@ let nextToolCall = 1;
 const interrupted = new Set();
 const threadTools = new Map();
 const threadInstructions = new Map();
+const threadStartParams = new Map();
 const pendingToolCalls = new Map();
 let experimentalApi = false;
 const neverAccount = process.argv.includes("never-account");
@@ -67,6 +68,7 @@ lines.on("line", (line) => {
     const threadId = params.threadId ?? `thread-${nextThread++}`;
     threadTools.set(threadId, params.dynamicTools ?? []);
     threadInstructions.set(threadId, params.developerInstructions ?? "");
+    if (method === "thread/start") threadStartParams.set(threadId, params);
     setTimeout(() => send({ id, result: { thread: { id: threadId } } }), 30);
   } else if (method === "turn/start") {
     const turnId = `turn-${nextTurn++}`;
@@ -138,6 +140,12 @@ lines.on("line", (line) => {
       } else if (!delayed) {
         const text = params.input?.[0]?.text === "echo-sandbox-policy"
           ? JSON.stringify(params.sandboxPolicy)
+          : params.input?.[0]?.text === "echo-thread-start-params"
+            ? JSON.stringify({
+                ephemeral: threadStartParams.get(params.threadId)?.ephemeral,
+                serviceName: threadStartParams.get(params.threadId)?.serviceName,
+                threadSource: threadStartParams.get(params.threadId)?.threadSource,
+              })
           : params.input?.[0]?.text === "echo-developer-instructions"
             ? threadInstructions.get(params.threadId) ?? ""
             : `network=${String(params.sandboxPolicy?.networkAccess)}`;

@@ -156,16 +156,18 @@ flowchart LR
   V --> L["local learning record"]
 ```
 
-전문 역할은 조직 직책과 별도입니다. 예를 들어 한 작업의 조직 역할은 `research_specialist`, runtime 역할은 `worker`, 전문 역량은 `research-investigator`일 수 있습니다. Planner는 요구사항·critical path·adversarial·operations·simplicity 렌즈를, blind validator는 근거 무결성·완료 기준·실패 모드 렌즈를 번갈아 사용합니다. 모델은 같아도 목표 함수와 검사 관점의 상관을 낮추려는 장치이며, 진짜 모델 다양성을 주장하지 않습니다.
+전문 역할은 조직 직책과 별도입니다. 예를 들어 한 작업의 조직 역할은 `research_specialist`, runtime 역할은 `worker`, 전문 역량은 `research-investigator`일 수 있습니다. 각 전문 역할은 긴 캐릭터 설정 대신 Goal·Non-authority·Evidence·Handoff 네 항목의 compact operating contract를 받습니다. Worker는 self-approval, validator는 silent repair, reducer는 provenance 삭제, judge는 gate 면제를 할 수 없습니다. Planner는 요구사항·critical path·adversarial·operations·simplicity 렌즈를, blind validator는 근거 무결성·완료 기준·실패 모드 렌즈를 번갈아 사용합니다. 모델은 같아도 목표 함수와 검사 관점의 상관을 낮추려는 장치이며, 진짜 모델 다양성을 주장하지 않습니다.
 
-스킬 카탈로그는 내장 runbook과 workspace `SKILL.md`를 합칩니다. 파일 크기·개수·ID·제어문자를 제한하고 역할/부서/작업 유형·텍스트 관련성으로 점수를 계산해 최대 `maxSkillsPerCall`개만 읽습니다. 스킬은 untrusted procedural playbook으로 표시되므로 역할 헌장, 회장 지시, sandbox, tool permission, JSON schema보다 우선할 수 없습니다.
+스킬 카탈로그는 내장 runbook과 workspace `SKILL.md`를 합칩니다. 파일 크기·개수·ID·제어문자를 제한하고 역할/부서/작업 유형·텍스트 관련성으로 점수를 계산해 최대 `maxSkillsPerCall`개만 읽습니다. 잘못 선언된 role/department는 빈 universal scope로 완화하지 않고 스킬 전체를 거부합니다. 실제 procedural body의 SHA-256을 decision identity에 넣고, 선택 점수와 관련성 신호를 감사 trace에 남깁니다. Prompt에는 선택된 모든 스킬 identity를 먼저 보존한 뒤 instruction 예산을 공평하게 배분하므로 앞 스킬 하나가 나머지를 가리지 않습니다. 스킬은 untrusted procedural playbook으로 표시되므로 역할 헌장, 회장 지시, sandbox, tool permission, JSON schema보다 우선할 수 없습니다.
 
 Prompt budget 우선순위는 다음과 같습니다.
 
-1. 회장 지시는 마지막 블록으로 반드시 보존한다.
-2. 본래 task contract를 위한 최소 context를 남긴다.
-3. 남은 범위 안에서 specialist/skill/experience 블록을 자른다.
+1. Evolution module과 Context Compiler가 승인한 required whole-item frame을 원자적으로 보존한다.
+2. required frame이 예산에 맞지 않으면 일부 Work Order를 보내지 않고 gateway 호출 전에 typed failure로 종료한다.
+3. 남은 범위 안에서 specialist/skill/experience와 회장 지시를 bounded composition한다.
 4. 전체 길이는 항상 `maxContextChars` 이하이다.
+
+Planning committee 수는 고정 인원이 아니라 상한입니다. Mission Preflight의 요구사항·미해결 항목·위험과 목표의 조사/순차 전달 신호로 `single`, `centralized`, `parallel-research`, `review-loop` 중 하나를 결정하며, 코딩처럼 순차 의존이 강한 작업은 한 planner와 execute → independent verify → repair/stop loop를 우선합니다. 자세한 근거는 [실행 품질 최적화 문서](HARNESS_OPTIMIZATION_2026-08-17.ko.md)를 참고하세요.
 
 ## 관찰 전용 레거시 학습과 Evolution Harness v2
 
@@ -217,7 +219,7 @@ judge > architect > reducer > manager/validator > planner > worker
 
 ## 컨텍스트 경계
 
-문자 예산 자체는 기존 설정과 호환되도록 유지하지만, 초과 prompt를 더 이상 prefix-only로 자르지 않습니다. 60%는 목표·요구사항·작업 계약이 있는 앞부분에, 나머지는 최신 feedback·검증 오류가 있는 뒷부분에 배정하고 중간 생략량을 marker로 기록합니다. UTF-16 surrogate 경계도 보정합니다. 회장 지시와 하네스 블록을 붙일 때 재절단되더라도 같은 양끝 보존 규칙을 사용합니다.
+문자 예산 자체는 기존 설정과 호환되도록 유지합니다. Harness v2의 Context Compiler가 만든 prompt는 required frame 전체를 하나의 원자 컴포넌트로 예약하고, Evolution module과 합쳐 예산을 넘으면 모델 호출 전에 `PROMPT_REQUIRED_COMPONENT_EXCEEDS_BUDGET`로 실패합니다. 남는 예산에만 하네스와 회장 지시를 넣습니다. Compiler를 거치지 않는 legacy prompt만 기존 양끝 보존 절단을 사용하며, UTF-16 surrogate 경계를 보정하고 중간 생략량을 marker로 기록합니다.
 
 완전한 token-aware evidence packer, 역할별 hard lane reservation, WAL/checkpoint compaction, 동적 DAG 증원은 후속 단계입니다. 현재 변경은 기존 상태 포맷·global cap·accepted 불변식·resume 계약을 유지하는 범위에 한정합니다.
 

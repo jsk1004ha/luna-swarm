@@ -30,7 +30,7 @@ export const DEFAULT_CONFIG: SwarmConfig = {
   rateLimitCooldownMs: 30_000,
   schedulerAgingMs: 5_000,
   allowNetwork: false,
-  ephemeralThreads: false,
+  ephemeralThreads: true,
   stateDirectory: ".luna-swarm",
   harnessEnabled: true,
   maxSkillsPerCall: 3,
@@ -131,6 +131,9 @@ export function validateConfig(config: SwarmConfig): void {
     throw new Error("validationQuorum must be > 0.5 and <= 1");
   }
   if (!config.model.trim()) throw new Error("model is required");
+  if (typeof config.ephemeralThreads !== "boolean") {
+    throw new Error("ephemeralThreads must be a boolean");
+  }
   if (config.sourceIdentity !== undefined && !config.sourceIdentity.trim()) {
     throw new Error("sourceIdentity must be a non-empty concrete build identity when provided");
   }

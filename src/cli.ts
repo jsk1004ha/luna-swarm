@@ -822,6 +822,7 @@ async function printSkills(args: string[]): Promise<void> {
     departments: skill.departments,
     taskKinds: skill.taskKinds,
     version: skill.version,
+    contentHash: skill.contentHash,
   }));
   if (args.includes("--json")) {
     process.stdout.write(`${JSON.stringify({ count: skills.length, skills }, null, 2)}\n`);

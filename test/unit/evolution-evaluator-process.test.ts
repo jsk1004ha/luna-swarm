@@ -351,6 +351,7 @@ test("client rejects a self-consistent child authority and runner identity that 
         sealedConfigPath: prepared.configPath,
         command: { executablePath: process.execPath, arguments: ["--import", tsxLoaderPath, workerPath] },
         pins: { ...prepared.pins, authority: { ...prepared.pins.authority, publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString() } },
+        startupTimeoutMs: 30_000,
       }), (error: Error & { code?: string }) => error.code === "PROTOCOL_ERROR");
     } finally {
       await rm(prepared.directory, { recursive: true, force: true });
@@ -363,6 +364,7 @@ test("client rejects a self-consistent child authority and runner identity that 
         sealedConfigPath: prepared.configPath,
         command: { executablePath: process.execPath, arguments: ["--import", tsxLoaderPath, workerPath] },
         pins: { ...prepared.pins, trustedRunnerIntegritySha256: [`sha256:${"0".repeat(64)}`] },
+        startupTimeoutMs: 30_000,
       }), (error: Error & { code?: string }) => error.code === "PROTOCOL_ERROR");
     } finally {
       await rm(prepared.directory, { recursive: true, force: true });

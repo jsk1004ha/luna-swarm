@@ -61,7 +61,20 @@ const BROKER_ONLY_CODEX_ARGS = [
   "--disable", "multi_agent",
   "--disable", "multi_agent_v2",
   "--disable", "image_generation",
+  // Luna supplies its own pinned SkillCatalog and host-enforced read/search broker.
+  // Disabling Codex plugin/skill discovery prevents each shard from trying to
+  // install or refresh shared system skills under CODEX_HOME on startup.
+  "--disable", "plugins",
+  "--disable", "plugin_sharing",
+  "--disable", "remote_plugin",
+  "--disable", "skill_search",
+  "--disable", "skill_mcp_dependency_install",
 ];
+
+/** Exact child-process feature boundary; returned as a copy for audit/tests. */
+export function codexAppServerIsolationArgs(): string[] {
+  return [...BROKER_ONLY_CODEX_ARGS];
+}
 
 function isExpectedDeniedBuiltinDiagnostic(line: string): boolean {
   return line.includes("codex_core::tools::router") &&
@@ -96,7 +109,7 @@ export class CodexAppServerBackend implements AgentBackend {
       cwd: options.workspace,
       env: chatGptOnlyEnvironment(),
       ...(options.codexPath ? { codexPath: options.codexPath } : {}),
-      codexArgs: options.codexArgs ?? [...BROKER_ONLY_CODEX_ARGS],
+      codexArgs: options.codexArgs ?? codexAppServerIsolationArgs(),
       ...(options.onStderr ? {
         onStderr: (line: string) => {
           if (!isExpectedDeniedBuiltinDiagnostic(line)) options.onStderr!(line);
@@ -262,6 +275,8 @@ export class CodexAppServerBackend implements AgentBackend {
     }
     const response = await this.client.request<ThreadResponse>("thread/start", {
       ...common,
+      serviceName: "luna-swarm",
+      threadSource: "luna-swarm-internal",
       ...(request.hostToolSession
         ? { dynamicTools: normalizeHostToolSpecs(request.hostToolSession) }
         : {}),

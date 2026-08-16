@@ -102,6 +102,171 @@ test("skill catalog loads bounded workspace skills and routes a specialist", asy
   }
 });
 
+test("workspace skill body hash participates in deterministic decision identity", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-skill-identity-"));
+  try {
+    const directory = join(workspace, ".state", "skills", "identity-skill");
+    const path = join(directory, "SKILL.md");
+    await mkdir(directory, { recursive: true });
+    const write = async (instruction: string) => writeFile(
+      path,
+      `---\nname: identity-skill\ndescription: Identity migration procedure\nroles: [worker]\ndepartments: [engineering]\ntask_kinds: [implementation]\ntags: [identity, migration]\nversion: stable-v1\n---\n# Identity skill\n\n${instruction}\n`,
+      "utf8",
+    );
+    const input = {
+      role: "worker" as const,
+      department: "engineering" as const,
+      purpose: "execute_task",
+      taskKind: "implementation",
+      taskRisk: "medium" as const,
+      text: "Implement the identity migration procedure.",
+    };
+    await write("Apply migration step A and verify it.");
+    const firstCatalog = await SkillCatalog.load(workspace, ".state");
+    const firstSkill = firstCatalog.list().find((skill) => skill.id === "identity-skill");
+    const first = firstCatalog.select(input, new Map(), 8, 2);
+    await write("Apply migration step B and verify it.");
+    const secondCatalog = await SkillCatalog.load(workspace, ".state");
+    const secondSkill = secondCatalog.list().find((skill) => skill.id === "identity-skill");
+    const second = secondCatalog.select(input, new Map(), 8, 2);
+
+    assert.match(firstSkill?.contentHash ?? "", /^[a-f0-9]{64}$/);
+    assert.match(secondSkill?.contentHash ?? "", /^[a-f0-9]{64}$/);
+    assert.notEqual(firstSkill?.contentHash, secondSkill?.contentHash);
+    assert.notEqual(first.decisionId, second.decisionId);
+    assert.ok(first.skills.some((skill) => skill.id === "identity-skill"));
+    assert.ok(second.skills.some((skill) => skill.id === "identity-skill"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("declared unknown skill metadata is rejected while minimal legacy procedures remain safe", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-skill-metadata-"));
+  try {
+    const root = join(workspace, ".state", "skills");
+    const cases: Array<[string, string]> = [
+      ["unknown-role", "roles: [wizard]"],
+      ["unknown-department", "departments: [sales]"],
+      ["malformed-kind", "task_kinds: [not/a/safe/kind]"],
+      ["malformed", "roles [worker]"],
+    ];
+    for (const [id, metadata] of cases) {
+      const directory = join(root, id);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), `---\nname: ${id}\n${metadata}\n---\n# ${id}\n\nProcedure.\n`, "utf8");
+    }
+    const legacyDirectory = join(root, "legacy-procedure");
+    await mkdir(legacyDirectory, { recursive: true });
+    await writeFile(
+      join(legacyDirectory, "SKILL.md"),
+      "# Legacy procedure\n\nInspect, act, and verify the observable result.\n",
+      "utf8",
+    );
+
+    const skills = (await SkillCatalog.load(workspace, ".state")).list();
+    for (const [id] of cases) assert.equal(skills.some((skill) => skill.id === id), false);
+    const legacy = skills.find((skill) => skill.id === "legacy-procedure");
+    assert.ok(legacy);
+    assert.deepEqual(legacy.roles, []);
+    assert.deepEqual(legacy.departments, []);
+    assert.deepEqual(legacy.taskKinds, []);
+    assert.match(legacy.contentHash, /^[a-f0-9]{64}$/);
+    const customKindDirectory = join(root, "custom-kind");
+    await mkdir(customKindDirectory, { recursive: true });
+    await writeFile(
+      join(customKindDirectory, "SKILL.md"),
+      "---\nname: custom-kind\nroles: [worker]\ndepartments: [engineering]\ntask_kinds: [database-migration]\n---\nCustom workload procedure.\n",
+      "utf8",
+    );
+    const withCustomKind = (await SkillCatalog.load(workspace, ".state")).list();
+    assert.deepEqual(
+      withCustomKind.find((skill) => skill.id === "custom-kind")?.taskKinds,
+      ["database-migration"],
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("skill selection exposes deterministic score signals and rejects learned priority without relevance", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-skill-trace-"));
+  try {
+    const directory = join(workspace, ".state", "skills", "priority-only");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "SKILL.md"), "# Opaque manual\n\nUse an unrelated opaque workflow.\n", "utf8");
+    const catalog = await SkillCatalog.load(workspace, ".state");
+    const input = {
+      role: "worker" as const,
+      department: "engineering" as const,
+      purpose: "execute_task",
+      taskKind: "implementation",
+      taskRisk: "medium" as const,
+      text: "Implement and test a database migration.",
+    };
+    const performance = new Map([[
+      "priority-only",
+      { uses: 100, accepted: 100, failed: 0, reworked: 0, meanQuality: 1 },
+    ]]);
+    const first = catalog.select(input, performance, 8, 2, new Map([["priority-only", 3]]));
+    const second = catalog.select(input, performance, 8, 2, new Map([["priority-only", 3]]));
+    const trace = first.skillTrace.find((entry) => entry.skillId === "priority-only");
+    assert.ok((trace?.score ?? 0) >= 6, "learned/policy priority would have passed the former score-only threshold");
+    assert.equal(trace?.selected, false);
+    assert.ok(trace?.signals.includes("relevance-gate:fail"));
+    assert.equal(first.skills.some((skill) => skill.id === "priority-only"), false);
+    assert.deepEqual(first.skillTrace, second.skillTrace);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("skill rendering preserves every selected identity and allocates instruction budget fairly", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-skill-budget-"));
+  try {
+    const root = join(workspace, ".state", "skills");
+    const alpha = join(root, "alpha-fair");
+    const beta = join(root, "beta-fair");
+    await mkdir(alpha, { recursive: true });
+    await mkdir(beta, { recursive: true });
+    const metadata = (name: string) => `---\nname: ${name}\ndescription: ${name} migration check\nroles: [worker]\ndepartments: [engineering]\ntask_kinds: [implementation]\ntags: [migration]\n---\n`;
+    await writeFile(join(alpha, "SKILL.md"), `${metadata("alpha-fair")}# Alpha\n\n${"ALPHA-LONG ".repeat(1_000)}\n`, "utf8");
+    await writeFile(join(beta, "SKILL.md"), `${metadata("beta-fair")}# Beta\n\nSECOND-SKILL-INSTRUCTION verify beta independently.\n`, "utf8");
+    const harness = new AdaptiveHarness(workspace, {
+      ...config(),
+      stateDirectory: ".state",
+      learningEnabled: false,
+      maxSkillsPerCall: 8,
+      maxSkillChars: 1_800,
+    });
+    await harness.initialize();
+    const applied = harness.apply({
+      threadKey: "worker:T1",
+      role: "worker",
+      corporateRole: "software_engineer",
+      department: "engineering",
+      purpose: "execute_task",
+      taskId: "T1",
+      taskKind: "implementation",
+      taskRisk: "medium",
+      prompt: "Implement and test the alpha-fair beta-fair migration.",
+      reasoningEffort: "medium",
+    });
+    assert.ok(applied.skillIds.includes("alpha-fair"));
+    assert.ok(applied.skillIds.includes("beta-fair"));
+    for (const skillId of applied.skillIds) assert.match(applied.block, new RegExp(`\\[${skillId}@`));
+    assert.match(applied.block, /SECOND-SKILL-INSTRUCTION/);
+    assert.match(applied.block, /instruction truncated: context budget/);
+    assert.match(applied.block, /SPECIALIST OPERATING CONTRACT/);
+    assert.match(applied.block, /Non-authority:.*self-approve/i);
+    assert.match(applied.block, /Evidence:.*observable support/i);
+    assert.match(applied.block, /Handoff:.*artifacts,.*checks, and blockers/i);
+    assert.ok(applied.skillSelectionTrace.some((entry) => entry.selected));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("harness decisions are deterministic and independent audit calls receive stronger gates", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-harness-policy-"));
   try {

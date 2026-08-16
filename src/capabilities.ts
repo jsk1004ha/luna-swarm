@@ -17,6 +17,8 @@ export interface SkillDefinition {
   source: SkillSource;
   sourcePath?: string;
   version: string;
+  /** Stable SHA-256 of the normalized procedural body. */
+  contentHash: string;
   priority: number;
 }
 
@@ -48,6 +50,7 @@ export interface CapabilityInput {
 }
 
 export interface CapabilitySelection {
+  role: AgentRole;
   specialist: SpecialistProfile;
   skills: SkillDefinition[];
   policyVersion: string;
@@ -55,6 +58,15 @@ export interface CapabilitySelection {
   risk: TaskRisk;
   reasons: string[];
   gates: HarnessGate[];
+  skillTrace: SkillSelectionTrace[];
+}
+
+export interface SkillSelectionTrace {
+  skillId: string;
+  score: number;
+  selected: boolean;
+  eligible: boolean;
+  signals: string[];
 }
 
 export type HarnessGate =
@@ -86,6 +98,8 @@ const DEPARTMENTS: readonly Department[] = [
   "quality",
   "integration",
 ];
+
+const VALID_TASK_KIND = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 
 const SPECIALISTS: readonly SpecialistProfile[] = [
   {
@@ -335,14 +349,14 @@ export class SkillCatalog {
     policyVersion = HARNESS_POLICY_VERSION,
   ): CapabilitySelection {
     const specialist = resolveSpecialist(input);
-    if (maxSkills <= 0) return completeSelection(input, specialist, [], policyVersion);
+    if (maxSkills <= 0) return completeSelection(input, specialist, [], [], policyVersion);
     const textTokens = tokenize(
       `${input.purpose} ${input.taskKind ?? ""} ${input.text}`,
     );
     const recommended = new Set(specialist.recommendedSkillIds);
-    const ranked = [...this.byId.values()]
-      .filter((skill) => skill.roles.length === 0 || skill.roles.includes(input.role))
+    const scored = [...this.byId.values()]
       .map((skill) => {
+        const eligible = skill.roles.length === 0 || skill.roles.includes(input.role);
         const departmentMatch = Boolean(
           input.department && skill.departments.includes(input.department),
         );
@@ -353,8 +367,18 @@ export class SkillCatalog {
           `${skill.id} ${skill.name} ${skill.description} ${skill.tags.join(" ")}`,
         );
         const overlap = intersectionSize(textTokens, skillTokens);
+        const isRecommended = recommended.has(skill.id);
+        const relevant = isRecommended || departmentMatch || kindMatch || overlap > 0;
+        const signals = [
+          `role:${eligible ? "match" : "mismatch"}`,
+          ...(isRecommended ? ["specialist:recommended"] : []),
+          ...(departmentMatch ? [`department:${input.department}`] : []),
+          ...(kindMatch ? [`task-kind:${safeDecisionLabel(input.taskKind ?? "")}`] : []),
+          ...(overlap > 0 ? [`text-overlap:${overlap}`] : []),
+          `relevance-gate:${relevant ? "pass" : "fail"}`,
+        ];
         let score = skill.priority;
-        if (recommended.has(skill.id)) score += 20;
+        if (isRecommended) score += 20;
         if (departmentMatch) score += 6;
         if (kindMatch) score += 8;
         score += Math.min(8, overlap * 2);
@@ -364,16 +388,30 @@ export class SkillCatalog {
           const acceptance = learned.accepted / learned.uses;
           const failure = learned.failed / learned.uses;
           score += (acceptance - 0.5) * 8 - failure * 4 + learned.meanQuality * 2;
+          signals.push(`learned:${learned.uses}`);
         }
-        score += Math.max(-3, Math.min(3, policyAdjustments.get(skill.id) ?? 0));
-        return { skill, score };
+        const adjustment = Math.max(-3, Math.min(3, policyAdjustments.get(skill.id) ?? 0));
+        score += adjustment;
+        if (adjustment !== 0) signals.push(`policy-adjustment:${adjustment}`);
+        return { skill, score, eligible, relevant, signals };
       })
-      .filter((entry) => entry.score >= 6)
       .sort((left, right) => right.score - left.score || left.skill.id.localeCompare(right.skill.id));
+    const ranked = scored
+      .filter((entry) => entry.eligible && entry.relevant && entry.score >= 6)
+      .sort((left, right) => right.score - left.score || left.skill.id.localeCompare(right.skill.id));
+    const selectedIds = new Set(ranked.slice(0, maxSkills).map((entry) => entry.skill.id));
+    const skillTrace = scored.map((entry) => ({
+      skillId: entry.skill.id,
+      score: stableScore(entry.score),
+      selected: selectedIds.has(entry.skill.id),
+      eligible: entry.eligible,
+      signals: entry.signals,
+    }));
     return completeSelection(
       input,
       specialist,
       ranked.slice(0, maxSkills).map((entry) => structuredClone(entry.skill)),
+      skillTrace,
       policyVersion,
     );
   }
@@ -405,6 +443,7 @@ function completeSelection(
   input: CapabilityInput,
   specialist: SpecialistProfile,
   skills: SkillDefinition[],
+  skillTrace: SkillSelectionTrace[],
   policyVersion = HARNESS_POLICY_VERSION,
 ): CapabilitySelection {
   const risk = input.taskRisk ?? "medium";
@@ -417,6 +456,10 @@ function completeSelection(
       ? `specialist-hint:${specialist.id}`
       : `specialist-policy:${specialist.id}`,
     ...(policyVersion === HARNESS_POLICY_VERSION ? [] : [`learning-policy:${policyVersion}`]),
+    ...skillTrace
+      .filter((entry) => entry.selected)
+      .map((entry) =>
+        `skill:${entry.skillId}:score=${entry.score}:via=${entry.signals.filter((signal) => !signal.startsWith("role:") && !signal.startsWith("relevance-gate:")).join("+") || "role-only"}`),
   ];
   const gates = harnessGates(input, risk);
   const decisionId = `hd-${createHash("sha256").update(JSON.stringify({
@@ -427,11 +470,12 @@ function completeSelection(
     taskKind: input.taskKind ?? null,
     risk,
     specialistId: specialist.id,
-    skillIds: skills.map((skill) => `${skill.id}@${skill.version}`),
+    skillIds: skills.map((skill) => `${skill.id}@${skill.version}#${skill.contentHash}`),
     gates,
     promptFingerprint: createHash("sha256").update(input.text).digest("hex"),
   })).digest("hex").slice(0, 20)}`;
   return {
+    role: input.role,
     specialist,
     skills,
     policyVersion,
@@ -439,6 +483,7 @@ function completeSelection(
     risk,
     reasons,
     gates,
+    skillTrace,
   };
 }
 
@@ -485,6 +530,7 @@ function builtInSkill(
     instructions,
     source: "built-in",
     version: "1",
+    contentHash: hashSkillBody(instructions),
     priority: 4,
   };
 }
@@ -533,6 +579,7 @@ async function readSkill(path: string, source: Exclude<SkillSource, "built-in">)
   }
   if (!text.trim() || text.length > MAX_SKILL_CHARS || UNSAFE_INVISIBLE.test(text)) return null;
   const parsed = parseFrontmatter(text);
+  if (!parsed) return null;
   const fileName = basename(path);
   const fallbackName = fileName.toLowerCase() === "skill.md"
     ? basename(resolve(path, ".."))
@@ -543,7 +590,13 @@ async function readSkill(path: string, source: Exclude<SkillSource, "built-in">)
   const description = cleanScalar(parsed.metadata.description) || firstParagraph(parsed.body) || name;
   const roles = parseKnownList(parsed.metadata.roles, AGENT_ROLES);
   const departments = parseKnownList(parsed.metadata.departments, DEPARTMENTS);
-  const taskKinds = parseList(parsed.metadata.task_kinds ?? parsed.metadata.taskKinds);
+  // taskKind is an extensible workload label, not an authorization enum. Keep
+  // custom kinds but reject malformed/invisible labels deterministically.
+  const taskKinds = parseValidatedList(
+    parsed.metadata.task_kinds ?? parsed.metadata.taskKinds,
+    VALID_TASK_KIND,
+  );
+  if (!roles || !departments || !taskKinds) return null;
   const tags = parseList(parsed.metadata.tags);
   return {
     id,
@@ -557,6 +610,7 @@ async function readSkill(path: string, source: Exclude<SkillSource, "built-in">)
     source,
     sourcePath: path,
     version: cleanScalar(parsed.metadata.version) || "workspace",
+    contentHash: hashSkillBody(parsed.body),
     priority: 0,
   };
 }
@@ -564,20 +618,29 @@ async function readSkill(path: string, source: Exclude<SkillSource, "built-in">)
 function parseFrontmatter(text: string): {
   metadata: Record<string, string>;
   body: string;
-} {
+} | null {
   const match = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/u);
   if (!match) return { metadata: {}, body: text };
   const metadata: Record<string, string> = {};
   for (const line of match[1]!.split(/\r?\n/u)) {
+    if (!line.trim() || /^\s*#/u.test(line)) continue;
     const entry = line.match(/^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/u);
-    if (entry) metadata[entry[1]!] = entry[2]!.trim();
+    if (!entry) return null;
+    metadata[entry[1]!] = entry[2]!.trim();
   }
   return { metadata, body: text.slice(match[0].length) };
 }
 
-function parseKnownList<T extends string>(raw: string | undefined, allowed: readonly T[]): T[] {
+function parseKnownList<T extends string>(raw: string | undefined, allowed: readonly T[]): T[] | null {
   const allow = new Set<string>(allowed);
-  return parseList(raw).filter((entry): entry is T => allow.has(entry));
+  const declared = parseList(raw);
+  if (declared.some((entry) => !allow.has(entry))) return null;
+  return declared as T[];
+}
+
+function parseValidatedList(raw: string | undefined, pattern: RegExp): string[] | null {
+  const declared = parseList(raw);
+  return declared.every((entry) => pattern.test(entry)) ? declared : null;
 }
 
 function parseList(raw: string | undefined): string[] {
@@ -631,6 +694,16 @@ function intersectionSize(left: Set<string>, right: Set<string>): number {
   let count = 0;
   for (const value of left) if (right.has(value)) count += 1;
   return count;
+}
+
+function hashSkillBody(body: string): string {
+  return createHash("sha256")
+    .update(body.replace(/\r\n?/gu, "\n").trim())
+    .digest("hex");
+}
+
+function stableScore(score: number): number {
+  return Math.round(score * 1_000_000) / 1_000_000;
 }
 
 function uniqueRoots<T extends { path: string }>(roots: T[]): T[] {

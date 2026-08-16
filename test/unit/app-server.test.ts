@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import test from "node:test";
-import { CodexAppServerBackend } from "../../src/backend/codex-app-server.js";
+import {
+  CodexAppServerBackend,
+  codexAppServerIsolationArgs,
+} from "../../src/backend/codex-app-server.js";
 import {
   AppServerClient,
   AppServerTransportError,
@@ -20,6 +23,23 @@ import { AgentGateway } from "../../src/runtime/gateway.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fakeCodex = resolve(here, "../fixtures/fake-codex.mjs");
+
+test("App Server shards disable Codex plugin and shared system-skill mutation", () => {
+  const args = codexAppServerIsolationArgs();
+  for (const feature of [
+    "plugins",
+    "plugin_sharing",
+    "remote_plugin",
+    "skill_search",
+    "skill_mcp_dependency_install",
+  ]) {
+    const featureIndex = args.indexOf(feature);
+    assert.ok(featureIndex > 0, `${feature} is disabled`);
+    assert.equal(args[featureIndex - 1], "--disable");
+  }
+  assert.deepEqual(codexAppServerIsolationArgs(), args);
+  assert.notEqual(codexAppServerIsolationArgs(), args);
+});
 
 class ControlledWritable extends EventEmitter {
   readonly writes: string[] = [];
@@ -88,6 +108,28 @@ test("tool-less calls explicitly forbid code mode and expected denied-tool diagn
     assert.ok(stderr.includes("ERROR retained app-server diagnostic"));
   } finally {
     await instance.close();
+  }
+});
+
+test("internal swarm threads are ephemeral and tagged by default while persistence stays opt-in", async () => {
+  assert.equal(DEFAULT_CONFIG.ephemeralThreads, true);
+  for (const [ephemeralThreads, expected] of [[true, true], [false, false]] as const) {
+    const instance = new CodexAppServerBackend({
+      workspace: process.cwd(),
+      codexPath: process.execPath,
+      codexArgs: [fakeCodex],
+      config: { ...DEFAULT_CONFIG, ephemeralThreads },
+    });
+    try {
+      const response = await instance.run(request(`history-${String(expected)}`, "echo-thread-start-params"));
+      assert.deepEqual(JSON.parse(response.text), {
+        ephemeral: expected,
+        serviceName: "luna-swarm",
+        threadSource: "luna-swarm-internal",
+      });
+    } finally {
+      await instance.close();
+    }
   }
 });
 

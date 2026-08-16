@@ -268,7 +268,7 @@ Shadow/Canary 운영 제어 루프는 trusted operations signer가 명시적으�
 
 실행에 영향을 주는 유일한 진화 경로는 `.luna-swarm/evolution`입니다. 새 실행은 workload별 Stable Pointer를 한 번 snapshot하고, 각 Work Order의 retry·validation·resume은 저장된 `bundleId`와 `bundleHash`를 계속 사용합니다. Decision Trace는 원시 채팅 대신 입력·컴포넌트·도구·출력·검증 reference와 실제 측정 가능한 timing만 기록하며 secret·PII·환경변수 값은 제거합니다. Objective Outcome은 원본 Trace와 실제 G0/G2/G3 증거를 역참조하고, paired evaluation 점수는 보호된 benchmark evaluator의 quality receipt까지 검증합니다. Git이 아닌 작업공간은 `sourceIdentity`를 설정할 수 있고, 없으면 본 작업은 관찰 전용으로 계속되지만 승격 근거에는 포함되지 않습니다. 승격은 actor·reason·expected generation·검증 receipt를 모두 요구하는 명시적 `evolve promote`에서만 가능하며, 현재 실행에는 영향을 주지 않고 다음 실행부터 적용됩니다. 자세한 계약은 [Evolution Harness v2](docs/EVOLUTION_HARNESS_V2.ko.md)를 참고하세요.
 
-Workspace 스킬은 `.luna-swarm/skills/<id>/SKILL.md` 또는 `.codex/skills/<id>/SKILL.md`에서 읽습니다. 추가 디렉터리는 `LUNA_SWARM_SKILL_DIRS`에 OS path delimiter로 지정할 수 있습니다. 스킬 본문은 실행하지 않고 프롬프트의 untrusted procedural playbook으로만 넣으며, 역할 헌장·회장 지시·안전 경계·도구 권한·JSON schema를 덮을 수 없습니다.
+Workspace 스킬은 `.luna-swarm/skills/<id>/SKILL.md` 또는 `.codex/skills/<id>/SKILL.md`에서 읽습니다. 추가 디렉터리는 `LUNA_SWARM_SKILL_DIRS`에 OS path delimiter로 지정할 수 있습니다. 선언한 role/department가 잘못되면 universal skill로 완화하지 않고 해당 스킬을 거부하며, 정규화한 본문의 SHA-256이 decision identity와 `skills --json`에 포함됩니다. 스킬 본문은 실행하지 않고 프롬프트의 untrusted procedural playbook으로만 넣으며, 역할 헌장·회장 지시·안전 경계·도구 권한·JSON schema를 덮을 수 없습니다.
 
 상태 흐름:
 
@@ -302,7 +302,7 @@ stateDiagram-v2
 | `maxHierarchyDepth` | 12 | 회장 아래 프로젝트 조직의 최대 깊이 |
 | `maxDirectReports` | 12 | 한 관리자가 직접 받는 task+child-team 보고 상한 |
 | `maxAgentTurns` | 20,000 | 재개를 포함한 실행 전체 모델 turn hard budget |
-| `planningCommitteeSize` | 5 | 요구사항·critical path·adversarial·operations·simplicity 독립 기획 수 |
+| `planningCommitteeSize` | 5 | 기획 위원회 최대치. Mission Preflight 기반 topology가 목표 크기 1·3·5를 정하고 설정 상한으로 제한 |
 | `validatorsLowRisk` | 2 | 저·중위험 작업의 독립 감사자 수 |
 | `validatorsHighRisk` | 3 | 고위험 작업의 독립 감사자 수 |
 | `validationQuorum` | 2/3 | 감사 통과 비율; 직속 팀장 승인은 별도 필수 |
@@ -311,9 +311,10 @@ stateDiagram-v2
 | `callTimeoutMs` | 1,200,000 | 한 모델 호출 제한 시간 |
 | `schedulerAgingMs` | 5,000 | 대기 요청을 한 역할 우선순위 단계만큼 승격하는 주기 |
 | `allowNetwork` | false | read-only agent의 네트워크 사용(명시적 opt-in) |
+| `ephemeralThreads` | true | 내부 App Server thread를 Codex 대화 기록에 영구 저장하지 않음. 디버깅용 기록이 필요할 때만 `false`로 opt-in |
 | `harnessEnabled` | true | 전문 역량 라우팅과 bounded skill prompt 사용 |
 | `maxSkillsPerCall` | 3 | 한 호출에 선택하는 스킬 상한 |
-| `maxSkillChars` | 6,000 | 스킬 블록 문자 예산 |
+| `maxSkillChars` | 6,000 | 선택 스킬 metadata를 우선 보존하고 instruction을 공평하게 나누는 전체 문자 예산 |
 | `learningEnabled` | true | 검증된 실행 경험의 workspace 로컬 기록 |
 | `learningAutoApply` | false | Evolution Harness v2에서 비활성. 학습 기록은 관찰 전용이며 Bundle 승격은 수동 CAS만 허용 |
 | `sourceIdentity` | 생략 | 비Git 배포의 구체적인 빌드 identity. 없으면 본 작업은 계속하되 해당 run은 승격 증거에서 제외 |
@@ -339,7 +340,7 @@ stateDiagram-v2
 
 ## Harness v2
 
-실행 계획은 고유 이름을 가진 가변형 Harness v2 조직의 revisioned Work Order로 투영됩니다. 기본 `auto` 모드는 계획의 작업 수·동시성·검증자 수에 맞춰 14~256명의 논리 조직을 산정하며, 산정된 roster는 실행에 고정되어 재시도·재개에도 같은 직원 배정을 보존합니다. `lab-128@2`는 기존 실행 호환을 위해 유지한 조직 계약 버전 이름이며 인원 제한을 뜻하지 않습니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, bounded AST 기반 Program Knowledge Graph가 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급합니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, run-pinned reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다.
+실행 계획은 고유 이름을 가진 가변형 Harness v2 조직의 revisioned Work Order로 투영됩니다. 기본 `auto` 모드는 계획의 작업 수·동시성·검증자 수에 맞춰 14~256명의 논리 조직을 산정하며, 산정된 roster는 실행에 고정되어 재시도·재개에도 같은 직원 배정을 보존합니다. `lab-128@2`는 기존 실행 호환을 위해 유지한 조직 계약 버전 이름이며 인원 제한을 뜻하지 않습니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, deterministic topology router가 `single`·`centralized`·`parallel-research`·`review-loop` 중 하나를 선택합니다. 순차 코딩은 planner 1명과 독립 검증 loop를 우선하고, 서로 독립적인 조사만 제한적으로 fan-out합니다. bounded AST 기반 Program Knowledge Graph는 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급하며, compiler가 whole item으로 승인한 mission·Work Order·dependency frame은 최종 prompt 조립에서도 절단되지 않습니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, run-pinned reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다. 설계 근거와 acceptance test는 [실행 품질 최적화 문서](docs/HARNESS_OPTIMIZATION_2026-08-17.ko.md)에 정리했습니다.
 
 실제 쓰기·shell·network Tool Broker, arbitrary experiment runner, 모든 Evolution component loader는 아직 구현됐다고 주장하지 않습니다. 보호된 평가는 별도 hash-pinned evaluator 프로세스가 hidden suite와 개인키를 소유하고, allowlist된 benchmark runner의 전체 실행 closure를 private copy에서 실행해 서명 receipt만 반환합니다. Shadow/Canary는 operator approval과 operations signer가 구성된 경우에만 후보 트래픽을 열며, signed SLO 위반은 stable-only 전환, 후보 quarantine, Failure Capsule을 durable exactly-once 경로로 연결합니다. App Server는 bounded multi-shard supervisor를 사용하지만 이 저장소에서 실제 계정 검증을 완료한 상한과 미검증 상한은 아래 배포 경계에 구분해 기록합니다.
 
@@ -364,7 +365,8 @@ npm run build
 - 기본 G2 산출물 Oracle은 하나의 계약 문구가 여러 실제 산출물 항목으로 구체화될 수 있음을 인정하되, 계약의 모든 의미 토큰이 실제 항목 전체에 구조적으로 나타나야 통과합니다. 기존 사용자 정의 `deliverable-present` Oracle의 exact-match 의미는 유지됩니다.
 - rework가 필요하면 이전 revision의 산출물 reference를 음성 Outcome Trace가 기록될 때까지 보존하고, 다음 실행 revision이 `ready`가 될 때만 비웁니다. 따라서 재작업 전환 때문에 검증 증거가 사라지지 않습니다.
 - 모든 작업이 거절되면 `No task result passed validation`만 출력하지 않고, 실패한 작업과 실제 validator/Gate/Council 사유를 최대 3건까지 최종 오류와 `run_failed` 이벤트에 포함합니다. 재시도 한도가 끝난 작업은 `task_rework`가 아니라 `task_failed`로 기록됩니다.
-- Host Tool 세션이 없는 App Server 호출에는 도구를 호출하지 말라는 명시적 지시를 넣습니다. 이 경계에서 예상되는 정확한 `code-mode host is disabled` 진단만 운영 stderr에서 제거하며, 인증·rate limit·transport 등 다른 오류는 그대로 보존합니다.
+- Host Tool 세션이 없는 App Server 호출에는 도구를 호출하지 말라는 명시적 지시를 넣습니다. App Server shard는 Luna의 자체 SkillCatalog와 read/search Host Tool Broker만 사용하므로 Codex plugin·remote plugin·skill search·system-skill dependency 설치를 시작부터 비활성화합니다. 이 경계에서 예상되는 정확한 `code-mode host is disabled` 진단만 운영 stderr에서 제거하며, 인증·rate limit·transport 등 다른 오류는 그대로 보존합니다.
+- 내부 planner/worker/validator 호출은 기본적으로 ephemeral thread를 사용하고 `luna-swarm-internal` source로 태깅하므로 Codex의 우선순위·최근 대화 목록에 실행 수만큼 쌓이지 않습니다. 프로세스 안에서는 같은 논리 `threadKey`를 계속 재사용하며, 장애 재개에 필요한 권위 상태는 Codex 대화 기록이 아니라 Luna의 checksummed run state와 Blackboard에 보존됩니다. 과거처럼 내부 대화를 Codex 기록에 남겨 디버깅하려면 설정에서 `ephemeralThreads: false`를 명시합니다.
 
 GitHub Actions는 Node.js 20.19.0과 22.x에서 clean install, 타입 검사, 전체 테스트, 빌드, production dependency audit와 package dry-run을 실행합니다.
 

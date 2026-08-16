@@ -595,7 +595,9 @@ test("planning committee tolerates a minority failure but enforces deterministic
     const architect = backend.calls.find((call) => call.purpose === "architect_plan");
     assert.equal((architect?.data as { candidates: unknown[] }).candidates.length, 2);
     const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
-      .map((line) => JSON.parse(line) as { type: string });
+      .map((line) => JSON.parse(line) as { type: string; message?: string });
+    assert.ok(events.some((event) =>
+      event.type === "planning_topology_selected" && event.message?.startsWith("centralized · 3 planner(s)")));
     assert.ok(events.some((event) => event.type === "planner_candidate_failed"));
   } finally {
     await rm(workspace, { recursive: true, force: true });

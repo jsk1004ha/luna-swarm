@@ -26,7 +26,7 @@
   "rateLimitCooldownMs": 30000,
   "schedulerAgingMs": 5000,
   "allowNetwork": false,
-  "ephemeralThreads": false,
+  "ephemeralThreads": true,
   "stateDirectory": ".luna-swarm",
   "harnessEnabled": true,
   "maxSkillsPerCall": 3,

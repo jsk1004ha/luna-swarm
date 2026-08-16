@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AgentRequest } from "../../src/backend/agent-backend.js";
+import { MockAgentBackend } from "../../src/backend/mock-backend.js";
+import { DEFAULT_CONFIG } from "../../src/config.js";
 import {
   compileContext,
   ContextBudgetExceededError,
@@ -7,6 +10,13 @@ import {
   type ContextCompilerInput,
 } from "../../src/harness-v2/context.js";
 import { HARNESS_V2_ORG_VERSION, type AgentRoleContract, type WorkOrder } from "../../src/harness-v2/contracts.js";
+import {
+  PromptAssemblyBudgetExceededError,
+  SwarmOrchestrator,
+} from "../../src/orchestrator.js";
+import { AgentGateway } from "../../src/runtime/gateway.js";
+import { AtomicRunStore } from "../../src/store.js";
+import type { RunDirective } from "../../src/types.js";
 
 const role: AgentRoleContract = {
   agentId: "engineering-runtime-001",
@@ -148,5 +158,65 @@ test("non-JSON and cyclic items are rejected with a typed serialization error", 
   assert.throws(
     () => compileContext(input({ mission: { id: "cyclic", content: cyclic } })),
     ContextSerializationError,
+  );
+});
+
+test("final prompt assembly preserves compiled context atomically or fails closed", () => {
+  const compiled = compileContext(input());
+  const module = "<evolution-prompt-module>required</evolution-prompt-module>";
+  const request: AgentRequest = {
+    threadKey: "worker:test:WO-7",
+    role: "worker",
+    purpose: "execute_task",
+    prompt: compiled.text,
+    reasoningEffort: "low",
+  };
+  type PromptAssembler = {
+    withHarnessAndDirectives(
+      request: AgentRequest,
+      harnessBlock: string,
+      directives: RunDirective[],
+      requiredPromptModule?: string,
+    ): { request: AgentRequest; includedDirectives: RunDirective[] };
+  };
+  const createAssembler = (maxContextChars: number): PromptAssembler => {
+    const config = { ...DEFAULT_CONFIG, maxContextChars };
+    const backend = new MockAgentBackend(async () => {
+      throw new Error("gateway must not be called by prompt assembly tests");
+    });
+    const gateway = new AgentGateway({ backend, config });
+    const store = new AtomicRunStore(".", ".state", `context-assembly-${maxContextChars}`);
+    return new SwarmOrchestrator({ gateway, store, config, workspace: "." }) as unknown as PromptAssembler;
+  };
+
+  const exactBudget = module.length + 2 + compiled.text.length;
+  const assembled = createAssembler(exactBudget).withHarnessAndDirectives(
+    request,
+    "a harness block that may be omitted",
+    [],
+    module,
+  );
+  assert.equal(assembled.request.prompt, `${module}\n\n${compiled.text}`);
+  assert.match(assembled.request.prompt, /<<<LUNA_CONTEXT_ITEM kind=work-order/);
+  assert.equal(
+    (assembled.request.prompt.match(/<<<LUNA_CONTEXT_ITEM /gu) ?? []).length,
+    (assembled.request.prompt.match(/<<<END_LUNA_CONTEXT_ITEM>>>/gu) ?? []).length,
+  );
+
+  assert.throws(
+    () => createAssembler(exactBudget - 1).withHarnessAndDirectives(
+      request,
+      "a harness block that must not displace required context",
+      [],
+      module,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof PromptAssemblyBudgetExceededError);
+      assert.equal(error.code, "PROMPT_REQUIRED_COMPONENT_EXCEEDS_BUDGET");
+      assert.equal(error.component, "compiled-context");
+      assert.equal(error.requiredCharacters, exactBudget);
+      assert.equal(error.maxCharacters, exactBudget - 1);
+      return true;
+    },
   );
 });
