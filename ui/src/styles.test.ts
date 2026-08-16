@@ -65,6 +65,15 @@ describe("user-provided ZIP command-center contract", () => {
     expect(css).toMatch(/\.dag-board\s*\{[^}]*grid-template-columns/);
   });
 
+  it("separates Ready and Needs review with cool/warm colors and different marker shapes", () => {
+    expect(home).toMatch(/blocked:\s*\{\s*label:\s*"Needs review",\s*tone:\s*"danger"/);
+    expect(home).toMatch(/idle:\s*\{\s*label:\s*"Ready",\s*tone:\s*"ready"/);
+    expect(css).toMatch(/--ready:#087286/);
+    expect(css).toMatch(/--danger:#a61b3b/);
+    expect(css).toMatch(/\.state-dot\.ready\s*\{[^}]*border:2px solid var\(--ready\)[^}]*background:#fff/);
+    expect(css).toMatch(/\.state-dot\.danger\s*\{[^}]*border-radius:1px[^}]*transform:rotate\(45deg\)/);
+  });
+
   it("ships no old people or HQ raster assets or image references", () => {
     const assetRoots = [
       fileURLToPath(new URL("../public/assets/", import.meta.url)),

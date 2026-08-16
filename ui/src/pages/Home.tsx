@@ -75,9 +75,9 @@ function activityMeta(activity: Activity) {
     reviewing: { label: "In review", tone: "blue" },
     researching: { label: "Researching", tone: "blue" },
     waiting: { label: "Waiting", tone: "gray" },
-    blocked: { label: "Needs review", tone: "red" },
+    blocked: { label: "Needs review", tone: "danger" },
     done: { label: "Done", tone: "green" },
-    idle: { label: "Ready", tone: "amber" },
+    idle: { label: "Ready", tone: "ready" },
   };
   return values[activity];
 }

@@ -42,7 +42,7 @@
 
 ## Visual language
 
-- Color: `#f7f7f5` 앱 셸, `#ffffff` 패널, `#d9d9d5` 경계, 보라 `#6466d9` 선택·주요 동작, 초록 `#22865f` 성공·진행을 중심으로 한다. 상태는 초록(작업/완료), 파랑(조사), 호박(검토/대기), 빨강(차단), 회색(유휴)을 사용하며 색과 텍스트 라벨을 함께 제공한다. Pixi 본사 캔버스 내부만 어두운 공간 표현을 유지한다.
+- Color: `#f7f7f5` 앱 셸, `#ffffff` 패널, `#d9d9d5` 경계, 보라 `#6466d9` 선택·주요 동작, 초록 `#22865f` 성공·진행을 중심으로 한다. 상태는 초록(작업/완료), 파랑(조사), 호박(검토/대기), 청록(Ready), 진홍(Needs review/차단), 회색(유휴)을 사용한다. `Ready`는 청록색 테두리 원, `Needs review`는 진홍색 마름모와 굵은 라벨로 중복 표현해 빨강·주황 구분에 의존하지 않는다. Pixi 본사 캔버스 내부만 어두운 공간 표현을 유지한다.
 - Typography: ZIP 스타일의 `Space Grotesk`/`Manrope`/`IBM Plex Mono` 스택과 크기 계층을 유지한다. 네트워크 폰트가 없을 때는 같은 선언의 산세리프·모노 fallback으로 읽을 수 있어야 한다.
 - Spacing/layout rhythm: ZIP의 240px sidebar, 상단 `app-topbar`, 최대 1440px `content-area`, 16px 카드 gap과 6–9px radius를 기준으로 한다. 선택 상세는 동일 페이지 위의 `agent-drawer`로 열며 중앙에 기존 Inspector 셸을 다시 삽입하지 않는다.
 - Shape/radius/elevation: 입력과 작은 제어는 4~6px, 주요 카드는 8~9px 라운드와 1px 중립 경계를 쓴다. 상시 카드에는 그림자를 거의 쓰지 않고 오버레이·드로어에만 낮은 중립 그림자를 사용한다. 선택 카드는 연한 보라 배경과 보라 경계로 표시한다.
