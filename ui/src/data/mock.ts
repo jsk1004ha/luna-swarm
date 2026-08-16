@@ -144,6 +144,24 @@ export function createMockSnapshot(count = 30, organizationHeadcount = count): S
       teamId: agent.teamId,
       agentId: agent.id,
     }));
+  const reports = outputs.map((output) => ({
+    id: `report:${output.id}`,
+    kind: "task" as const,
+    status: output.status === "reviewing" ? "reviewing" as const : "approved" as const,
+    title: output.title,
+    summary: output.summary,
+    createdAt: output.createdAt,
+    department: output.department,
+    authorIds: [output.agentId],
+    taskId: output.taskId,
+    ...(output.teamId ? { teamId: output.teamId } : {}),
+    sourceTaskIds: output.sourceTaskIds,
+    sections: [
+      { title: "산출물", items: output.deliverables },
+      { title: "검증 요약", items: [`근거 ${output.evidenceCount}건`, `검증 ${output.checkCount}건`] },
+    ],
+    references: { artifactIds: [], gateIds: [], reviewerIds: [], eventIds: [] },
+  }));
   return {
     mode: "demo",
     run: {
@@ -169,6 +187,7 @@ export function createMockSnapshot(count = 30, organizationHeadcount = count): S
     },
     events,
     outputs,
+    reports,
     harness: {
       enabled: true,
       learningEnabled: true,

@@ -12,7 +12,7 @@ export type DepartmentId = (typeof DEPARTMENT_IDS)[number];
 export type Activity = "working" | "reviewing" | "researching" | "waiting" | "blocked" | "done" | "idle";
 export type AgentStatus = "active" | "waiting" | "blocked" | "done" | "idle";
 export type Severity = "info" | "success" | "warning" | "error";
-export type ViewMode = "org" | "dag";
+export type ViewMode = "org" | "dag" | "reports";
 export type ConnectionState = "connecting" | "live" | "stale" | "offline" | "mock";
 
 export interface AvatarProfile {
@@ -124,6 +124,31 @@ export interface OutputArtifact {
   agentId?: string;
 }
 
+export type ReportKind = "executive" | "team" | "task" | "meeting" | "validation";
+export type ReportStatus = "draft" | "reviewing" | "approved" | "partial" | "attention" | "final";
+
+export interface CompanyReport {
+  id: string;
+  kind: ReportKind;
+  status: ReportStatus;
+  title: string;
+  summary: string;
+  createdAt: string;
+  updatedAt?: string;
+  department?: DepartmentId;
+  authorIds: string[];
+  taskId?: string;
+  teamId?: string;
+  sourceTaskIds: string[];
+  sections: Array<{ title: string; items: string[] }>;
+  references: {
+    artifactIds: string[];
+    gateIds: string[];
+    reviewerIds: string[];
+    eventIds: string[];
+  };
+}
+
 export interface OrganizationV2Summary {
   orgVersion: string;
   totalAgents: number;
@@ -205,6 +230,7 @@ export interface Snapshot {
   metrics: Metrics;
   events: CompanyEvent[];
   outputs?: OutputArtifact[];
+  reports: CompanyReport[];
   organizationV2?: OrganizationV2Summary;
   workOrders?: WorkOrderV2Summary[];
   councils?: CouncilV2Summary[];

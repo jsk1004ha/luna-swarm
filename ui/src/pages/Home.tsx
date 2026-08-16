@@ -13,6 +13,7 @@ import {
   Clock3,
   Command,
   Filter,
+  FileText,
   LayoutDashboard,
   ListTree,
   MoreHorizontal,
@@ -30,6 +31,7 @@ import { useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { refreshRuns, sendUiControl, switchRun, type UiControlPayload } from "../api/client";
 import { DagView } from "../components/DagView";
+import { ReportsView } from "../components/ReportsView";
 import { avatarInitials } from "../data/avatar";
 import { DEPARTMENT_META } from "../data/mock";
 import { agentForTask, companyRoster, eventBelongsToAgent, filteredAgents, useCompanyStore } from "../store/companyStore";
@@ -39,6 +41,7 @@ const navItems: Array<{ label: string; icon: typeof LayoutDashboard; view?: View
   { label: "Overview", icon: LayoutDashboard, view: "org" },
   { label: "Organization", icon: Building2, view: "org" },
   { label: "Task board", icon: ListTree, view: "dag" },
+  { label: "Reports", icon: FileText, view: "reports" },
   { label: "Activity", icon: ActivityIcon },
 ];
 
@@ -322,7 +325,7 @@ export default function Home() {
 
         {activityPage ? <section className="overview-grid activity-page">
           <article className="card activity-card"><div className="card-header"><div><p className="label">EXECUTION TIMELINE</p><h2>All runtime events <span className={`timeline-status ${connectionClass} ${connection}`}><i />{connection}</span></h2></div><span className="count-badge">{snapshot?.events.length ?? 0}</span></div><div className="timeline-list">{(snapshot?.events ?? []).map((event, index, list) => <div className="timeline-event" key={event.id}><span className={`timeline-mark ${eventTone(event)}`}><i /></span><div><b>{event.title}</b><small>{event.message}</small></div><time>{formatTime(event.at)}</time>{index < list.length - 1 && <em />}</div>)}</div></article>
-        </section> : view === "dag" ? <section className="overview-grid runtime-view"><article className="card organization-card"><DagView /></article></section> : <>
+        </section> : view === "reports" ? <ReportsView /> : view === "dag" ? <section className="overview-grid runtime-view"><article className="card organization-card"><DagView /></article></section> : <>
         <section className="overview-grid">
           <article className="card organization-card">
             <div className="card-header"><div><p className="label">ORGANIZATION · LIVE RUNTIME</p><h2>Execution team <span className="live-chip"><i />{connection}</span></h2></div><div className="org-controls"><button className="collapse-all" onClick={() => setDepartment(null)}>All departments</button><div className="view-toggle"><button className={chartView === "chart" ? "selected" : ""} onClick={() => setChartView("chart")}><Building2 size={14} />Chart</button><button className={chartView === "list" ? "selected" : ""} onClick={() => setChartView("list")}><ListTree size={14} />List</button></div></div></div>

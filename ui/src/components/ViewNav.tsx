@@ -4,6 +4,7 @@ import type { ViewMode } from "../types";
 const primaryViews: Array<{ id: ViewMode; glyph: string; label: string }> = [
   { id: "org", glyph: "⌘", label: "Overview" },
   { id: "dag", glyph: "☷", label: "Task board" },
+  { id: "reports", glyph: "▤", label: "Reports" },
 ];
 
 export function ViewNav() {

@@ -36,6 +36,9 @@ test("demo snapshot deterministically presents a 144-person, seven-department co
   }
   assert.ok(first.outputs.length > 0);
   assert.ok(first.outputs.every((output) => output.status === "ready"));
+  assert.equal(first.reports.length, first.outputs.length);
+  assert.ok(first.reports.every((report) => report.kind === "task" && report.status === "approved"));
+  assert.ok(first.reports.every((report) => first.outputs.some((output) => output.taskId === report.taskId)));
 
   const later = createDemoSnapshot(new Date("2026-08-11T00:01:00.000Z"));
   const firstIdentity = new Map(first.agents.map((agent) => [agent.id, {
@@ -130,6 +133,15 @@ test("snapshot exposes bounded task, team, and final outputs with verification s
     assert.equal(snapshot.metrics.threadLocks, 0);
     assert.ok((snapshot.outputs[2]?.summary.length ?? 0) <= 280);
     assert.match(snapshot.outputs[2]?.summary ?? "", /…$/);
+    assert.deepEqual(snapshot.reports.map((report) => report.id), [
+      "report:executive:final:run-outputs",
+      "report:team:team:team-1",
+      "report:task:task:task-1",
+    ]);
+    assert.equal(snapshot.reports[0]?.status, "final");
+    assert.deepEqual(snapshot.reports[1]?.sourceTaskIds, ["task-1"]);
+    assert.equal(snapshot.reports[2]?.authorIds[0], "agent-task-1");
+    assert.ok(snapshot.reports.every((report) => report.sections.every((section) => section.items.length > 0)));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -259,6 +271,28 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
     assert.equal(decidedCouncil?.minorityCount, 1);
     assert.deepEqual(decidedCouncil?.blockingFindings, ["finding-1"]);
     assert.doesNotMatch(JSON.stringify(snapshot.councils), /SEALED POSITION MUST NOT LEAK|sealedMemos/);
+    const validationReport = snapshot.reports.find((report) => report.id === "report:validation:task-1");
+    assert.equal(validationReport?.kind, "validation");
+    assert.equal(validationReport?.status, "reviewing");
+    assert.equal(validationReport?.createdAt, "2026-08-11T00:00:02.000Z");
+    assert.equal(validationReport?.updatedAt, "2026-08-11T00:00:02.000Z");
+    assert.deepEqual(validationReport?.authorIds, ["luna-105"]);
+    assert.deepEqual(validationReport?.references, {
+      artifactIds: ["artifact-api"],
+      gateIds: ["G0", "G1"],
+      reviewerIds: ["luna-105"],
+      eventIds: ["event-assigned-agent"],
+    });
+    const meetingReport = snapshot.reports.find((report) => report.id === "report:meeting:council-1");
+    assert.equal(meetingReport?.kind, "meeting");
+    assert.equal(meetingReport?.status, "approved");
+    assert.equal(meetingReport?.createdAt, "2026-08-11T00:00:01.000Z");
+    assert.equal(meetingReport?.updatedAt, "2026-08-11T00:00:02.000Z");
+    assert.deepEqual(meetingReport?.authorIds, ["agent-a"]);
+    assert.ok(meetingReport?.sections.some((section) => section.items.includes("ADOPTED")));
+    const sealedMeeting = snapshot.reports.find((report) => report.id === "report:meeting:council-sealed");
+    assert.equal(sealedMeeting?.status, "draft");
+    assert.doesNotMatch(JSON.stringify(snapshot.reports), /SEALED POSITION MUST NOT LEAK|추가 부하 검증 필요|sealedMemos|minorityReports/);
     assert.deepEqual(snapshot.intelligenceV2, {
       preflight: { status: "ready", assumptions: 0, blockers: 0, risks: 0 },
       programKnowledge: { status: "ready", nodes: 42, edges: 77, omittedFiles: 3 },
@@ -295,6 +329,95 @@ test("real snapshot exposes the run-pinned adaptive Harness v2 roster", async ()
     assert.equal(snapshot.logicalAgents.length, 31);
     assert.equal(snapshot.organizationV2?.headquarters.reduce((sum, item) => sum + item.allocation, 0), 31);
     assert.equal(new Set(snapshot.logicalAgents.map((agent) => agent.id)).size, 31);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("reports are bounded to the 120 newest source-backed records with deterministic tie ordering", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-report-limit-"));
+  const runId = "run-report-limit";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  const state = realState(workspace, runId);
+  const template = state.tasks["task-1"]!;
+  state.tasks = Object.fromEntries(Array.from({ length: 130 }, (_, offset) => {
+    const ordinal = offset + 1;
+    const id = `task-${String(ordinal).padStart(3, "0")}`;
+    return [id, { ...template, id, title: `검증 작업 ${ordinal}`, priority: ordinal } satisfies TaskRecord];
+  }));
+  state.harnessV2 = {
+    orgVersion: "lab-128@2",
+    organizationHeadcount: 130,
+    organizationReviewerSlots: 3,
+    workOrders: Object.fromEntries(Object.values(state.tasks).map((task, offset) => {
+      const record = dashboardWorkOrder(task, "VALIDATING", `luna-${String((offset % 130) + 1).padStart(3, "0")}`);
+      record.updatedAt = new Date(Date.parse("2026-08-11T00:00:00.000Z") + Math.floor(offset / 2) * 1_000).toISOString();
+      return [task.id, record];
+    })),
+    artifactHeads: {}, councils: {}, missionCells: {}, messages: [],
+  };
+  await writeStateEnvelope(runDirectory, state);
+
+  try {
+    const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
+    assert.equal(snapshot.reports.length, 120);
+    assert.ok(snapshot.reports.every((report) => report.kind === "validation"));
+    assert.equal(snapshot.reports[0]?.id, "report:validation:task-129");
+    assert.equal(snapshot.reports[1]?.id, "report:validation:task-130");
+    assert.equal(snapshot.reports.at(-1)?.id, "report:validation:task-012");
+    for (let index = 1; index < snapshot.reports.length; index += 1) {
+      const previous = snapshot.reports[index - 1]!;
+      const current = snapshot.reports[index]!;
+      assert.ok(Date.parse(previous.updatedAt ?? previous.createdAt) >= Date.parse(current.updatedAt ?? current.createdAt));
+      if ((previous.updatedAt ?? previous.createdAt) === (current.updatedAt ?? current.createdAt)) {
+        assert.ok(previous.id.localeCompare(current.id) < 0);
+      }
+    }
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("report identities stay unique and audit references preserve long source IDs exactly", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-long-report-ids-"));
+  const runId = "run-long-report-ids";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  const state = realState(workspace, runId);
+  const prefix = `task-${"x".repeat(220)}`;
+  const firstId = `${prefix}-first`;
+  const secondId = `${prefix}-second`;
+  const firstArtifact = `artifact-${"a".repeat(220)}-first`;
+  const secondArtifact = `artifact-${"a".repeat(220)}-second`;
+  const template = state.tasks["task-1"]!;
+  const firstTask = { ...template, id: firstId, title: "첫 번째 긴 식별자 작업" } satisfies TaskRecord;
+  const secondTask = { ...template, id: secondId, title: "두 번째 긴 식별자 작업" } satisfies TaskRecord;
+  const firstOrder = dashboardWorkOrder(firstTask, "VALIDATING", "luna-001");
+  const secondOrder = dashboardWorkOrder(secondTask, "VALIDATING", "luna-002");
+  firstOrder.artifactIds = [firstArtifact];
+  secondOrder.artifactIds = [secondArtifact];
+  state.tasks = { [firstId]: firstTask, [secondId]: secondTask };
+  state.harnessV2 = {
+    orgVersion: "lab-128@2",
+    organizationHeadcount: 31,
+    organizationReviewerSlots: 3,
+    workOrders: { [firstId]: firstOrder, [secondId]: secondOrder },
+    artifactHeads: {}, councils: {}, missionCells: {}, messages: [],
+  };
+  await writeStateEnvelope(runDirectory, state);
+
+  try {
+    const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
+    const validationReports = snapshot.reports.filter((report) => report.kind === "validation");
+    assert.equal(validationReports.length, 2);
+    assert.equal(new Set(validationReports.map((report) => report.id)).size, 2);
+    assert.ok(validationReports.every((report) => report.id.length <= 180));
+    assert.deepEqual(
+      validationReports.flatMap((report) => report.references.artifactIds).sort(),
+      [firstArtifact, secondArtifact].sort(),
+    );
+    assert.deepEqual(validationReports.map((report) => report.sourceTaskIds[0]).sort(), [firstId, secondId].sort());
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

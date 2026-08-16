@@ -96,6 +96,28 @@ export const outputArtifactSchema = z.object({
   agentId: z.string().optional(),
 });
 
+export const companyReportSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["executive", "team", "task", "meeting", "validation"]),
+  status: z.enum(["draft", "reviewing", "approved", "partial", "attention", "final"]),
+  title: z.string(),
+  summary: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string().optional(),
+  department: departmentId.optional(),
+  authorIds: z.array(z.string()),
+  taskId: z.string().optional(),
+  teamId: z.string().optional(),
+  sourceTaskIds: z.array(z.string()),
+  sections: z.array(z.object({ title: z.string(), items: z.array(z.string()) })),
+  references: z.object({
+    artifactIds: z.array(z.string()),
+    gateIds: z.array(z.string()),
+    reviewerIds: z.array(z.string()),
+    eventIds: z.array(z.string()),
+  }),
+});
+
 const organizationV2Schema = z.object({
   orgVersion: z.string(),
   totalAgents: z.number().int().min(14).max(256),
@@ -178,6 +200,7 @@ export const snapshotSchema = z.object({
   }),
   events: z.array(companyEventSchema),
   outputs: z.array(outputArtifactSchema).optional(),
+  reports: z.array(companyReportSchema).max(120).default([]),
   organizationV2: organizationV2Schema.optional(),
   workOrders: z.array(workOrderV2Schema).optional(),
   councils: z.array(councilV2Schema).optional(),

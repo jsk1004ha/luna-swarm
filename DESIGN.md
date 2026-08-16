@@ -3,8 +3,8 @@
 ## Source of truth
 
 - Status: Active
-- Last refreshed: 2026-08-13
-- Primary product surfaces: 웹 기반 회사 운영 대시보드, 회장 명령석, 에이전트 상세 인스펙터, 전문 역량·스킬·학습 근거, 실시간 이벤트 스트림
+- Last refreshed: 2026-08-17
+- Primary product surfaces: 웹 기반 회사 운영 대시보드, 회장 명령석, 에이전트 상세 인스펙터, 회사 보고서 문서함, 전문 역량·스킬·학습 근거, 실시간 이벤트 스트림
 - Evidence reviewed: `README.md`, `docs/ARCHITECTURE.ko.md`, `src/types.ts`, `src/organization.ts`, `src/store.ts`, `ui/src/App.tsx`, `ui/src/styles.css`, `ui/src/components/OrgView.tsx`, `ui/src/pixi/HQCanvas.tsx`, 사용자가 제공한 `luna-swarm-command-center.zip`의 `client/src/pages/Home.tsx`와 `client/src/index.css`, 기존 mock 운영 화면
 
 ## Brand
@@ -15,7 +15,7 @@
 
 ## Product goals
 
-- Goals: 100명 이상의 에이전트가 어느 부서에서 무엇을 하는지 3초 안에 파악하게 한다. 문제 에이전트를 한 번의 클릭으로 조사하게 한다. 저장된 Luna Swarm 실행을 별도 설정 없이 웹에서 관찰하게 한다. 진행 중인 프로젝트에 자연어 회장 지시를 넣고 다음 안전한 체크포인트부터 조직 전체에 반영하게 한다.
+- Goals: 100명 이상의 에이전트가 어느 부서에서 무엇을 하는지 3초 안에 파악하게 한다. 문제 에이전트를 한 번의 클릭으로 조사하게 한다. 회의·검증·팀·최종 결과를 실제 회사 문서함처럼 추적하게 한다. 저장된 Luna Swarm 실행을 별도 설정 없이 웹에서 관찰하게 한다. 진행 중인 프로젝트에 자연어 회장 지시를 넣고 다음 안전한 체크포인트부터 조직 전체에 반영하게 한다.
 - Non-goals: 대시보드에서 checksummed 실행 상태를 직접 수정하거나, 이미 실행 중인 호출을 중단·재작성하거나, 승인·재시도·취소를 임의로 수행하지 않는다. 명시적인 회장 지시 큐만 쓰기 경로로 둔다. Pixel Agents의 캐릭터나 가구 에셋을 복제하지 않는다.
 - Success signals: 128~256명에서 60fps에 가까운 캔버스 이동, 부서/상태 필터와 검색의 즉각 반영, 선택 대상과 우측 상세의 일치, 실데이터가 없을 때도 144명 데모로 제품 가치를 확인 가능
 
@@ -27,9 +27,9 @@
 
 ## Information architecture
 
-- Primary navigation: ZIP의 `workspace-shell` 안에서 좌측 내비게이션(Overview/Organization/Task board/Activity/Headquarters) → `app-topbar`의 실행 선택·검색·일시정지 → `content-area`의 실행 요약·책임 조직도·업무·사건 또는 보조 본사 지도 → 같은 셸의 에이전트 상세 drawer와 operator directive 순서를 유지한다.
-- Core routes/screens: 기본은 `조직` 운영 콘솔이며 `업무 DAG`와 `본사` 픽셀 공간은 같은 실행을 보는 보조 뷰다. `/api/snapshot`, `/api/stream`, `/health`는 읽기 전용 데이터 표면이며 명시적 제어 API만 사용자 명령을 받는다.
-- Content hierarchy: 실행 상태와 전체 진행률 → 회장실/운영본부/3개 기능 디비전의 책임선 → 부서와 실제 직원 → 선택 에이전트의 업무·의존성·검증·하네스 근거 → 실행 기록
+- Primary navigation: ZIP의 `workspace-shell` 안에서 좌측 내비게이션(Overview/Organization/Task board/Reports/Activity) → `app-topbar`의 실행 선택·검색·일시정지 → `content-area`의 실행 요약·책임 조직도·업무·문서·사건 → 같은 셸의 에이전트 또는 보고서 상세 drawer와 operator directive 순서를 유지한다.
+- Core routes/screens: 기본은 `조직` 운영 콘솔이며 `업무 DAG`와 `Reports` 문서 레지스트리는 같은 실행을 보는 보조 뷰다. Activity는 시간순 사건을, Reports는 제출·결정·검증된 구조화 문서를 답한다. `/api/snapshot`, `/api/stream`, `/health`는 읽기 전용 데이터 표면이며 명시적 제어 API만 사용자 명령을 받는다.
+- Content hierarchy: 실행 상태와 전체 진행률 → 회장실/운영본부/기능 조직의 책임선 → 부서와 실제 직원 → 업무·의존성 → 경영/팀/작업/회의/검증 보고서 → 선택 문서의 요약·근거·참조 → 실행 기록
 
 ## Design principles
 
@@ -62,7 +62,7 @@
 ## Components
 
 - Existing components to reuse: 화면 구조의 기준은 ZIP에서 옮긴 `ui/src/pages/Home.tsx`와 `ui/src/styles.css`다. 기존 `HQCanvas`와 API/store/schema 로직은 그 셸 안에서 기능 단위로 재사용하되, 과거 `TopBar`·`ViewNav`·`DirectoryPanel`·`InspectorPanel`을 두 번째 레이아웃으로 중첩하지 않는다.
-- New/changed components: 전역 검색, 현재 실행 summary, 조직도, task queue, live activity, operator directive, agent drawer는 ZIP의 기존 DOM/class 계약을 유지한다. Luna 연결은 그 요소의 값과 handler만 실제 REST/WebSocket/control API로 교체한다.
+- New/changed components: 전역 검색, 현재 실행 summary, 조직도, task queue, live activity, operator directive, agent drawer는 ZIP의 기존 DOM/class 계약을 유지한다. `ReportsView`는 같은 밝은 card/table 문법을, `ReportDrawer`는 기존 우측 drawer 문법을 확장한다. Luna 연결은 그 요소의 값과 handler만 실제 REST/WebSocket/control API로 교체한다.
 - Variants and states: 실데이터/데모, 연결/재연결, 선택/호버, 전체/부서 집중, 상태 필터, 검색 결과, 현재 프로젝트 지시/새 실제 실행/새 모의 실행
 - Token/component ownership: ZIP `index.css`를 옮긴 `ui/src/styles.css`가 모든 DOM 시각 토큰과 클래스 계약을 소유한다. `ui/src/pages/Home.tsx`가 단일 UI 셸을, `ui/src/pixi/renderScene.ts`와 `ui/src/map/officeMap.ts`가 이미지 없는 Pixi 장면만 소유한다. 이후 UI도 기존 selector/token을 우선 확장하며 별도 전역 테마를 만들지 않는다.
 
@@ -89,6 +89,11 @@
 - Output created: 중앙 결과 리본에 최신 작업·팀·최종 산출물을 지속 표시하고 `aria-live=polite`로 알린다. 조직 카드와 실행 기록에도 문서 배지를 중복 표시하며, 직원을 선택하면 결과 탭에서 요약·산출물·증거/검증 개수를 확인한다.
 - Output reviewing: 작업자가 결과를 저장했지만 감사가 끝나지 않은 경우 `검증 중`으로 표시하며 완료로 오인시키지 않는다.
 - Output final: 최종 경영 보고서는 일반 작업 산출물과 다른 `FINAL` 배지와 고정된 완료 상태로 표시한다.
+- Reports loading: 마지막 정상 문서 목록을 유지하고 갱신 중임을 상단 동기화 상태로 표시한다.
+- Reports empty: 실행에서 아직 발행된 문서가 없음을 알리고 작업 제출·Council 결정·검증 시 문서가 생성된다고 안내한다.
+- Reports filter empty: 현재 필터와 일치하는 문서가 없음을 표시하고 한 번에 필터를 초기화할 수 있다.
+- Reports stale: 문서를 지우지 않고 마지막 정상 snapshot 기준임을 문서함 상단과 발행 시각에 함께 표시한다.
+- Reports detail: 보고서 유형·상태·문서 ID, 실제 작성 주체, 요약, 구조화된 섹션, artifact/gate/reviewer 참조를 순서대로 보여준다. raw prompt, chain-of-thought, sealed memo, secret은 포함하지 않는다.
 - Disabled: 비활성 필터는 낮은 대비와 `aria-disabled`를 사용한다.
 - Command queued: 지시가 저장된 실행 ID와 “다음 안전 체크포인트부터 반영” 문구를 즉시 표시한다.
 - Command disabled: 데모 모드이거나 실행이 종료된 경우 `현재 프로젝트에 지시`를 비활성화하고 새 프로젝트 시작 모드는 유지한다.
@@ -118,9 +123,9 @@
 
 - Framework/styling system: Node HTTP/API 서버 + React/TypeScript/Vite + ZIP 기반 단일 `Home` DOM shell + 선택형 PixiJS 구조화 오피스
 - Design-token constraints: 새 UI 토큰은 `ui/src/styles.css`의 ZIP custom properties에만 정의한다. 새 기능 UI는 ZIP의 밝은 surface, primary, semantic status 색, spacing, radius 계약을 따르고 기존 UI 스타일 파일을 다시 합치거나 덮어쓰지 않는다.
-- Performance constraints: DPR 최대 1.25, ticker 최대 30fps, 한 층 개별 에이전트 최대 144, 애니메이션 최대 24, routine bubble 최대 20, 정적 오피스 레이어 1회 mount, 진행률-only snapshot에서 동적 장면 재생성 금지. 직원 마커는 런타임 이미지 로드 없이 Graphics로 만든다. Capability summary는 task별 최신 `harness_selected` event만 사용한다. 결과 계약은 최신 60개로 제한하고 요약·항목 문자열을 서버에서 길이 제한하며, 결과 도착 애니메이션은 새 ID에 한 번만 실행한다.
+- Performance constraints: DPR 최대 1.25, ticker 최대 30fps, 한 층 개별 에이전트 최대 144, 애니메이션 최대 24, routine bubble 최대 20, 정적 오피스 레이어 1회 mount, 진행률-only snapshot에서 동적 장면 재생성 금지. 직원 마커는 런타임 이미지 로드 없이 Graphics로 만든다. Capability summary는 task별 최신 `harness_selected` event만 사용한다. 결과 계약은 최신 60개, 보고서 레지스트리는 최신 120개로 제한하고 요약·항목 문자열을 서버에서 길이 제한한다. 결과 도착 애니메이션은 새 ID에 한 번만 실행한다.
 - Compatibility constraints: Node.js 20+, 최신 Chromium/Edge/Firefox/Safari. 명령 활성 서버는 loopback에만 bind하고 Host/Origin 및 안전한 run ID를 검증한다. 회장 지시는 append-only `commands.jsonl`에 기록하고 실행 상태 snapshot을 직접 수정하지 않는다. 현재 모델 호출은 시작 시 캡처한 지시 snapshot을 끝까지 사용하며 새 지시는 다음 planning/DAG/validation/synthesis/judge 체크포인트부터 적용한다. 마지막 judge 중 도착한 지시는 종료 barrier가 새 judge checkpoint를 만든다. 명령 append와 `commands.closed` 전환은 PID·시각·고유 토큰을 가진 실행별 파일 락으로 직렬화하며 죽은 소유자의 락만 자동 회수한다. 브라우저 요청 ID는 idempotency key로 사용하고, 재개 시 끊긴 마지막 명령 레코드와 누락된 `directive_queued` 감사 이벤트를 복원한다. 지시를 한 건도 담을 수 없는 context 설정은 시작 전에 거부한다.
-- Test/screenshot expectations: 타입체크, 서버 단위 테스트, 128명 이상 assertion, 144명 이름 uniqueness, 동일 agent id의 이니셜·색상·도형 변형 안정성, 저장소 래스터 이미지 0건, `Home`의 ZIP 핵심 class 계약, `render_game_to_text` 상태 검증, 실제 브라우저 데스크톱/축소 화면 육안 검사. 1440×1000과 390×844에서 문서 수평 overflow 0, 단일 app shell, 상단 제어 및 directive/drawer 겹침 0을 확인한다.
+- Test/screenshot expectations: 타입체크, 서버 단위 테스트, 128명 이상 assertion, 144명 이름 uniqueness, 동일 agent id의 이니셜·색상·도형 변형 안정성, 저장소 래스터 이미지 0건, `Home`의 ZIP 핵심 class 계약, `render_game_to_text` 상태 검증, 실제 브라우저 데스크톱/축소 화면 육안 검사. 보고서는 실제 output/Work Order/Council에서만 생성되고 sealed memo가 노출되지 않아야 한다. 유형·상태·부서·검색 필터, 안정 정렬, 상세 drawer, empty/filter-empty/stale 상태를 검증한다. 1440×1000과 390×844에서 문서 수평 overflow 0, 단일 app shell, 상단 제어 및 directive/drawer 겹침 0을 확인한다.
 
 ## Open questions
 

@@ -7,6 +7,8 @@ import {
   HARNESS_V2_AGENT_COUNT,
   HARNESS_V2_MAX_AGENT_COUNT,
   HARNESS_V2_MIN_AGENT_COUNT,
+  type CouncilOutcome,
+  type CouncilState,
   type HarnessV2RunState,
   type OrganizationRegistryV2,
   type WorkOrderRecordV2,
@@ -152,6 +154,31 @@ export interface DashboardOutput {
   agentId?: string;
 }
 
+export type DashboardReportKind = "executive" | "team" | "task" | "meeting" | "validation";
+export type DashboardReportStatus = "draft" | "reviewing" | "approved" | "partial" | "attention" | "final";
+
+export interface DashboardReport {
+  id: string;
+  kind: DashboardReportKind;
+  status: DashboardReportStatus;
+  title: string;
+  summary: string;
+  createdAt: string;
+  updatedAt?: string;
+  department?: Department;
+  authorIds: string[];
+  taskId?: string;
+  teamId?: string;
+  sourceTaskIds: string[];
+  sections: Array<{ title: string; items: string[] }>;
+  references: {
+    artifactIds: string[];
+    gateIds: string[];
+    reviewerIds: string[];
+    eventIds: string[];
+  };
+}
+
 export interface DashboardEvent {
   id: string;
   at: string;
@@ -212,6 +239,7 @@ export interface DashboardSnapshot {
   metrics: DashboardMetrics;
   events: DashboardEvent[];
   outputs: DashboardOutput[];
+  reports: DashboardReport[];
   harness?: {
     enabled: boolean;
     learningEnabled: boolean;
@@ -377,6 +405,7 @@ const MAX_AGENTS = 256;
 const EVENT_TAIL_BYTES = 4 * 1024 * 1024;
 const EVENT_LIMIT = 1_000;
 const OUTPUT_LIMIT = 60;
+const REPORT_LIMIT = 120;
 const OUTPUT_SUMMARY_CHARS = 280;
 const OUTPUT_ITEM_CHARS = 180;
 
@@ -825,6 +854,7 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
   return {
     ...snapshot,
     logicalAgents: logicalAgentsForDashboard(agents, state.harnessV2, "real"),
+    reports: dashboardReports(outputs, state.harnessV2, orderedEvents),
     ...dashboardHarnessV2(state.harnessV2),
   };
 }
@@ -1204,6 +1234,188 @@ function dashboardOutputs(
     .slice(0, OUTPUT_LIMIT);
 }
 
+function dashboardReports(
+  outputs: readonly DashboardOutput[],
+  harnessV2?: NonNullable<RunState["harnessV2"]>,
+  orderedEvents: readonly OrderedRunEvent[] = [],
+): DashboardReport[] {
+  const records = harnessV2?.workOrders ?? {};
+  const eventsByTask = new Map<string, string[]>();
+  const runEventIds: string[] = [];
+  for (const { event } of orderedEvents) {
+    if (!event.eventId) continue;
+    if (event.taskId) {
+      eventsByTask.set(event.taskId, [...(eventsByTask.get(event.taskId) ?? []), event.eventId]);
+    } else {
+      runEventIds.push(event.eventId);
+    }
+  }
+  const reports: DashboardReport[] = outputs.map((output) => {
+    const sourceRecords = output.sourceTaskIds.flatMap((taskId) => records[taskId] ? [records[taskId]!] : []);
+    const ownerIds = sourceRecords.map((record) => record.assignedAgentId);
+    const authorIds = uniqueReportReferences([
+      ...(output.agentId ? [output.agentId] : []),
+      ...ownerIds,
+    ]);
+    const references = reportReferences(
+      sourceRecords.flatMap((record) => record.artifactIds),
+      sourceRecords.flatMap((record) => record.order.requiredGateIds),
+      sourceRecords.flatMap((record) => record.reviewerAgentIds),
+      output.sourceTaskIds.flatMap((taskId) => eventsByTask.get(taskId) ?? []),
+    );
+    const kind: DashboardReportKind = output.kind === "final" ? "executive" : output.kind;
+    return {
+      id: reportRecordId(kind, output.id),
+      kind,
+      status: reportStatusForOutput(output.status),
+      title: compactOutputText(output.title, 100),
+      summary: compactOutputText(output.summary, OUTPUT_SUMMARY_CHARS),
+      createdAt: output.createdAt,
+      ...(output.department ? { department: output.department } : {}),
+      authorIds,
+      ...(output.taskId ? { taskId: output.taskId } : {}),
+      ...(output.teamId ? { teamId: output.teamId } : {}),
+      sourceTaskIds: uniqueReportReferences(output.sourceTaskIds),
+      sections: reportSections([
+        { title: "보고 요약", items: [output.summary] },
+        { title: "산출물", items: output.deliverables },
+      ]),
+      references: output.kind === "final"
+        ? { ...references, eventIds: uniqueReportReferences([...references.eventIds, ...runEventIds]) }
+        : references,
+    };
+  });
+
+  if (harnessV2) {
+    for (const record of Object.values(records)) {
+      const output = outputs.find((candidate) => candidate.taskId === record.order.id);
+      reports.push({
+        id: reportRecordId("validation", record.order.id),
+        kind: "validation",
+        status: reportStatusForWorkOrder(record.state),
+        title: compactOutputText(`${record.order.objective} 검증 보고서`, 100),
+        summary: compactOutputText(record.order.objective, OUTPUT_SUMMARY_CHARS),
+        createdAt: record.updatedAt,
+        updatedAt: record.updatedAt,
+        ...(output?.department ? { department: output.department } : {}),
+        authorIds: uniqueReportReferences(record.reviewerAgentIds),
+        taskId: record.order.id,
+        teamId: compactOutputText(record.order.ownerTeam, 160),
+        sourceTaskIds: uniqueReportReferences([record.order.id]),
+        sections: reportSections([
+          { title: "검증 대상", items: [record.order.objective] },
+          { title: "검증 상태", items: [record.state] },
+          { title: "필수 게이트", items: record.order.requiredGateIds },
+        ]),
+        references: reportReferences(
+          record.artifactIds,
+          record.order.requiredGateIds,
+          record.reviewerAgentIds,
+          eventsByTask.get(record.order.id) ?? [],
+        ),
+      });
+    }
+
+    for (const council of Object.values(harnessV2.councils)) {
+      const decision = council.decision;
+      const decisionItems = decision
+        ? [
+            decision.outcome,
+            ...(decision.adoptedOption ? [decision.adoptedOption] : []),
+            ...decision.blockingFindingIds,
+            ...decision.followUpWorkOrderIds,
+          ]
+        : [];
+      reports.push({
+        id: reportRecordId("meeting", council.agenda.councilId),
+        kind: "meeting",
+        status: reportStatusForCouncil(council.state, decision?.outcome),
+        title: compactOutputText(council.agenda.question, 100),
+        summary: compactOutputText(decision?.adoptedOption ?? decision?.outcome ?? council.agenda.question, OUTPUT_SUMMARY_CHARS),
+        createdAt: council.agenda.createdAt,
+        ...(decision ? { updatedAt: decision.decidedAt } : {}),
+        authorIds: uniqueReportReferences(council.agenda.participantIds),
+        sourceTaskIds: uniqueReportReferences(decision?.followUpWorkOrderIds ?? []),
+        sections: reportSections([
+          { title: "회의 안건", items: [council.agenda.question, ...council.agenda.options] },
+          ...(decision ? [{ title: "공개 결정", items: decisionItems }] : []),
+        ]),
+        references: reportReferences(
+          council.agenda.requiredEvidence,
+          [],
+          council.agenda.participantIds,
+          [],
+        ),
+      });
+    }
+  }
+
+  return reports
+    .sort((left, right) => eventTimestamp(right.updatedAt ?? right.createdAt) - eventTimestamp(left.updatedAt ?? left.createdAt)
+      || left.id.localeCompare(right.id))
+    .slice(0, REPORT_LIMIT);
+}
+
+function reportStatusForOutput(status: DashboardOutputStatus): DashboardReportStatus {
+  if (status === "final") return "final";
+  if (status === "ready") return "approved";
+  if (status === "partial") return "partial";
+  return "reviewing";
+}
+
+function reportStatusForWorkOrder(state: WorkOrderState): DashboardReportStatus {
+  if (state === "ACCEPTED" || state === "INTEGRATED") return "approved";
+  if (["SUBMITTED", "VALIDATING", "VALIDATION_RETRY"].includes(state)) return "reviewing";
+  if (["BLOCKED", "REWORK_REQUIRED", "INTERRUPTED", "CANCELLED", "REMOTE_UNKNOWN", "UNKNOWN_SIDE_EFFECT", "FAILED"].includes(state)) return "attention";
+  return "draft";
+}
+
+function reportStatusForCouncil(
+  state: CouncilState,
+  outcome?: CouncilOutcome,
+): DashboardReportStatus {
+  if (outcome === "ADOPTED") return "approved";
+  if (outcome) return "attention";
+  if (state === "CONVENED" || state === "SEALED_SUBMISSION") return "draft";
+  if (state === "WAITING_FOR_EVIDENCE" || state === "REVISION") return "attention";
+  return "reviewing";
+}
+
+function reportSections(sections: Array<{ title: string; items: string[] }>): DashboardReport["sections"] {
+  return sections
+    .map((section) => ({
+      title: compactOutputText(section.title, 80),
+      items: compactOutputItems(section.items),
+    }))
+    .filter((section) => section.items.length > 0)
+    .slice(0, 6);
+}
+
+function reportReferences(
+  artifactIds: string[],
+  gateIds: string[],
+  reviewerIds: string[],
+  eventIds: string[],
+): DashboardReport["references"] {
+  return {
+    artifactIds: uniqueReportReferences(artifactIds),
+    gateIds: uniqueReportReferences(gateIds),
+    reviewerIds: uniqueReportReferences(reviewerIds),
+    eventIds: uniqueReportReferences(eventIds),
+  };
+}
+
+function uniqueReportReferences(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) => value.length > 0))].slice(0, 64);
+}
+
+function reportRecordId(kind: DashboardReportKind, sourceId: string): string {
+  const readable = `report:${kind}:${sourceId}`;
+  if (readable.length <= 180) return readable;
+  const digest = createHash("sha256").update(sourceId).digest("hex").slice(0, 24);
+  return `${readable.slice(0, 154)}:${digest}`;
+}
+
 function compactOutputItems(values: string[]): string[] {
   return values
     .map((value) => compactOutputText(value, OUTPUT_ITEM_CHARS))
@@ -1327,6 +1539,7 @@ function buildSnapshot(
     },
     events,
     outputs,
+    reports: dashboardReports(outputs),
     organizationV2: dashboardOrganizationV2(registryForDashboard(undefined, agents.length)),
     ...(harness ? { harness } : {}),
   };

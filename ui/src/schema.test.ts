@@ -8,8 +8,16 @@ describe("UI transport schemas", () => {
     const parsed = snapshotSchema.parse(snapshot);
     expect(parsed.agents).toHaveLength(30);
     expect(parsed.logicalAgents).toHaveLength(30);
+    expect(parsed.reports.length).toBeGreaterThan(0);
+    expect(parsed.reports.every((report) => report.sections.length > 0)).toBe(true);
     expect(new Set(parsed.logicalAgents.map((agent) => agent.id)).size).toBe(30);
     expect(parsed.logicalAgents.every((agent) => agent.lineage.length === 4)).toBe(true);
+  });
+
+  it("defaults reports for a legacy snapshot produced before the report registry", () => {
+    const { reports: _reports, ...legacySnapshot } = createMockSnapshot(30);
+    const parsed = snapshotSchema.parse(legacySnapshot);
+    expect(parsed.reports).toEqual([]);
   });
 
   it("accepts optional Harness v2 organization, work-order, and council projections", () => {

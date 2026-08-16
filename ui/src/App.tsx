@@ -39,6 +39,12 @@ export function App() {
             && (state.activityFilter === "all" || agent.activity === state.activityFilter))
           .map((agent) => ({ id: agent.id, name: agent.name, department: agent.department, activity: agent.activity })) ?? [],
         latestEvents: snapshot?.events.slice(0, 8) ?? [],
+        latestReports: snapshot?.reports.slice(0, 8).map((report) => ({
+          id: report.id,
+          kind: report.kind,
+          status: report.status,
+          title: report.title,
+        })) ?? [],
       });
     };
     window.advanceTime = async (milliseconds) => {
