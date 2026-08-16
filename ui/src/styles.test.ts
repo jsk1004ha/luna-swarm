@@ -7,7 +7,7 @@ const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const home = readFileSync(new URL("./pages/Home.tsx", import.meta.url), "utf8");
-const renderScene = readFileSync(new URL("./pixi/renderScene.ts", import.meta.url), "utf8");
+const uiPackage = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { dependencies?: Record<string, string> };
 
 function filesUnder(directory: string): string[] {
   if (!existsSync(directory)) return [];
@@ -18,6 +18,13 @@ function filesUnder(directory: string): string[] {
 }
 
 describe("user-provided ZIP command-center contract", () => {
+  it("does not ship the decorative Headquarters campus surface", () => {
+    expect(home).not.toMatch(/HQView|Headquarters/);
+    expect(existsSync(fileURLToPath(new URL("./components/HQView.tsx", import.meta.url)))).toBe(false);
+    expect(existsSync(fileURLToPath(new URL("./pixi/", import.meta.url)))).toBe(false);
+    expect(uiPackage.dependencies).not.toHaveProperty("pixi.js");
+  });
+
   it("renders one ZIP-derived workspace shell instead of nesting the legacy app", () => {
     expect(app).toMatch(/<Home\s*\/>/);
     expect(app).not.toMatch(/<TopBar|<ViewNav|<DirectoryPanel|<InspectorPanel|<EventDock/);
@@ -44,7 +51,6 @@ describe("user-provided ZIP command-center contract", () => {
     for (const action of ["start", "cancel", "concurrency", "instruction", "priority", "cancel_task"])
       expect(home).toContain(`action: "${action}"`);
     expect(home).toMatch(/action:\s*isPaused\s*\?\s*"resume"\s*:\s*"pause"/);
-    expect(home).toMatch(/<HQView\s*\/>/);
     expect(home).toMatch(/<DagView\s*\/>/);
     expect(home).toMatch(/All runtime events/);
   });
@@ -56,7 +62,6 @@ describe("user-provided ZIP command-center contract", () => {
     expect(css).toMatch(/@media \(max-width:820px\)[\s\S]*?\.mobile-nav\s*\{\s*display:grid/);
     expect(css).toMatch(/@media \(max-width:560px\)[\s\S]*?\.summary-cover\s*\{\s*display:none/);
     expect(css).toMatch(/\.directive-entry\s*\{[^}]*grid-template-columns/);
-    expect(css).toMatch(/\.canvas-stack\s*\{[^}]*min-height/);
     expect(css).toMatch(/\.dag-board\s*\{[^}]*grid-template-columns/);
   });
 
@@ -71,7 +76,5 @@ describe("user-provided ZIP command-center contract", () => {
     expect(html).not.toMatch(/rel=["']preload["']/);
     expect(home).not.toMatch(/<img\b|manus-storage|employee-atlas|seated-workers|luna-hq-environment/);
     expect(css).not.toMatch(/url\([^)]*\.(?:png|jpe?g|webp|gif|bmp|avif)/i);
-    expect(renderScene).not.toMatch(/Assets|Sprite|Texture|employee-atlas|seated-workers/);
-    expect(renderScene).toMatch(/function agentMarker/);
   });
 });

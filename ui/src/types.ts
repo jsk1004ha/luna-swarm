@@ -12,7 +12,7 @@ export type DepartmentId = (typeof DEPARTMENT_IDS)[number];
 export type Activity = "working" | "reviewing" | "researching" | "waiting" | "blocked" | "done" | "idle";
 export type AgentStatus = "active" | "waiting" | "blocked" | "done" | "idle";
 export type Severity = "info" | "success" | "warning" | "error";
-export type ViewMode = "hq" | "org" | "dag";
+export type ViewMode = "org" | "dag";
 export type ConnectionState = "connecting" | "live" | "stale" | "offline" | "mock";
 
 export interface AvatarProfile {

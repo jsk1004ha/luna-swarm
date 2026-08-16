@@ -4,7 +4,6 @@ import type { ViewMode } from "../types";
 const primaryViews: Array<{ id: ViewMode; glyph: string; label: string }> = [
   { id: "org", glyph: "⌘", label: "Overview" },
   { id: "dag", glyph: "☷", label: "Task board" },
-  { id: "hq", glyph: "⌂", label: "Headquarters" },
 ];
 
 export function ViewNav() {
@@ -28,7 +27,7 @@ export function ViewNav() {
     </div>
     <p className="nav-section-label desktop-only">OPERATIONS</p>
     <div className="nav-secondary desktop-only">
-      <button onClick={() => { setView("hq"); setMobilePanel("directory"); }}><span aria-hidden="true">♙</span><small>Agent directory</small></button>
+      <button onClick={() => { setView("org"); setMobilePanel("directory"); }}><span aria-hidden="true">♙</span><small>Agent directory</small></button>
       <button onClick={() => setEventOpen(true)}><span aria-hidden="true">▤</span><small>Knowledge & learning</small></button>
       <button onClick={() => setEventOpen(true)}><span aria-hidden="true">♧</span><small>Notifications</small></button>
     </div>

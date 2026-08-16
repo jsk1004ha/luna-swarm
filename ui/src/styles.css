@@ -64,35 +64,12 @@
 .activity-page .timeline-list { max-height:none; }
 .runtime-view .organization-card { min-width:0; overflow:hidden; }
 
-/* ZIP-styled adapters for the existing procedural Headquarters and DAG views. */
-.hq-view,.secondary-view { min-width:0; }
-.canvas-toolbar,.view-heading { display:flex; min-height:64px; align-items:center; justify-content:space-between; gap:18px; padding:14px 16px; border-bottom:1px solid var(--line); background:var(--surface); }
-.canvas-toolbar span:first-child,.view-heading span:first-child { display:grid; gap:4px; }
-.canvas-toolbar small,.view-heading small { color:var(--subtle); font-family:var(--font-mono); font-size:8px; letter-spacing:.06em; }
-.canvas-toolbar h2,.view-heading h2 { margin:0; font-size:14px; font-weight:750; letter-spacing:-.04em; }
-.canvas-tools { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
-.canvas-tools span { padding:4px 6px; border:1px solid var(--line); border-radius:4px; background:var(--surface-2); color:var(--muted); font-family:var(--font-mono); font-size:7px; }
-.canvas-stack { position:relative; min-height:560px; overflow:hidden; background:#0b1512; }
-.pixi-host { position:absolute; inset:0; }
-.pixi-host canvas { display:block; width:100%; height:100%; }
-.canvas-loading,.canvas-error { position:absolute; z-index:5; inset:0; display:flex; align-items:center; justify-content:center; gap:9px; background:rgba(11,21,18,.88); color:#dce9e2; font-size:10px; }
-.moon-loader { width:18px; height:18px; border:2px solid rgba(255,255,255,.22); border-top-color:#64d29b; border-radius:50%; animation:map-loader .85s linear infinite; }
-.canvas-error { flex-direction:column; padding:24px; text-align:center; }
-.canvas-error span { max-width:520px; color:#aabdb3; }
-.canvas-error button { padding:7px 9px; border:1px solid rgba(255,255,255,.2); border-radius:5px; background:#18352a; color:#fff; cursor:pointer; }
-.floor-density,.map-controls,.map-legend { position:absolute; z-index:4; border:1px solid rgba(255,255,255,.12); border-radius:6px; background:rgba(8,16,13,.82); color:#d8e6df; backdrop-filter:blur(8px); }
-.floor-density { top:12px; left:12px; padding:7px 9px; font-family:var(--font-mono); font-size:8px; }
-.map-controls { top:12px; right:12px; display:flex; overflow:hidden; }
-.map-controls button { min-width:34px; padding:7px 8px; border:0; border-right:1px solid rgba(255,255,255,.1); background:transparent; color:#d8e6df; cursor:pointer; font-size:9px; }
-.map-controls button:last-child { border-right:0; }
-.map-controls button:hover { background:rgba(53,210,127,.14); }
-.map-legend { right:12px; bottom:12px; display:flex; flex-wrap:wrap; gap:8px; padding:7px 9px; font-family:var(--font-mono); font-size:7px; }
-.map-legend span { display:flex; align-items:center; gap:4px; }
-.map-legend .dot { width:6px; height:6px; border-radius:50%; }
-.map-legend .working { background:#35d27f; }.map-legend .research { background:#5e9fea; }.map-legend .review { background:#d59a3b; }.map-legend .blocked { background:#e06560; }
-.concurrency-line { display:grid; grid-template-columns:auto minmax(80px,1fr) auto; align-items:center; gap:10px; padding:10px 14px; border-top:1px solid var(--line); background:#fcfcfb; color:var(--muted); font-family:var(--font-mono); font-size:8px; }
-.concurrency-line > i { height:4px; overflow:hidden; border-radius:4px; background:#e8e8e4; }
-.concurrency-line > i b { display:block; height:100%; border-radius:inherit; background:var(--violet); }
+/* ZIP-styled adapter for the task DAG view. */
+.secondary-view { min-width:0; }
+.view-heading { display:flex; min-height:64px; align-items:center; justify-content:space-between; gap:18px; padding:14px 16px; border-bottom:1px solid var(--line); background:var(--surface); }
+.view-heading span:first-child { display:grid; gap:4px; }
+.view-heading small { color:var(--subtle); font-family:var(--font-mono); font-size:8px; letter-spacing:.06em; }
+.view-heading h2 { margin:0; font-size:14px; font-weight:750; letter-spacing:-.04em; }
 .view-heading > p { max-width:560px; margin:0; color:var(--muted); font-size:9px; line-height:1.55; text-align:right; }
 .intelligence-strip { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; padding:10px 14px; border-bottom:1px solid var(--line); background:#f5f5f4; }
 .intelligence-strip article { min-width:0; display:grid; gap:3px; padding:9px 10px; border:1px solid var(--line); border-left:3px solid #a8a29e; border-radius:7px; background:var(--surface); }
@@ -119,8 +96,6 @@
 .dag-column button.is-blocked { border-color:#efd1ce; background:#fff9f8; }
 .dag-column > p { margin:0; padding:18px 10px; color:var(--subtle); font-family:var(--font-mono); font-size:8px; text-align:center; }
 .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; margin:-1px; padding:0; border:0; clip:rect(0,0,0,0); white-space:nowrap; }
-@keyframes map-loader { to { transform:rotate(360deg); } }
-
 @media (max-width:1100px) {
   .dag-board { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .intelligence-strip { grid-template-columns:repeat(3,minmax(0,1fr)); }
@@ -131,7 +106,6 @@
   .mobile-nav button { display:grid; min-width:68px; place-items:center; gap:3px; padding:8px 4px 7px; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--muted); cursor:pointer; font-size:8px; }
   .mobile-nav button.active { border-bottom-color:var(--violet); background:var(--violet-pale); color:var(--violet); font-weight:700; }
   .directive-entry { grid-template-columns:112px minmax(0,1fr); }
-  .canvas-stack { min-height:500px; }
   .view-heading { align-items:flex-start; flex-direction:column; }
   .view-heading > p { max-width:none; text-align:left; }
 }
@@ -139,14 +113,6 @@
   .search-button input { width:72px; }
   .directive-entry { grid-template-columns:1fr; gap:4px; }
   .directive-entry select { padding-block:7px; font-size:8px; }
-  .canvas-toolbar { align-items:flex-start; flex-direction:column; }
-  .canvas-tools { justify-content:flex-start; }
-  .canvas-stack { min-height:430px; }
-  .floor-density { right:12px; max-width:calc(100% - 24px); }
-  .map-controls { top:auto; right:auto; bottom:12px; left:12px; }
-  .map-legend { display:none; }
-  .concurrency-line { grid-template-columns:1fr auto; }
-  .concurrency-line > i { grid-column:1/-1; grid-row:2; }
   .dag-board { grid-template-columns:1fr; padding:10px; }
   .intelligence-strip { grid-template-columns:1fr 1fr; padding:8px 10px; }
 }

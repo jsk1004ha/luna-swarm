@@ -40,7 +40,7 @@ export function EventDock() {
     setSelectedEventId(eventId);
     if (event?.agentId) {
       selectAgent(event.agentId);
-      setView("hq");
+      setView("org");
     }
   };
   return <>
