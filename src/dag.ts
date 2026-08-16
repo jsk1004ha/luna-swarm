@@ -1,10 +1,17 @@
 import type {
   SwarmConfig,
   SwarmPlan,
+  TaskCapability,
+  TaskExecutionMode,
   TaskRecord,
   TaskSpec,
   TeamRecord,
   TeamSpec,
+} from "./types.js";
+import {
+  TASK_CAPABILITIES,
+  TASK_EXECUTION_MODES,
+  taskCapabilitiesForExecutionMode,
 } from "./types.js";
 import {
   rankLevel,
@@ -82,6 +89,8 @@ export function normalizeAndValidatePlan(
   }
 
   const taskMap = new Map<string, TaskSpec>();
+  const knownCapabilities = new Set<string>(TASK_CAPABILITIES);
+  const knownExecutionModes = new Set<string>(TASK_EXECUTION_MODES);
   for (const task of raw.tasks) {
     if (!task.id.trim()) throw new Error("Task id is empty");
     if (taskMap.has(task.id)) throw new Error(`Duplicate task id: ${task.id}`);
@@ -90,6 +99,42 @@ export function normalizeAndValidatePlan(
     }
     if (task.acceptanceCriteria.length === 0) {
       throw new Error(`Task ${task.id} has no acceptance criteria`);
+    }
+    if (!knownExecutionModes.has(task.executionMode)) {
+      throw new Error(`Task ${task.id} must declare a known executionMode`);
+    }
+    if (!Array.isArray(task.requiredCapabilities)) {
+      throw new Error(`Task ${task.id} must declare requiredCapabilities`);
+    }
+    if (new Set(task.requiredCapabilities).size !== task.requiredCapabilities.length) {
+      throw new Error(`Task ${task.id} has duplicate requiredCapabilities`);
+    }
+    for (const capability of task.requiredCapabilities) {
+      if (!knownCapabilities.has(capability)) {
+        throw new Error(`Task ${task.id} declares unknown capability ${String(capability)}`);
+      }
+    }
+    const executionMode = task.executionMode as TaskExecutionMode;
+    const expectedCapabilities = taskCapabilitiesForExecutionMode(executionMode).sort();
+    const declaredCapabilities = [...task.requiredCapabilities].sort();
+    if (
+      expectedCapabilities.length !== declaredCapabilities.length ||
+      expectedCapabilities.some((capability, index) => capability !== declaredCapabilities[index])
+    ) {
+      throw new Error(
+        `Task ${task.id} executionMode ${executionMode} requires exactly ` +
+          `[${expectedCapabilities.join(", ")}], received [${declaredCapabilities.join(", ")}]`,
+      );
+    }
+    const semanticCapabilities = semanticCapabilityDemand(task);
+    const missingSemanticCapabilities = semanticCapabilities.filter(
+      (capability) => !expectedCapabilities.includes(capability),
+    );
+    if (missingSemanticCapabilities.length > 0) {
+      throw new Error(
+        `Task ${task.id} contract under-declares execution authority: ` +
+          `${missingSemanticCapabilities.join(", ")} required by its objective/deliverable`,
+      );
     }
     validateTaskAssignment(task);
     if (!teamMap.has(task.teamId)) {
@@ -170,11 +215,43 @@ export function normalizeAndValidatePlan(
   }));
   const tasks = raw.tasks.map((task) => ({
     ...task,
+    requiredCapabilities: taskCapabilitiesForExecutionMode(task.executionMode),
     depth: depthById.get(task.id) ?? 0,
     maxAttempts: Math.min(Math.max(1, task.maxAttempts), config.maxAttempts),
     priority: Math.min(100, Math.max(0, Math.round(task.priority))),
   }));
   return { ...raw, teams, tasks };
+}
+
+function semanticCapabilityDemand(task: TaskSpec): TaskCapability[] {
+  const contract = [
+    task.kind,
+    task.title,
+    task.objective,
+    task.deliverable,
+    ...task.acceptanceCriteria,
+  ].join("\n").toLocaleLowerCase("en-US");
+  const required = new Set<TaskCapability>();
+
+  const materialWorkspaceChange =
+    /\b(?:implement|front-?end|back-?end|website|web\s*app|application|source\s*code|code\s*change|patch|refactor|repository\s*file|ui\s*component|landing\s*page)\b/u.test(contract) ||
+    /(?:웹\s*사이트|웹\s*앱|애플리케이션|소스\s*코드|코드\s*수정|파일\s*수정|리팩터링|프론트엔드|백엔드|랜딩\s*페이지|구현|개발|제작)/u.test(contract);
+  if (materialWorkspaceChange) {
+    required.add("workspace-write");
+    required.add("command-execution");
+  }
+
+  const commandVerification =
+    /\b(?:run|execute|build|compile|typecheck|lint|unit\s*test|integration\s*test|e2e|benchmark)\b/u.test(contract) ||
+    /(?:빌드|컴파일|타입\s*체크|린트|단위\s*테스트|통합\s*테스트|e2e|벤치마크|명령\s*실행)/u.test(contract);
+  if (commandVerification) required.add("command-execution");
+
+  const externalResearch =
+    /\b(?:latest|current\s+(?:market|product|competitor|vendor)|official\s+(?:source|documentation)|competitor|market\s+research|external\s+(?:source|research)|online\s+research|web\s+research)\b/u.test(contract) ||
+    /(?:최신|경쟁사|경쟁\s*제품|시장\s*조사|외부\s*(?:자료|출처|조사)|공식\s*(?:자료|출처|문서)|웹\s*조사|온라인\s*조사)/u.test(contract);
+  if (externalResearch) required.add("external-network");
+
+  return [...required].sort();
 }
 
 export function recordsFromPlan(plan: SwarmPlan): Record<string, TaskRecord> {

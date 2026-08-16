@@ -37,6 +37,12 @@ test("App Server shards disable Codex plugin and shared system-skill mutation", 
     assert.ok(featureIndex > 0, `${feature} is disabled`);
     assert.equal(args[featureIndex - 1], "--disable");
   }
+  const codeModeHostIndex = args.indexOf("code_mode_host");
+  assert.ok(codeModeHostIndex > 0, "the dynamic-tool host is configured explicitly");
+  assert.equal(args[codeModeHostIndex - 1], "--enable");
+  const codeModeIndex = args.indexOf("code_mode");
+  assert.ok(codeModeIndex > 0, "model-authored code mode remains configured explicitly");
+  assert.equal(args[codeModeIndex - 1], "--disable");
   assert.deepEqual(codexAppServerIsolationArgs(), args);
   assert.notEqual(codexAppServerIsolationArgs(), args);
 });
@@ -91,7 +97,7 @@ function hostTools(
   };
 }
 
-test("tool-less calls explicitly forbid code mode and expected denied-tool diagnostics stay out of operator logs", async () => {
+test("tool-less calls explicitly forbid code mode and unexpected host failures remain visible", async () => {
   const stderr: string[] = [];
   const instance = new CodexAppServerBackend({
     workspace: process.cwd(),
@@ -104,7 +110,7 @@ test("tool-less calls explicitly forbid code mode and expected denied-tool diagn
     const response = await instance.run(request("no-tools", "echo-developer-instructions"));
     assert.match(response.text, /No tools are available for this call/);
     assert.match(response.text, /Do not invoke code mode or any other tool/);
-    assert.equal(stderr.some((line) => line.includes("code-mode host is disabled")), false);
+    assert.equal(stderr.some((line) => line.includes("code-mode host is disabled")), true);
     assert.ok(stderr.includes("ERROR retained app-server diagnostic"));
   } finally {
     await instance.close();

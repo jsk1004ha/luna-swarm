@@ -13,6 +13,8 @@ const baseTask: TaskSpec = {
   title: "A",
   objective: "Do A",
   kind: "analyze",
+  executionMode: "reasoning-only",
+  requiredCapabilities: [],
   department: "strategy",
   ownerRole: "strategy_analyst",
   teamId: "ROOT",
@@ -103,6 +105,41 @@ test("rejects cycles, missing dependencies, duplicates, and self-dependencies", 
         DEFAULT_CONFIG,
       ),
     /itself/i,
+  );
+});
+
+test("closed execution modes reject mismatched and semantically under-declared authority", () => {
+  assert.throws(
+    () => normalizeAndValidatePlan(plan([{
+      ...baseTask,
+      executionMode: "workspace-inspection",
+      requiredCapabilities: [],
+    }]), DEFAULT_CONFIG),
+    /requires exactly.*workspace-read.*workspace-search/i,
+  );
+
+  assert.throws(
+    () => normalizeAndValidatePlan(plan([{
+      ...baseTask,
+      kind: "frontend-development",
+      title: "Motion website",
+      objective: "Implement and build an executable website in the workspace",
+      deliverable: "Production-ready landing page",
+      executionMode: "reasoning-only",
+      requiredCapabilities: [],
+    }]), DEFAULT_CONFIG),
+    /under-declares execution authority.*command-execution.*workspace-write/i,
+  );
+
+  assert.throws(
+    () => normalizeAndValidatePlan(plan([{
+      ...baseTask,
+      kind: "competitive-evidence-gathering",
+      objective: "Verify current competitor sources on the web",
+      executionMode: "reasoning-only",
+      requiredCapabilities: [],
+    }]), DEFAULT_CONFIG),
+    /under-declares execution authority.*external-network/i,
   );
 });
 

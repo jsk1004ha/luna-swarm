@@ -815,6 +815,8 @@ function realState(workspace: string, runId: string): RunState {
     title: "대시보드 구현",
     objective: "운영 현황을 표시한다",
     kind: "implement",
+    executionMode: "workspace-change",
+    requiredCapabilities: ["workspace-read", "workspace-search", "workspace-write", "command-execution"],
     department: "engineering",
     ownerRole: "software_engineer",
     teamId: "team-1",

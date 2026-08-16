@@ -86,6 +86,14 @@ interface PendingContextItem {
   ordinal: number;
 }
 
+export interface ContextFrameInput {
+  id: string;
+  kind: ContextItemKind;
+  content: unknown;
+  required?: boolean;
+  priority?: number;
+}
+
 function assertBudget(budget: ContextBudget): void {
   if (!Number.isSafeInteger(budget.maxUtf8Bytes) || budget.maxUtf8Bytes < 0) {
     throw new RangeError("maxUtf8Bytes must be a non-negative safe integer");
@@ -159,6 +167,22 @@ function renderItem(item: PendingContextItem): CompiledContextItem {
     utf8Bytes: Buffer.byteLength(rendered, "utf8"),
     characters: countCharacters(rendered),
   };
+}
+
+/** Measures the exact escaped frame that compileContext will place on the wire. */
+export function measureContextFrame(input: ContextFrameInput): CompiledContextItem {
+  const priority = input.priority ?? 0;
+  if (!Number.isFinite(priority)) {
+    throw new RangeError(`Context priority must be finite: ${input.id}`);
+  }
+  return renderItem({
+    id: input.id,
+    kind: input.kind,
+    required: input.required ?? true,
+    priority,
+    content: input.content,
+    ordinal: 0,
+  });
 }
 
 function renderAll(items: CompiledContextItem[]): string {

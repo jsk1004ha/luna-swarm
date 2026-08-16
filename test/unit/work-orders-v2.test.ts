@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { WorkOrder } from "../../src/harness-v2/contracts.js";
+import type { TaskSpec } from "../../src/types.js";
 import { organizationRegistryV2 } from "../../src/harness-v2/organization-registry.js";
 import {
   acceptsFencingToken,
@@ -64,11 +65,13 @@ test("work order graph rejects missing dependencies and cycles", () => {
 });
 
 test("TaskSpec adapter preserves execution contract and assigns stable independent slots", () => {
-  const task = {
+  const task: TaskSpec = {
     id: "T-42",
-    title: "Implement boundary",
-    objective: "Implement the boundary",
-    kind: "implementation",
+    title: "Inspect boundary",
+    objective: "Inspect the boundary",
+    kind: "analysis",
+    executionMode: "workspace-inspection",
+    requiredCapabilities: ["workspace-read", "workspace-search"],
     department: "engineering" as const,
     ownerRole: "software_engineer",
     teamId: "legacy-team",
@@ -90,6 +93,14 @@ test("TaskSpec adapter preserves execution contract and assigns stable independe
   assert.deepEqual(adapted.requiredGateIds, ["G0", "G2", "G3"]);
   assert.deepEqual(adapted.toolPolicy.allowedTools, ["read", "search"]);
   assert.deepEqual(adapted.toolPolicy.writeScopes, [], "read-only runtime must not request fake patch authority");
+  assert.throws(
+    () => workOrderFromTask({
+      ...task,
+      executionMode: "workspace-change",
+      requiredCapabilities: ["workspace-read", "workspace-search", "workspace-write", "command-execution"],
+    }, { missionId: "mission-42", registry }),
+    /unsupported runtime capabilities.*workspace-write/,
+  );
   const first = assignWorkOrderSlots(adapted, registry);
   const second = assignWorkOrderSlots(adapted, registry);
   assert.deepEqual(first, second);

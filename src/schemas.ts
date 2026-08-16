@@ -186,6 +186,8 @@ export const PLAN_SCHEMA: JsonValue = {
           "title",
           "objective",
           "kind",
+          "executionMode",
+          "requiredCapabilities",
           "department",
           "ownerRole",
           "teamId",
@@ -204,6 +206,30 @@ export const PLAN_SCHEMA: JsonValue = {
           title: { type: "string" },
           objective: { type: "string" },
           kind: { type: "string" },
+          executionMode: {
+            type: "string",
+            enum: [
+              "reasoning-only",
+              "workspace-inspection",
+              "external-research",
+              "command-verification",
+              "workspace-change",
+              "external-research-and-workspace-change",
+            ],
+          },
+          requiredCapabilities: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: [
+                "workspace-read",
+                "workspace-search",
+                "external-network",
+                "workspace-write",
+                "command-execution",
+              ],
+            },
+          },
           department: {
             type: "string",
             enum: ["strategy", "research", "engineering", "risk"],

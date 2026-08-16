@@ -17,7 +17,7 @@ import { VerifiedKnowledgeCapsuleStore } from "../../src/harness-v2/knowledge-ca
 import { DecisionTraceStore, ObjectiveOutcomeReceiptStore } from "../../src/evolution/trace/index.js";
 import { organizationRegistryV2 } from "../../src/harness-v2/organization-registry.js";
 import { forgeOracleSuite } from "../../src/harness-v2/oracle-forge.js";
-import { createWorkOrderRecord, workOrderFromTask } from "../../src/harness-v2/work-orders.js";
+import { createWorkOrderRecord, taskResultArtifactId, workOrderFromTask } from "../../src/harness-v2/work-orders.js";
 import type { MissionPreflightInput } from "../../src/harness-v2/preflight.js";
 import { companySnapshot } from "../../src/organization.js";
 import { AgentCallError, AgentGateway } from "../../src/runtime/gateway.js";
@@ -353,6 +353,8 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       const data = call.data as { oracleSuiteId?: string; oracleIds?: string[] };
       assert.ok(data.oracleSuiteId);
       assert.ok((data.oracleIds?.length ?? 0) >= 1);
+      assert.match(call.prompt, /HOST\/WORKER RESPONSIBILITY BOUNDARY/);
+      assert.match(call.prompt, /host-created after the (?:worker|direct report) submits/);
     }
     const councils = Object.values(state.harnessV2?.councils ?? {});
     assert.ok(councils.length > 0, "high-risk validation opens a bounded Council workflow");
@@ -604,6 +606,112 @@ test("planning committee tolerates a minority failure but enforces deterministic
   }
 });
 
+test("REAL read-only execution rejects impossible network, write, and command tasks before Work Orders", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-plan-capability-gate-"));
+  try {
+    const plan = demoPlan("runtime capability feasibility");
+    const implementation = plan.tasks.find((task) => task.id === "T1")!;
+    implementation.kind = "frontend-development";
+    implementation.objective = "Implement and build an executable website in the workspace";
+    implementation.executionMode = "workspace-change";
+    implementation.requiredCapabilities = [
+      "workspace-read",
+      "workspace-search",
+      "workspace-write",
+      "command-execution",
+    ];
+    const research = plan.tasks.find((task) => task.id === "T2")!;
+    research.kind = "competitive-evidence-gathering";
+    research.objective = "Verify current official and independent competitor sources on the web";
+    research.executionMode = "external-research";
+    research.requiredCapabilities = ["external-network"];
+    const backend = new MockAgentBackend(async (request) => {
+      if (["candidate_plan", "architect_plan", "architect_repair"].includes(request.purpose)) {
+        return structuredClone(plan);
+      }
+      return demoHandler(request);
+    });
+    const store = await createdRunStore(workspace, ".state", "run-plan-capability-gate");
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: config() }),
+      store,
+      config: config(),
+      workspace,
+      sourceIdentity: "build:test-plan-capability-gate",
+      hostToolRuntime: {} as never,
+    }).start(plan.goal);
+
+    assert.equal(state.status, "failed");
+    assert.match(state.error ?? "", /brokered workspace read\/search only/);
+    assert.match(state.error ?? "", /T1 requires [^,]*command-execution/);
+    assert.match(state.error ?? "", /T1 requires [^,]*workspace-write/);
+    assert.match(state.error ?? "", /T2 requires external-network/);
+    assert.equal(backend.calls.some((call) => call.purpose === "execute_task"), false);
+    assert.equal(Object.keys(state.harnessV2?.workOrders ?? {}).length, 0);
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string; message?: string });
+    assert.match(events.find((event) => event.type === "plan_capability_blocked")?.message ?? "", /T1/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("REAL resume rechecks persisted capability demand before migration or execution", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-resume-capability-gate-"));
+  try {
+    const cfg = config();
+    const plan = demoPlan("persisted runtime capability feasibility");
+    plan.tasks[0]!.kind = "site-construction-vendor-task";
+    plan.tasks[0]!.executionMode = "workspace-change";
+    plan.tasks[0]!.requiredCapabilities = [
+      "workspace-read",
+      "workspace-search",
+      "workspace-write",
+      "command-execution",
+    ];
+    const now = new Date().toISOString();
+    const initial: RunState = {
+      schemaVersion: 1,
+      revision: 0,
+      runId: "run-resume-capability-gate",
+      status: "interrupted",
+      goal: plan.goal,
+      workspace,
+      createdAt: now,
+      updatedAt: now,
+      config: cfg,
+      organization: companySnapshot(),
+      plan,
+      teams: teamRecordsFromPlan(plan),
+      tasks: recordsFromPlan(plan),
+      threadIds: {},
+      metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
+    };
+    const store = await createdRunStore(workspace, ".state", initial.runId);
+    await store.save(initial);
+    const loaded = await store.load();
+    const backend = new MockAgentBackend(demoHandler);
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-resume-capability-gate",
+      hostToolRuntime: {} as never,
+    }).resume(loaded);
+
+    assert.equal(state.status, "failed");
+    assert.match(state.error ?? "", /RUNTIME_CAPABILITY_MISMATCH|brokered workspace read\/search only/);
+    assert.equal(backend.calls.length, 0);
+    assert.equal(state.harnessV2, undefined, "resume must stop before Work Order migration");
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string });
+    assert.ok(events.some((event) => event.type === "plan_capability_blocked"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("dependency completion releases downstream work without waiting for a slow sibling", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-event-driven-dag-"));
   let watchdog: ReturnType<typeof setTimeout> | undefined;
@@ -663,6 +771,93 @@ test("dependency completion releases downstream work without waiting for a slow 
     );
   } finally {
     if (watchdog) clearTimeout(watchdog);
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("execution rework fits exact escaped evidence into the remaining required-context budget", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-execution-rework-context-"));
+  try {
+    let firstManagerRejection = true;
+    let firstWorkerResult = true;
+    const backend = new MockAgentBackend(async (request) => {
+      if (request.purpose === "execute_task" && ["T1", "T2"].includes(request.taskId ?? "")) {
+        const result = await demoHandler(request) as AgentResult;
+        result.evidence.push(`near-budget-dependency-${request.taskId}-${"<&>".repeat(900)}`);
+        return result;
+      }
+      if (request.purpose === "execute_task" && request.taskId === "T3" && firstWorkerResult) {
+        firstWorkerResult = false;
+        const result = await demoHandler(request) as AgentResult;
+        result.evidence = Array.from(
+          { length: 64 },
+          (_, index) => `oversized-evidence-${index}-${"<&>".repeat(700)}`,
+        );
+        return result;
+      }
+      if (request.purpose === "manager_review" && request.taskId === "T3" && firstManagerRejection) {
+        firstManagerRejection = false;
+        const data = request.data as { validatorId: string; task: { acceptanceCriteria: string[] } };
+        return {
+          validatorId: data.validatorId,
+          verdict: "revise",
+          criteria: data.task.acceptanceCriteria.map((criterion) => ({
+            criterion,
+            passed: false,
+            note: "first attempt needs a causal repair",
+          })),
+          issues: ["causal repair finding from the accountable manager"],
+          confidence: 0.95,
+        };
+      }
+      return demoHandler(request);
+    });
+    const store = await createdRunStore(workspace, ".state", "run-execution-rework-context");
+    const cfg = { ...config(), maxContextChars: 60_000 };
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-execution-rework-context",
+    }).start("execution rework context");
+
+    assert.equal(state.status, "completed", state.error);
+    assert.equal(state.tasks.T3?.attempts, 2);
+    const workerCalls = backend.calls.filter((call) => call.purpose === "execute_task" && call.taskId === "T3");
+    assert.equal(workerCalls.length, 2);
+    const second = workerCalls[1]!;
+    const rework = (second.data as {
+      reworkContext?: {
+        previousOutputRef?: { artifactId: string; revision: number; contentHash: string };
+        feedback?: string[];
+        previousResultExcerpt?: AgentResult;
+        omissions?: { previousResultCharacters?: number };
+      };
+    }).reworkContext;
+    assert.ok(rework);
+    assert.ok(rework.feedback?.some((item) => item.includes("causal repair finding")));
+    assert.equal(rework.previousResultExcerpt?.taskId, "T3");
+    assert.ok((rework.omissions?.previousResultCharacters ?? 0) > 100_000);
+    assert.ok(second.prompt.length <= cfg.maxContextChars);
+    assert.match(second.prompt, /causal repair finding from the accountable manager/);
+    assert.match(second.prompt, /previousOutputRef/);
+    assert.match(second.prompt, /near-budget-dependency-T1/);
+    assert.match(second.prompt, /\\u003c\\u0026\\u003e/);
+    assert.doesNotMatch(second.prompt, /oversized-evidence-63/);
+    assert.equal(
+      (second.prompt.match(/<<<LUNA_CONTEXT_ITEM /gu) ?? []).length,
+      (second.prompt.match(/<<<END_LUNA_CONTEXT_ITEM>>>/gu) ?? []).length,
+      "required frames must remain whole after escape-aware budgeting",
+    );
+
+    const head = state.harnessV2?.artifactHeads[taskResultArtifactId("T3")];
+    assert.ok(head);
+    const blackboard = new BlackboardStore(store.runDirectory, state.runId);
+    const firstRevision = (await blackboard.listRevisions(head.artifactId))
+      .find((ref) => ref.revision === 1);
+    assert.deepEqual(rework.previousOutputRef, firstRevision);
+  } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -852,7 +1047,7 @@ test("zero accepted tasks surface the causal root failures instead of a generic 
   }
 });
 
-test("deterministic gates request targeted architect and team-report repairs", async () => {
+test("deterministic synthesis replaces untrusted reducer unions without a repair turn", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-repair-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -887,14 +1082,14 @@ test("deterministic gates request targeted architect and team-report repairs", a
           call.purpose === "team_synthesis" &&
           (call.data as { team: { id: string } }).team.id === "TEAM-RISK",
       ).length,
-      2,
+      1,
     );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
-test("reducer repairs an invented factual claim even when immutable lineage is preserved", async () => {
+test("deterministic synthesis removes an invented reducer claim", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-invented-reducer-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -927,7 +1122,40 @@ test("reducer repairs an invented factual claim even when immutable lineage is p
     assert.equal(backend.calls.filter((call) =>
       call.purpose === "team_synthesis" &&
       (call.data as { team: { id: string } }).team.id === "TEAM-RISK",
-    ).length, 2);
+    ).length, 1);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a reducer failure falls back to an immutable deterministic team packet", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-reducer-fallback-"));
+  try {
+    const backend = new MockAgentBackend(async (request) => {
+      if (
+        request.purpose === "team_synthesis" &&
+        (request.data as { team: { id: string } }).team.id === "TEAM-RISK"
+      ) {
+        throw new Error("reducer unavailable after accepted leaf work");
+      }
+      return demoHandler(request);
+    });
+    const store = await createdRunStore(workspace, ".state", "run-reducer-fallback");
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: config() }),
+      store,
+      config: config(),
+      workspace,
+      sourceIdentity: "build:test-reducer-fallback",
+    }).start("deterministic reducer fallback");
+
+    assert.equal(state.status, "completed", state.error);
+    assert.equal(state.teams["TEAM-RISK"]?.status, "accepted");
+    assert.deepEqual(state.teams["TEAM-RISK"]?.packet?.sourceTaskIds, ["T2"]);
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string; status?: string });
+    assert.ok(events.some((event) =>
+      event.type === "team_synthesis_fallback" && event.status === "deterministic_fallback"));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1064,7 +1292,7 @@ test("valid claim IDs cannot smuggle invented free-form prose into the final out
   }
 });
 
-test("trusted leaf gaps and recommendations survive while invented reducer prose is repaired", async () => {
+test("trusted leaf gaps and recommendations survive while invented reducer prose is discarded", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-reducer-prose-union-"));
   const leafGap = "verified leaf uncertainty";
   const leafAction = "verified leaf deliverable action";
@@ -1107,7 +1335,7 @@ test("trusted leaf gaps and recommendations survive while invented reducer prose
     assert.equal(backend.calls.filter((call) =>
       call.purpose === "team_synthesis" &&
       (call.data as { team: { id: string } }).team.id === "TEAM-INTEL",
-    ).length, 2);
+    ).length, 1);
     assert.ok(state.final?.caveats.includes(leafGap));
     assert.ok(state.final?.nextActions.includes(leafAction));
     assert.equal(state.final?.conflicts.includes(invented), false);

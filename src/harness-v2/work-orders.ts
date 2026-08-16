@@ -7,7 +7,11 @@ import type {
   WorkOrderState,
   OrganizationRegistryV2,
 } from "./contracts.js";
-import type { TaskSpec } from "../types.js";
+import type { TaskExecutionMode, TaskSpec } from "../types.js";
+import {
+  TASK_EXECUTION_MODES,
+  taskCapabilitiesForExecutionMode,
+} from "../types.js";
 import { assertCapabilityNarrowing, organizationRegistryV2 } from "./organization-registry.js";
 
 const TERMINAL_STATES = new Set<WorkOrderState>(["INTEGRATED", "CANCELLED", "FAILED"]);
@@ -167,6 +171,35 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
   const independentReviewTeams = reviewTeams.filter((teamId) => teamId !== ownerTeam);
   const reviewerTeam = independentReviewTeams[stableIndex(`${task.id}:review`, independentReviewTeams.length)];
   if (!ownerTeam || !reviewerTeam) throw new Error("Harness v2 registry has no eligible owner/reviewer teams");
+  // Legacy plans are readable for migration as workspace inspection only.
+  // New plans derive authority from a closed host-owned execution mode, never
+  // from a free-form or model-under-declared capability array.
+  const declaredMode = (task as Partial<TaskSpec>).executionMode;
+  if (declaredMode !== undefined && !TASK_EXECUTION_MODES.includes(declaredMode)) {
+    throw new Error(`Work order ${task.id} has unknown execution mode ${String(declaredMode)}`);
+  }
+  const executionMode: TaskExecutionMode = declaredMode ?? "workspace-inspection";
+  const requiredCapabilities = taskCapabilitiesForExecutionMode(executionMode);
+  if (Array.isArray(task.requiredCapabilities)) {
+    const declared = [...task.requiredCapabilities].sort();
+    const expected = [...requiredCapabilities].sort();
+    if (declared.length !== expected.length || declared.some((value, index) => value !== expected[index])) {
+      throw new Error(
+        `Work order ${task.id} execution mode ${executionMode} does not match declared capabilities`,
+      );
+    }
+  }
+  const unsupported = requiredCapabilities.filter((capability) =>
+    capability === "external-network" || capability === "workspace-write" || capability === "command-execution");
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Work order ${task.id} requires unsupported runtime capabilities: ${[...new Set(unsupported)].sort().join(", ")}`,
+    );
+  }
+  const allowedTools = [
+    ...(requiredCapabilities.includes("workspace-read") ? ["read"] : []),
+    ...(requiredCapabilities.includes("workspace-search") ? ["search"] : []),
+  ];
   const workOrder: WorkOrder = {
     id: task.id,
     revision: options.revision ?? 1,
@@ -191,10 +224,10 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
       // The current Codex App Server backend is intentionally read-only. Role
       // contracts describe the maximum future authority, while each Work Order
       // requests only capabilities the active runtime can actually enforce.
-      allowedTools: ["read", "search"],
+      allowedTools,
       network: "off",
       allowedDomains: [],
-      readScopes: ["workspace/**"],
+      readScopes: allowedTools.length > 0 ? ["workspace/**"] : [],
       writeScopes: [],
     },
     maxExecutionAttempts: task.maxAttempts,

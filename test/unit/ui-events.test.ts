@@ -284,6 +284,8 @@ function runState(workspace: string, runId: string): RunState {
     title: "UI 이벤트 관찰",
     objective: "실행 상태를 읽는다",
     kind: "observe",
+    executionMode: "reasoning-only",
+    requiredCapabilities: [],
     department: "engineering",
     ownerRole: "software_engineer",
     teamId: "team-1",

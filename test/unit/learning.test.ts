@@ -198,6 +198,8 @@ function task(confidence: number): TaskRecord {
     title: "Implementation",
     objective: "Implement and verify",
     kind: "implementation",
+    executionMode: "workspace-change",
+    requiredCapabilities: ["workspace-read", "workspace-search", "workspace-write", "command-execution"],
     department: "engineering",
     ownerRole: "worker",
     teamId: "team-1",

@@ -47,7 +47,11 @@ const BROKER_TOOLS = new Set(["read", "search"]);
 const BROKER_ONLY_CODEX_ARGS = [
   "--disable", "shell_tool",
   "--disable", "shell_snapshot",
-  "--disable", "code_mode_host",
+  // The stable host is the transport used by App Server dynamicTools. Enabling
+  // it does not enable model-authored code mode, shell, or filesystem access;
+  // those capabilities remain disabled below and all Luna tools still cross
+  // the host-owned read/search dispatcher and capability broker.
+  "--enable", "code_mode_host",
   "--disable", "code_mode",
   "--disable", "browser_use",
   "--disable", "browser_use_external",
@@ -74,11 +78,6 @@ const BROKER_ONLY_CODEX_ARGS = [
 /** Exact child-process feature boundary; returned as a copy for audit/tests. */
 export function codexAppServerIsolationArgs(): string[] {
   return [...BROKER_ONLY_CODEX_ARGS];
-}
-
-function isExpectedDeniedBuiltinDiagnostic(line: string): boolean {
-  return line.includes("codex_core::tools::router") &&
-    line.includes("error=code-mode host is disabled");
 }
 
 export interface CodexAppServerOptions {
@@ -110,11 +109,7 @@ export class CodexAppServerBackend implements AgentBackend {
       env: chatGptOnlyEnvironment(),
       ...(options.codexPath ? { codexPath: options.codexPath } : {}),
       codexArgs: options.codexArgs ?? codexAppServerIsolationArgs(),
-      ...(options.onStderr ? {
-        onStderr: (line: string) => {
-          if (!isExpectedDeniedBuiltinDiagnostic(line)) options.onStderr!(line);
-        },
-      } : {}),
+      ...(options.onStderr ? { onStderr: options.onStderr } : {}),
       ...(options.rpcTimeoutMs ? { rpcTimeoutMs: options.rpcTimeoutMs } : {}),
       experimentalApi: true,
     });

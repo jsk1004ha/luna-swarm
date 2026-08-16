@@ -37,6 +37,18 @@ function stringArray(value: unknown): string[] | undefined {
 }
 
 const DELIVERABLE_CONNECTORS = new Set(["and", "및", "그리고"]);
+const LATIN_TOKEN_WITH_KOREAN_PARTICLE = /^([\p{Script=Latin}\p{N}]+)(?:에서|에게|으로|부터|까지|보다|처럼|마다|조차|마저|이라고|이라는|이므로|이지만|이거나|입니다|이며|이고|이라|인데|이면|은|는|이|가|을|를|의|에|께|로|와|과|도|만)$/u;
+
+function normalizeDeliverableToken(token: string): string {
+  const particleMatch = token.match(LATIN_TOKEN_WITH_KOREAN_PARTICLE);
+  if (particleMatch?.[1] && /\p{Script=Latin}/u.test(particleMatch[1])) {
+    return particleMatch[1];
+  }
+  const characters = [...token];
+  return characters.length >= 3 && (characters.at(-1) === "와" || characters.at(-1) === "과")
+    ? characters.slice(0, -1).join("")
+    : token;
+}
 
 function deliverableTokens(value: string): string[] {
   return value
@@ -44,12 +56,7 @@ function deliverableTokens(value: string): string[] {
     .toLocaleLowerCase("en-US")
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean)
-    .map((token) => {
-      const characters = [...token];
-      return characters.length >= 3 && (characters.at(-1) === "와" || characters.at(-1) === "과")
-        ? characters.slice(0, -1).join("")
-        : token;
-    })
+    .map(normalizeDeliverableToken)
     .filter((token) => token.length > 0 && !DELIVERABLE_CONNECTORS.has(token));
 }
 

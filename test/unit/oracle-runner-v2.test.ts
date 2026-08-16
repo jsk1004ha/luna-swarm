@@ -95,6 +95,32 @@ test("default structural deliverable checks accept detailed entries that collect
   );
 });
 
+test("Latin deliverable tokens accept bounded Korean particles without accepting substring near-misses", () => {
+  const mixedLanguage = input();
+  mixedLanguage.workOrder.deliverables = ["pass fail not verified 판정 규칙"];
+  const forged = forgeOracleSuite(mixedLanguage);
+  const receiptFor = (deliverable: string) => {
+    const output = artifact({
+      deliverables: [deliverable],
+      evidence: ["bounded particle normalization evidence"],
+      checks: ["mixed-language deliverable coverage checked"],
+      claims: [{
+        statement: "The declared verdict vocabulary is represented",
+        support: "The structured deliverable preserves the required verdict terms",
+        requirementIds: ["REQ-A"],
+        evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
+      }],
+    });
+    return evaluateOracleSuite(forged.suite, output, runArtifactStructuralOracles(forged.suite, output));
+  };
+
+  assert.equal(receiptFor("pass fail not verified의 판정 규칙").passed, true);
+  assert.equal(receiptFor("pass fail not verified이며 판정 규칙").passed, true);
+  assert.equal(receiptFor("pass fail not unverified의 판정 규칙").passed, false);
+  assert.equal(receiptFor("pass fail not verified의미 판정 규칙").passed, false);
+  assert.equal(receiptFor("pass fail not verified의도 판정 규칙").passed, false);
+});
+
 test("missing receipt cannot pass and fabricated or rebound receipts are rejected", () => {
   const forged = forgeOracleSuite(input());
   const output = artifact({ deliverables: ["patch"], evidence: [], checks: ["test-1"], claims: [{ statement: "done", support: "test", requirementIds: ["REQ-A"], evidenceRefs: [{ kind: "check", ordinal: 0 }] }] });

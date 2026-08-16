@@ -59,6 +59,53 @@ export interface OrganizationSnapshot {
 }
 
 export type TaskRisk = "low" | "medium" | "high";
+export const TASK_CAPABILITIES = [
+  "workspace-read",
+  "workspace-search",
+  "external-network",
+  "workspace-write",
+  "command-execution",
+] as const;
+export type TaskCapability = (typeof TASK_CAPABILITIES)[number];
+export const TASK_EXECUTION_MODES = [
+  "reasoning-only",
+  "workspace-inspection",
+  "external-research",
+  "command-verification",
+  "workspace-change",
+  "external-research-and-workspace-change",
+] as const;
+export type TaskExecutionMode = (typeof TASK_EXECUTION_MODES)[number];
+
+export const TASK_EXECUTION_MODE_CAPABILITIES = {
+  "reasoning-only": [],
+  "workspace-inspection": ["workspace-read", "workspace-search"],
+  "external-research": ["external-network"],
+  "command-verification": [
+    "workspace-read",
+    "workspace-search",
+    "command-execution",
+  ],
+  "workspace-change": [
+    "workspace-read",
+    "workspace-search",
+    "workspace-write",
+    "command-execution",
+  ],
+  "external-research-and-workspace-change": [
+    "workspace-read",
+    "workspace-search",
+    "external-network",
+    "workspace-write",
+    "command-execution",
+  ],
+} as const satisfies Readonly<Record<TaskExecutionMode, readonly TaskCapability[]>>;
+
+export function taskCapabilitiesForExecutionMode(
+  mode: TaskExecutionMode,
+): TaskCapability[] {
+  return [...TASK_EXECUTION_MODE_CAPABILITIES[mode]];
+}
 export type TaskStatus =
   | "planned"
   | "ready"
@@ -121,6 +168,10 @@ export interface TaskSpec {
   title: string;
   objective: string;
   kind: string;
+  /** Closed host-interpreted execution class. */
+  executionMode: TaskExecutionMode;
+  /** Host-enforced capabilities required to complete this task. */
+  requiredCapabilities: TaskCapability[];
   department: Department;
   ownerRole: string;
   teamId: string;

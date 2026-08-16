@@ -47,6 +47,8 @@ test("task ownership must match its department", () => {
     title: "Task",
     objective: "Test",
     kind: "research",
+    executionMode: "reasoning-only",
+    requiredCapabilities: [],
     department: "research",
     ownerRole: "research_specialist",
     teamId: "TEAM",

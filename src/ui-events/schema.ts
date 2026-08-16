@@ -3,13 +3,13 @@ import type { JsonValue } from "../types.js";
 
 export type SwarmUiEventType =
   | "run_started" | "run_paused" | "run_resumed" | "run_completed" | "run_failed"
-  | "plan_started" | "plan_accepted" | "plan_repair_requested"
+  | "plan_started" | "plan_accepted" | "plan_repair_requested" | "plan_capability_blocked"
   | "agent_turn_started" | "agent_turn_completed" | "agent_turn_failed"
   | "task_ready" | "task_started" | "task_progress" | "task_output_created" | "task_retry_wait" | "task_blocked"
   | "task_failed" | "task_accepted" | "task_cancelled"
   | "manager_review_started" | "manager_review_completed"
   | "audit_started" | "audit_vote_recorded" | "audit_completed"
-  | "team_synthesis_started" | "team_report_delivered" | "team_report_accepted"
+  | "team_synthesis_started" | "team_synthesis_fallback" | "team_report_delivered" | "team_report_accepted"
   | "concurrency_changed" | "rate_limit_detected" | "rate_limit_cooldown_started"
   | "rate_limit_cooldown_ended" | "operator_instruction_queued"
   | (string & {});
