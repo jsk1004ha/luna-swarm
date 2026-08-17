@@ -57,6 +57,10 @@ lines.on("line", (line) => {
       send({ id, error: { code: 404, message: "thread not found" } });
       return;
     }
+    if (method === "thread/resume" && process.argv.includes("resume-no-rollout")) {
+      send({ id, error: { code: -32600, message: `no rollout found for thread id ${params.threadId}` } });
+      return;
+    }
     if (method === "thread/resume" && process.argv.includes("resume-auth-error")) {
       send({ id, error: { code: 401, message: "permission denied" } });
       return;
@@ -138,6 +142,48 @@ lines.on("line", (line) => {
           if (mode === "dynamic-tool-crash") setTimeout(() => process.exit(24), 5);
         }
       } else if (!delayed) {
+        if (params.input?.[0]?.text === "emit-token-usage") {
+          send({ method: "rawResponse/completed", params: {
+            threadId: params.threadId,
+            turnId,
+            responseId: "response-1",
+            usage: {
+              totalTokens: 100,
+              inputTokens: 70,
+              cachedInputTokens: 20,
+              cacheWriteInputTokens: 5,
+              outputTokens: 30,
+              reasoningOutputTokens: 10,
+            },
+          } });
+          // Replayed notifications must not double-count the same upstream response.
+          send({ method: "rawResponse/completed", params: {
+            threadId: params.threadId,
+            turnId,
+            responseId: "response-1",
+            usage: {
+              totalTokens: 100,
+              inputTokens: 70,
+              cachedInputTokens: 20,
+              cacheWriteInputTokens: 5,
+              outputTokens: 30,
+              reasoningOutputTokens: 10,
+            },
+          } });
+          send({ method: "rawResponse/completed", params: {
+            threadId: params.threadId,
+            turnId,
+            responseId: "response-2",
+            usage: {
+              totalTokens: 50,
+              inputTokens: 35,
+              cachedInputTokens: 5,
+              cacheWriteInputTokens: 0,
+              outputTokens: 15,
+              reasoningOutputTokens: 5,
+            },
+          } });
+        }
         const text = params.input?.[0]?.text === "echo-sandbox-policy"
           ? JSON.stringify(params.sandboxPolicy)
           : params.input?.[0]?.text === "echo-thread-start-params"
@@ -145,6 +191,7 @@ lines.on("line", (line) => {
                 ephemeral: threadStartParams.get(params.threadId)?.ephemeral,
                 serviceName: threadStartParams.get(params.threadId)?.serviceName,
                 threadSource: threadStartParams.get(params.threadId)?.threadSource,
+                experimentalRawEvents: threadStartParams.get(params.threadId)?.experimentalRawEvents,
               })
           : params.input?.[0]?.text === "echo-developer-instructions"
             ? threadInstructions.get(params.threadId) ?? ""

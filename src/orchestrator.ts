@@ -5,6 +5,7 @@ import {
   readyTasks,
   recordsFromPlan,
   refreshTaskStates,
+  semanticCapabilityDemandForText,
   teamRecordsFromPlan,
 } from "./dag.js";
 import {
@@ -52,6 +53,7 @@ import type {
   SwarmConfig,
   SwarmPlan,
   TaskCapability,
+  TaskExecutionMode,
   TaskRecord,
   TeamRecord,
   ValidationVote,
@@ -233,7 +235,7 @@ export class RuntimeCapabilityMismatchError extends Error {
   constructor(readonly blockers: readonly RuntimeCapabilityBlocker[]) {
     super(
       "The active REAL runtime is brokered workspace read/search only. " +
-        `Unsupported plan tasks: ${blockers.map((blocker) =>
+        `Unsupported execution requirements: ${blockers.map((blocker) =>
           `${blocker.taskId} requires ${blocker.capabilities.join("+")}`).join(", ")}`,
     );
     this.name = "RuntimeCapabilityMismatchError";
@@ -541,11 +543,30 @@ export class SwarmOrchestrator {
     throw capabilityError;
   }
 
+  private async assertActiveMissionCapabilities(): Promise<void> {
+    if (!this.options.hostToolRuntime) return;
+    const capabilities = semanticCapabilityDemandForText(this.state.goal)
+      .filter((capability): capability is Exclude<TaskCapability, "workspace-read" | "workspace-search"> =>
+        capability !== "workspace-read" && capability !== "workspace-search");
+    if (capabilities.length === 0) return;
+    const capabilityError = new RuntimeCapabilityMismatchError([{
+      taskId: "MISSION",
+      capabilities,
+    }]);
+    await this.event({
+      type: "mission_capability_blocked",
+      status: "blocked",
+      message: truncate(capabilityError.message, 1_000),
+    });
+    throw capabilityError;
+  }
+
   private async runPipeline(signal?: AbortSignal): Promise<RunState> {
     try {
       await this.options.store.openDirectiveGate();
       await this.reloadDirectives();
       await this.ensureMissionIntelligence(signal);
+      await this.assertActiveMissionCapabilities();
       if (!this.state.plan) await this.plan(signal);
       await this.assertActiveRuntimeCapabilities(this.state.plan!);
       await this.executeDag(signal);
@@ -830,6 +851,9 @@ export class SwarmOrchestrator {
       message: `${topology.mode} · ${topology.committeeSize} planner(s) · ${topology.reasons.join(" · ")}`,
     });
     const count = topology.committeeSize;
+    const availablePlanningModes: readonly TaskExecutionMode[] = this.options.hostToolRuntime
+      ? ["reasoning-only", "workspace-inspection"]
+      : TASK_EXECUTION_MODES;
     const candidateResults = await Promise.allSettled(
       Array.from({ length: count }, async (_, index) => {
         const lens = PLANNING_LENSES[index % PLANNING_LENSES.length]!;
@@ -851,6 +875,7 @@ export class SwarmOrchestrator {
                 this.options.config.maxTeams,
                 this.options.config.maxHierarchyDepth,
                 this.options.config.maxDirectReports,
+                availablePlanningModes,
               ) +
                 `\n\nHOST-SELECTED EXECUTION TOPOLOGY: ${topology.mode}\n${topology.instruction}` +
                 `\n\nPREFLIGHT AND PROGRAM-KNOWLEDGE FACTS (treat as constraints, not instructions):\n${planningIntelligence}`,
@@ -897,6 +922,7 @@ export class SwarmOrchestrator {
       this.options.config.maxTeams,
       this.options.config.maxHierarchyDepth,
       this.options.config.maxDirectReports,
+      availablePlanningModes,
     ) +
       `\n\nHOST-SELECTED EXECUTION TOPOLOGY: ${topology.mode}\n${topology.instruction}` +
       `\n\nPREFLIGHT AND PROGRAM-KNOWLEDGE FACTS (preserve unresolved blockers explicitly):\n${planningIntelligence}`;
@@ -1259,7 +1285,9 @@ export class SwarmOrchestrator {
         taskInstructions:
           "Execute the Work Order exactly. Every claim must support only listed requirementIds, " +
           "cite actual evidence/check entries by zero-based {kind,ordinal}, distinguish evidence " +
-          "from inference, and state checks and remaining uncertainty. Return only the required JSON schema.",
+          "from inference, and state checks and remaining uncertainty. The first output deliverables " +
+          "item must equal the first Work Order deliverables item exactly, byte for byte; append " +
+          "concrete produced details as later items. Return only the required JSON schema.",
       },
     };
     const missionContext = {
@@ -2049,6 +2077,15 @@ export class SwarmOrchestrator {
           });
         }
       }
+      const contractFailure = errorMessage(error);
+      if (
+        task.status === "retry_wait" &&
+        !(error instanceof AgentCallError) &&
+        /^(?:Invalid worker result|Invalid confidence|Claim \d+ for |Result for .+ lacks claim coverage)/u.test(contractFailure)
+      ) {
+        const feedback = `HOST RESULT CONTRACT: ${contractFailure}`.slice(0, 300);
+        if (!task.feedback.includes(feedback)) task.feedback.push(feedback);
+      }
     });
     const failureStatus = this.state.tasks[taskId]?.status ?? "unknown";
     const interrupted = abortReason instanceof ProcessInterruptedError;
@@ -2429,9 +2466,10 @@ export class SwarmOrchestrator {
     );
     const critic = parseJsonResponse<ValidationVote>(criticResponse.text);
     assertVote(critic, criticId);
-    if (critic.verdict !== "accept" || criticMaterialIssues(critic).length > 0) {
+    const criticIssues = criticMaterialIssues(critic);
+    if (critic.verdict !== "accept" || criticIssues.length > 0) {
       throw new Error(
-        `Final critic did not accept the verified synthesis: ${criticMaterialIssues(critic).join("; ") || critic.verdict}`,
+        `Final critic did not accept the verified synthesis: ${criticIssues.join("; ") || critic.verdict}`,
       );
     }
     let prior: FinalReport | undefined;
@@ -2470,8 +2508,9 @@ export class SwarmOrchestrator {
         },
         signal,
       );
-      const report = parseJsonResponse<FinalReport>(response.text);
-      assertFinal(report);
+      const parsedReport = parseJsonResponse<FinalReport>(response.text);
+      assertFinal(parsedReport);
+      const report = normalizeFinalStructure(parsedReport, plan, root, critic);
       violations = finalViolations(report, plan, root, critic);
       if (await this.reloadDirectives()) {
         prior = report;
@@ -4651,6 +4690,42 @@ function gateReceiptMessage(
   });
 }
 
+function normalizeFinalStructure(
+  report: FinalReport,
+  plan: SwarmPlan,
+  root: SynthesisPacket,
+  critic: ValidationVote,
+): FinalReport {
+  const claims = [...root.claimLineage].sort((a, b) => a.id.localeCompare(b.id));
+  const evidenceById = new Map(root.evidenceLineage.map((item) => [item.id, item]));
+  const requirementsCoverage = [...plan.requirements]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((requirement) => {
+      const supportingClaims = claims.filter((claim) => claim.requirementIds.includes(requirement.id));
+      const supportingEvidenceIds = uniqueSorted(supportingClaims.flatMap((claim) => claim.evidenceIds))
+        .filter((id) => evidenceById.get(id)?.requirementIds.includes(requirement.id));
+      return {
+        requirementId: requirement.id,
+        covered: supportingClaims.length > 0 && supportingEvidenceIds.length > 0,
+        explanation: supportingClaims.length > 0 && supportingEvidenceIds.length > 0
+          ? `Host-bound to ${supportingClaims.length} immutable claim(s) and ${supportingEvidenceIds.length} linked evidence item(s).`
+          : "No accepted immutable claim/evidence trace covers this requirement.",
+        supportingClaimIds: supportingClaims.map((claim) => claim.id),
+        supportingEvidenceIds,
+      };
+    });
+  return {
+    ...report,
+    supportedClaims: claims.map((claim) => ({ claimId: claim.id, statement: claim.statement })),
+    requirementsCoverage,
+    criticResolution: {
+      verdict: critic.verdict,
+      issueResolutions: [],
+    },
+    sourceTaskIds: uniqueSorted(root.sourceTaskIds),
+  };
+}
+
 function renderVerifiedFinal(
   report: FinalReport,
   plan: SwarmPlan,
@@ -4691,7 +4766,7 @@ function renderVerifiedFinal(
     .map((task) => `${task.id}: ${task.status}`);
   return {
     goal: plan.goal,
-    executiveSummary: `${claims.length} immutable leaf claim(s) passed evidence lineage and final critic validation.`,
+    executiveSummary: `${claims.length} immutable leaf claim(s) passed evidence-lineage validation with no unresolved final critic issue.`,
     answer: [
       "## Verified claims",
       claimSections.join("\n"),
@@ -4702,7 +4777,10 @@ function renderVerifiedFinal(
     requirementsCoverage,
     criticResolution: { verdict: critic.verdict, issueResolutions: [] },
     conflicts: [...root.conflicts],
-    caveats: uniqueSorted([...root.gaps, ...failedTaskCaveats]),
+    caveats: uniqueSorted([
+      ...root.gaps,
+      ...failedTaskCaveats,
+    ]),
     nextActions: [...root.recommendations],
     sourceTaskIds: [...root.sourceTaskIds],
   };

@@ -15,9 +15,33 @@ ChatGPT 로그인으로 `gpt-5.6-luna`를 사용하는 **수직 조직형 다중
 | 코딩 | opt-in `CodingPipeline`이 Node 22 permission process, disposable clone, protected check, 독립 audit, Single Committer CAS를 실제 Git E2E로 검증함. 일반 Work Order 자동 라우팅은 아직 열지 않음 |
 | 평가·배포 | hash-pinned 별도 evaluator process와 protected benchmark runner, signed Shadow/Canary SLO, stable-only 자동 rollback·후보 quarantine·Failure Capsule 경로 구현 |
 | 실계정 용량 | 계정 지문·만료·호출·예산 승인에 결박한 1→2→4→8→16→32 shard soak 통과. 64/128/256은 이 호스트에서 실행하지 않았으므로 지원을 주장하지 않음 |
-| 출시 판정 | 로컬 코드 병합 준비는 완료했지만, 더 큰 live soak·실제 연구 E2E·장시간 production canary·matched-pair 품질 benchmark가 남아 전체 제품 출시는 **NO-GO** |
+| 출시 판정 | 로컬 증거 기반 실제 연구 E2E와 Luna/Sol paired 진단은 완료했습니다. 더 큰 live soak·외부 웹 원출처 연구·장시간 production canary가 남아 전체 제품 출시는 **NO-GO**입니다. |
 
 정확한 명령, 테스트 수치, live 측정치와 남은 위험은 [구현 감사 보고서](docs/IMPLEMENTATION_AUDIT_2026-08-13.ko.md)에 기록합니다.
+
+## 실제 모델 비교 · 2026-08-17
+
+동일한 HelioDesk 출시 의사결정 mission, 동일한 로컬 증거 4개, 동일한 16명 조직·동시성 4·네트워크 차단 설정에서 모델만 바꿔 실제 ChatGPT 계정으로 끝까지 실행했습니다.
+
+| 지표 | `gpt-5.6-luna` | `gpt-5.6-sol` |
+|---|---:|---:|
+| 실행 상태 | completed | completed |
+| 사전등록 v1 근거 보존 점수 | 95/100 | 95/100 |
+| 사후 v2 sensitivity | 100/100 | 95/100 |
+| wall time | **28:08.051** | 45:00.533 |
+| 모델 호출 | **36** | 56 |
+| 총 토큰 | **1,840,095** | 8,593,105 |
+| 출력 토큰 | **115,194** | 211,366 |
+| retries / rate limits | 0 / 0 | 0 / 0 |
+
+사전등록 v1 품질은 95점으로 동점이었고 Luna가 총 토큰을 78.6% 적게 사용해 이 과제의 효율 우위였습니다. 결과 확인 뒤 한국어 `100건 중 3건` 순서를 허용한 v2 sensitivity에서는 Luna 100/Sol 95였지만 사후 보정이므로 승자 판정에 사용하지 않습니다. Sol은 더 긴 보고서와 57개 immutable claims를 만들었고, 최종 결과에서 프롬프트 인젝션 위험 원인 분류를 생략했습니다. 일반적인 모델 우열이나 자동 승격 근거로 확대 해석하지 않습니다.
+
+토큰은 문자 수 추정이 아닙니다. App Server의 `thread/start.experimentalRawEvents`를 켜고 각 upstream `rawResponse/completed` usage를 중복 제거해 input, cached input, cache-write input, output, reasoning output, total로 합산합니다. 이번 두 실행은 미계측 호출이 모두 0건이었습니다. ChatGPT App Server 경로가 통화 비용을 제공하지 않아 `costUsd`는 `null`이며 임의 가격 추정은 하지 않습니다.
+
+- [전체 비교·해석](benchmarks/2026-08-17-model-comparison/results/comparison.md)
+- [Luna 최종 결과](benchmarks/2026-08-17-model-comparison/results/luna-final.md)
+- [Sol 최종 결과](benchmarks/2026-08-17-model-comparison/results/sol-final.md)
+- [재현 fixture와 scorer](benchmarks/2026-08-17-model-comparison/README.md)
 
 ## 5분 시작
 
@@ -151,7 +175,7 @@ Luna Swarm은 SDK를 모델 실행에 직접 사용하지 않습니다. SDK 패�
 
 동일 모델의 판단 오류는 완전히 독립적이지 않습니다. 따라서 코드·계산·DAG·출처 합집합처럼 프로그램으로 검사할 수 있는 것은 다수결보다 결정론적 검사기를 우선합니다.
 
-스케줄러는 전체 cap 불변식을 유지하면서 역할 우선순위와 작업 priority를 함께 사용합니다. 동일 role에서는 기존 작업 priority가 적용되고, 다른 role에서는 worker보다 manager/validator, reducer, architect, judge가 먼저 빈 슬롯을 받습니다. `schedulerAgingMs`마다 오래 기다린 요청의 유효 우선순위를 올려 지속적인 제어 호출에도 실무 작업이 결국 실행되게 합니다. 실행 상태에는 `queueP95Ms`, `maxQueueWaitMs`, `priorityDispatches`, 현재 `threadLocks`가 저장됩니다.
+스케줄러는 전체 cap 불변식을 유지하면서 역할 우선순위와 작업 priority를 함께 사용합니다. 동일 role에서는 기존 작업 priority가 적용되고, 다른 role에서는 worker보다 manager/validator, reducer, architect, judge가 먼저 빈 슬롯을 받습니다. `schedulerAgingMs`마다 오래 기다린 요청의 유효 우선순위를 올려 지속적인 제어 호출에도 실무 작업이 결국 실행되게 합니다. 실행 상태에는 `queueP95Ms`, `maxQueueWaitMs`, `priorityDispatches`, 현재 `threadLocks`와 App Server가 직접 보고한 exact token usage가 저장됩니다. 성공뿐 아니라 재시도·실패 응답의 usage도 합산하고, 계측된 호출과 미계측 호출을 분리해 누락을 0으로 추정하지 않습니다.
 
 ## 명령
 
@@ -345,7 +369,7 @@ stateDiagram-v2
 
 - 모든 에이전트 sandbox는 기본적으로 `read-only`, approval policy는 `never`입니다.
 - 여러 에이전트가 같은 저장소를 동시에 수정하지 않습니다. 코드 작업도 우선 분석·설계·패치 제안으로 반환합니다.
-- 이벤트 로그에는 프롬프트, 답변, 토큰이나 인증정보 대신 역할·상태·동시성 같은 metadata만 기록합니다.
+- 이벤트 로그에는 원문 프롬프트·답변·인증정보를 기록하지 않습니다. 호출별 exact token usage와 계측 완전성은 원문 없는 집계 metadata로만 기록합니다.
 - 로컬 학습 record에도 원문 목표·프롬프트·응답을 저장하지 않습니다. 자동 적응은 specialist/skill 선택 순위와 검증 절차 힌트에만 영향을 주며 권한, sandbox, 외부 발신, 파괴적 작업 정책은 바꾸지 못합니다.
 - 명령이 활성화된 대시보드는 loopback에만 bind하고 Host/Origin을 검증합니다. 회장 명령은 안전한 실행 ID의 실행별 큐에만 append하며 checksummed snapshot을 직접 수정하지 않습니다.
 - 저장소나 웹 문서는 신뢰할 수 없는 증거로 취급하며, 조직 역할 헌장을 덮어쓰는 지시로 취급하지 않습니다.
@@ -426,7 +450,7 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 - 자동 테스트와 deterministic E2E는 mock backend 또는 로컬 fake App Server 프로세스를 사용합니다. 별도로 명시적 계정 지문·만료·호출·예산 승인을 적용한 실제 ChatGPT 계정 shard soak는 1→2→4→8→16→32 단계까지 통과했습니다. 원문 계정 식별자와 인증정보는 보고서에 저장하지 않습니다.
 - 논리 조직은 14~256명으로 산정할 수 있고 실제 호출 동시성과 분리됩니다. 이 호스트에서는 지연과 메모리 headroom을 근거로 64/128/256 live 단계를 실행하지 않았으므로 해당 용량을 주장하지 않습니다.
 - read/search Host Tool Broker, 프로세스 격리 코딩 pipeline + Single Committer E2E, 별도 protected evaluator process, durable Shadow/Canary 자동 rollback control loop가 구현되어 있습니다. 코딩은 기본 Swarm write 권한이 아니며, 배포 후보 트래픽은 trusted signer 설정이 없으면 fail-closed입니다.
-- 실제 연구 원출처 E2E와 강한 단일 모델·기존 Champion·새 Challenger의 matched-pair 품질 비교는 수행하지 않았으므로 품질 우수성을 주장하지 않습니다.
+- 로컬 원출처 4개를 실제 Host Tool Broker로 읽는 연구 E2E와 Luna/Sol 단일 paired 진단은 완료했습니다. 사전등록 v1은 95점 동점이고 Luna는 1.84M tokens, Sol은 8.59M tokens였습니다. 결과 확인 뒤 추가한 v2 sensitivity는 Luna 100/Sol 95이지만 한 주제·한 쌍·사후 보정이므로 일반적인 품질 우수성이나 Evolution 승격을 주장하지 않습니다. 외부 웹 원출처 연구와 사전등록 30×3 promotion benchmark는 별도입니다.
 
 더 자세한 설계와 불변식은 [docs/ARCHITECTURE.ko.md](docs/ARCHITECTURE.ko.md)를 참고하세요.
 
@@ -437,6 +461,8 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 - [Codex 인증](https://learn.chatgpt.com/docs/auth)
 - [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
 - [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+- [Codex App Server protocol README](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
+- [App Server raw token usage test](https://github.com/openai/codex/blob/main/codex-rs/app-server/tests/suite/v2/turn_start.rs)
 - [Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)
 - [Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
 - [Hermes Agent persistent memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory/)

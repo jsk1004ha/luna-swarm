@@ -197,6 +197,55 @@ test("abort errors are never retried", async () => {
   assert.equal(backend.calls.length, 1);
 });
 
+test("gateway persists exact token totals and counts unmetered backend calls", async () => {
+  let call = 0;
+  const backend: AgentBackend = {
+    info: () => ({ name: "usage", model: "test", transport: "memory" }),
+    async run(): Promise<AgentResponse> {
+      call += 1;
+      if (call === 1) {
+        const error = Object.assign(new Error("connection reset"), {
+          tokenUsage: {
+            totalTokens: 10,
+            inputTokens: 7,
+            cachedInputTokens: 2,
+            cacheWriteInputTokens: 0,
+            outputTokens: 3,
+            reasoningOutputTokens: 1,
+          },
+          tokenUsageComplete: true,
+        });
+        throw error;
+      }
+      return {
+        text: "ok",
+        threadId: "thread",
+        turnId: "turn",
+        durationMs: 1,
+        // Deliberately unmetered to prove missing telemetry is not recorded as zero tokens.
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const gateway = new AgentGateway({
+    backend,
+    config: { ...testConfig(), gatewayMaxAttempts: 2 },
+    jitter: () => 0,
+  });
+
+  await gateway.run(request);
+  assert.deepEqual(gateway.metrics().tokenUsage, {
+    totalTokens: 10,
+    inputTokens: 7,
+    cachedInputTokens: 2,
+    cacheWriteInputTokens: 0,
+    outputTokens: 3,
+    reasoningOutputTokens: 1,
+  });
+  assert.equal(gateway.metrics().tokenMeteredCalls, 1);
+  assert.equal(gateway.metrics().tokenUnmeteredCalls, 1);
+});
+
 test("deadline AbortError is transient and retries after releasing both permits", async () => {
   const directory = await mkdtemp(join(tmpdir(), "luna-gateway-timeout-retry-"));
   try {

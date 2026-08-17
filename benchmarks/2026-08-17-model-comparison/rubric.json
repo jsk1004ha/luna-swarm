@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "maximumScore": 100,
+  "categories": [
+    { "id": "decision", "points": 15, "criterion": "전면 출시를 차단하고 제한적 보조 모드만 조건부 허용" },
+    { "id": "pilot_metrics", "points": 30, "criterion": "표본, 속도, CSAT, 환각, PII 수치를 정확히 보존" },
+    { "id": "security_and_gates", "points": 25, "criterion": "네 보안 결함과 정량 출시 게이트를 정확히 연결" },
+    { "id": "finance_and_plan", "points": 20, "criterion": "단위 경제성, 예산, 8주 수정, shadow/5% canary/rollback 및 30/60/90 계획" },
+    { "id": "traceability", "points": 10, "criterion": "네 근거 파일을 실제 파일명으로 추적" }
+  ],
+  "criticalFailures": [
+    "전면 무조건 출시 권고",
+    "PII 또는 교차 테넌트 Critical 차단 누락",
+    "존재하지 않는 외부 출처나 실행 결과 조작"
+  ]
+}

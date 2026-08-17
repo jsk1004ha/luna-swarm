@@ -63,7 +63,7 @@ test("a registered prompt-module challenger changes actual prompts only after th
   const challengerPrompt = createPromptModuleV1({
     schemaVersion: PROMPT_MODULE_SCHEMA_VERSION,
     moduleId: "prompt-module-v1:challenger:evidence-first",
-    directive: `CHALLENGER_BEHAVIOR: enumerate evidence references before every conclusion. ${"PROMOTED_MODULE_BODY ".repeat(500)}`,
+    directive: `CHALLENGER_BEHAVIOR: enumerate evidence references before every conclusion. ${"PROMOTED_MODULE_BODY ".repeat(400)}`,
   });
   await current.promptModuleStore.publish(challengerPrompt);
   const challengerGenome = deriveOrganizationGenome(championGenome, {

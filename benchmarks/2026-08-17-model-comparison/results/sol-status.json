@@ -1,0 +1,36 @@
+{
+  "runId": "benchmark-sol-final-v8-20260817",
+  "model": "gpt-5.6-sol",
+  "status": "completed",
+  "createdAt": "2026-08-17T02:13:29.437Z",
+  "updatedAt": "2026-08-17T02:58:27.238Z",
+  "externalWallMs": 2700533,
+  "stateWallMs": 2697801,
+  "modelCalls": 56,
+  "retries": 0,
+  "rateLimitEvents": 0,
+  "maxActiveCalls": 4,
+  "maxQueueWaitMs": 21737,
+  "queueP95Ms": 18396,
+  "tokenUsage": {
+    "totalTokens": 8593105,
+    "inputTokens": 8381739,
+    "cachedInputTokens": 6582528,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 211366,
+    "reasoningOutputTokens": 73552
+  },
+  "tokenMeteredCalls": 56,
+  "tokenUnmeteredCalls": 0,
+  "usageEvidence": "Codex App Server rawResponse/completed",
+  "costUsd": null,
+  "costEvidence": "not provided by the ChatGPT App Server account path",
+  "tasks": {
+    "planned": 6,
+    "accepted": 6,
+    "totalAttempts": 11
+  },
+  "immutableLeafClaims": 57,
+  "finalBytes": 156606,
+  "finalSha256": "005dfb13d779e16cb42d8617deb761fae4756c5f163abda725d95ce2d72deec4"
+}

@@ -656,6 +656,35 @@ test("REAL read-only execution rejects impossible network, write, and command ta
   }
 });
 
+test("REAL read-only execution rejects original mission authority before planners can sanitize it", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-mission-capability-gate-"));
+  try {
+    const backend = new MockAgentBackend(demoHandler);
+    const store = await createdRunStore(workspace, ".state", "run-mission-capability-gate");
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: config() }),
+      store,
+      config: config(),
+      workspace,
+      sourceIdentity: "build:test-mission-capability-gate",
+      hostToolRuntime: {} as never,
+    }).start("Compare other AI agents using current external sources and build a motion website");
+
+    assert.equal(state.status, "failed");
+    assert.match(state.error ?? "", /MISSION requires/);
+    assert.match(state.error ?? "", /external-network/);
+    assert.match(state.error ?? "", /workspace-write/);
+    assert.match(state.error ?? "", /command-execution/);
+    assert.equal(backend.calls.some((call) => call.purpose === "candidate_plan"), false);
+    assert.equal(backend.calls.some((call) => call.purpose === "execute_task"), false);
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string; message?: string });
+    assert.match(events.find((event) => event.type === "mission_capability_blocked")?.message ?? "", /MISSION/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("REAL resume rechecks persisted capability demand before migration or execution", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-resume-capability-gate-"));
   try {
@@ -842,6 +871,7 @@ test("execution rework fits exact escaped evidence into the remaining required-c
     assert.ok(second.prompt.length <= cfg.maxContextChars);
     assert.match(second.prompt, /causal repair finding from the accountable manager/);
     assert.match(second.prompt, /previousOutputRef/);
+    assert.match(second.prompt, /first Work Order deliverables item exactly, byte for byte/);
     assert.match(second.prompt, /near-budget-dependency-T1/);
     assert.match(second.prompt, /\\u003c\\u0026\\u003e/);
     assert.doesNotMatch(second.prompt, /oversized-evidence-63/);
@@ -857,6 +887,46 @@ test("execution rework fits exact escaped evidence into the remaining required-c
     const firstRevision = (await blackboard.listRevisions(head.artifactId))
       .find((ref) => ref.revision === 1);
     assert.deepEqual(rework.previousOutputRef, firstRevision);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("worker result contract failures are fed back before the next attempt", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-result-contract-rework-"));
+  try {
+    let injectedInvalidReference = false;
+    const backend = new MockAgentBackend(async (request) => {
+      if (request.purpose === "execute_task" && request.taskId === "T3" && !injectedInvalidReference) {
+        injectedInvalidReference = true;
+        const result = await demoHandler(request) as AgentResult;
+        result.claims[0]!.evidenceRefs = [{ kind: "evidence", ordinal: 999 }];
+        return result;
+      }
+      return demoHandler(request);
+    });
+    const store = await createdRunStore(workspace, ".state", "run-result-contract-rework");
+    const cfg = config();
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-result-contract-rework",
+    }).start("worker result contract feedback");
+
+    assert.equal(state.status, "completed", state.error);
+    assert.equal(state.tasks.T3?.attempts, 2);
+    const workerCalls = backend.calls.filter((call) => call.purpose === "execute_task" && call.taskId === "T3");
+    assert.equal(workerCalls.length, 2);
+    const second = workerCalls[1]!;
+    const rework = (second.data as {
+      reworkContext?: { feedback?: string[] };
+    }).reworkContext;
+    assert.ok(rework?.feedback?.some((item) =>
+      item.includes("HOST RESULT CONTRACT: Claim 0 for T3 has invalid evidence references"),
+    ));
+    assert.match(second.prompt, /HOST RESULT CONTRACT: Claim 0 for T3 has invalid evidence references/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -998,7 +1068,10 @@ test("zero accepted tasks surface the causal root failures instead of a generic 
   const workspace = await mkdtemp(join(tmpdir(), "luna-root-failure-"));
   try {
     const failingPlan = demoPlan("root failure diagnostics");
-    for (const task of failingPlan.tasks) task.maxAttempts = 1;
+    for (const task of failingPlan.tasks) {
+      task.risk = "low";
+      task.maxAttempts = 1;
+    }
     const backend = new MockAgentBackend(async (request) => {
       if (["candidate_plan", "architect_plan", "architect_repair"].includes(request.purpose)) {
         return structuredClone(failingPlan);
@@ -1161,7 +1234,7 @@ test("a reducer failure falls back to an immutable deterministic team packet", a
   }
 });
 
-test("final gate repairs duplicate, uncovered, unexplained, and untraced requirement coverage", async () => {
+test("final gate canonicalizes duplicate, uncovered, unexplained, and untraced model coverage", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-final-coverage-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1196,7 +1269,7 @@ test("final gate repairs duplicate, uncovered, unexplained, and untraced require
     const state = await orchestrator.start("strict final coverage");
 
     assert.equal(state.status, "completed");
-    assert.equal(backend.calls.filter((call) => call.purpose === "final_repair").length, 1);
+    assert.equal(backend.calls.filter((call) => call.purpose === "final_repair").length, 0);
     assert.ok(state.final?.requirementsCoverage.every((item) =>
       item.covered && item.supportingClaimIds.length > 0 && item.supportingEvidenceIds.length > 0,
     ));
@@ -1205,7 +1278,7 @@ test("final gate repairs duplicate, uncovered, unexplained, and untraced require
   }
 });
 
-test("final gate repairs invented claims and unrelated claim/evidence requirement traces", async () => {
+test("final gate discards invented claims and canonicalizes requirement traces", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-final-semantic-trace-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1242,7 +1315,7 @@ test("final gate repairs invented claims and unrelated claim/evidence requiremen
     const state = await orchestrator.start("strict semantic trace");
 
     assert.equal(state.status, "completed", state.error);
-    assert.equal(backend.calls.filter((call) => call.purpose === "final_repair").length, 1);
+    assert.equal(backend.calls.filter((call) => call.purpose === "final_repair").length, 0);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1379,7 +1452,40 @@ test("critic rejection deterministically blocks completion", async () => {
   }
 });
 
-test("unresolved material critic issues deterministically block completion", async () => {
+test("repairable final critic issues fail closed before the executive judge", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-critic-revise-"));
+  try {
+    const backend = new MockAgentBackend(async (request) => {
+      if (request.purpose === "critic_review") {
+        return {
+          validatorId: "FINAL-CRITIC",
+          verdict: "revise",
+          criteria: [{ criterion: "explicit provenance caveat", passed: false, note: "keep the limitation visible" }],
+          issues: ["mark the final recommendation as conditional"],
+          confidence: 0.99,
+        };
+      }
+      return demoHandler(request);
+    });
+    const cfg = config();
+    const store = await createdRunStore(workspace, ".state", "run-critic-revise");
+    const gateway = new AgentGateway({ backend, config: cfg });
+    const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
+    const state = await orchestrator.start("repairable critic issue");
+
+    assert.equal(state.status, "failed");
+    assert.equal(state.final, undefined);
+    assert.match(state.error ?? "", /Final critic did not accept/);
+    assert.equal(
+      backend.calls.filter((call) => ["final", "final_repair"].includes(call.purpose)).length,
+      0,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("unresolved critic issues cannot be relabeled as resolved caveats", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-critic-block-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1392,13 +1498,6 @@ test("unresolved material critic issues deterministically block completion", asy
           confidence: 0.99,
         };
       }
-      if (request.purpose === "final" || request.purpose === "final_repair") {
-        const report = await demoHandler(request) as {
-          criticResolution: { issueResolutions: Array<{ resolved: boolean }> };
-        };
-        report.criticResolution.issueResolutions[0]!.resolved = false;
-        return report;
-      }
       return demoHandler(request);
     });
     const cfg = config();
@@ -1409,7 +1508,7 @@ test("unresolved material critic issues deterministically block completion", asy
 
     assert.equal(state.status, "failed");
     assert.equal(state.final, undefined);
-    assert.match(state.error ?? "", /Final critic did not accept/);
+    assert.match(state.error ?? "", /material unresolved risk/);
     assert.equal(
       backend.calls.filter((call) => ["final", "final_repair"].includes(call.purpose)).length,
       0,

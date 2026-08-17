@@ -33,7 +33,7 @@ const READ_TOOL: HostToolSpec = Object.freeze({
 const SEARCH_TOOL: HostToolSpec = Object.freeze({
   type: "function",
   name: "search",
-  description: "Search UTF-8 workspace text through the bounded host-enforced read-only broker.",
+  description: "Search UTF-8 workspace text through the bounded host-enforced read-only broker. The result also includes a deterministic files inventory and whether that inventory is complete.",
   inputSchema: Object.freeze({
     type: "object",
     properties: {

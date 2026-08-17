@@ -1,0 +1,17 @@
+{
+  "primaryScorerVersion": 1,
+  "primaryScore": 95,
+  "sensitivityScorerVersion": 2,
+  "sensitivityScore": 95,
+  "maximumScore": 100,
+  "primaryPassedChecks": 19,
+  "primaryFailedChecks": [
+    "security.prompt_injection"
+  ],
+  "sensitivityPassedChecks": 19,
+  "sensitivityFailedChecks": [
+    "security.prompt_injection"
+  ],
+  "decision": "full launch NO-GO",
+  "interpretation": "Both v1 and v2 miss the prompt-injection item because the final report preserves 3/100 but omits that risk taxonomy."
+}

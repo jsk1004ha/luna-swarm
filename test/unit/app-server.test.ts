@@ -132,10 +132,29 @@ test("internal swarm threads are ephemeral and tagged by default while persisten
         ephemeral: expected,
         serviceName: "luna-swarm",
         threadSource: "luna-swarm-internal",
+        experimentalRawEvents: true,
       });
     } finally {
       await instance.close();
     }
+  }
+});
+
+test("App Server raw response usage is summed exactly for one logical turn", async () => {
+  const instance = backend();
+  try {
+    const response = await instance.run(request("token-usage", "emit-token-usage"));
+    assert.deepEqual(response.tokenUsage, {
+      totalTokens: 150,
+      inputTokens: 105,
+      cachedInputTokens: 25,
+      cacheWriteInputTokens: 5,
+      outputTokens: 45,
+      reasoningOutputTokens: 15,
+    });
+    assert.equal(response.tokenUsageComplete, true);
+  } finally {
+    await instance.close();
   }
 });
 
@@ -1056,6 +1075,21 @@ test("missing resumed thread falls back once to a fresh thread", async () => {
   });
   try {
     const result = await instance.run(existingRequest("resume-fallback", "work"));
+    assert.equal(result.text, "network=false");
+  } finally {
+    await instance.close();
+  }
+});
+
+test("ephemeral no-rollout resume errors fall back once to a fresh thread", async () => {
+  const instance = new CodexAppServerBackend({
+    workspace: process.cwd(),
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex, "resume-no-rollout"],
+    config: { ...DEFAULT_CONFIG, ephemeralThreads: true },
+  });
+  try {
+    const result = await instance.run(existingRequest("resume-no-rollout", "work"));
     assert.equal(result.text, "network=false");
   } finally {
     await instance.close();

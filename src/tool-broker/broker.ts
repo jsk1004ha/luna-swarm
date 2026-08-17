@@ -455,7 +455,15 @@ export class HostToolBroker {
       } finally { await handle.close(); }
       if (halt) break;
     }
-    return { kind: "search", matches, truncated, filesSearched, redactions };
+    return {
+      kind: "search",
+      files,
+      fileInventoryComplete: !discovery.truncated,
+      matches,
+      truncated,
+      filesSearched,
+      redactions,
+    };
   }
 
   #textColumns(line: string, query: string): number[] {

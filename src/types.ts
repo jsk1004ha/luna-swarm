@@ -322,6 +322,21 @@ export interface RunMetrics {
   queueP95Ms?: number;
   priorityDispatches?: number;
   threadLocks?: number;
+  /** Exact App Server usage summed from rawResponse/completed notifications. */
+  tokenUsage?: ModelTokenUsage;
+  /** Backend calls for which an exact token receipt was observed. */
+  tokenMeteredCalls?: number;
+  /** Backend calls with no exact token receipt; never estimated as zero usage. */
+  tokenUnmeteredCalls?: number;
+}
+
+export interface ModelTokenUsage {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
 }
 
 export interface RunHarnessState {
@@ -483,6 +498,8 @@ export interface RunEvent {
   learningPolicyVersion?: string;
   learningPolicyStatus?: "collecting" | "stable" | "promoted" | "rejected" | "rolled_back";
   learningPolicyImprovement?: number;
+  tokenUsage?: ModelTokenUsage;
+  tokenUsageComplete?: boolean;
   message?: string;
 }
 

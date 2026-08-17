@@ -90,6 +90,10 @@ export interface SearchMatch {
 
 export interface SearchOutput {
   kind: "search";
+  /** Deterministic inventory discovered under the requested root before content matching. */
+  files: string[];
+  /** False only when traversal limits prevented a complete file inventory. */
+  fileInventoryComplete: boolean;
   matches: SearchMatch[];
   truncated: boolean;
   filesSearched: number;

@@ -441,6 +441,15 @@ export function assertResult(value: AgentResult, taskId: string, allowedRequirem
       throw new Error(`Claim ${index} for ${taskId} has invalid evidence references`);
     }
   }
+  if (allowedRequirementIds) {
+    const coveredRequirementIds = new Set(value.claims.flatMap((claim) => claim.requirementIds));
+    const missingRequirementIds = allowedRequirementIds.filter((id) => !coveredRequirementIds.has(id));
+    if (missingRequirementIds.length > 0) {
+      throw new Error(
+        `Result for ${taskId} lacks claim coverage for requirements: ${missingRequirementIds.join(", ")}`,
+      );
+    }
+  }
 }
 
 export function assertVote(value: ValidationVote, validatorId: string): void {

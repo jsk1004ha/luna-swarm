@@ -15,7 +15,7 @@ import {
   chatGptOnlyEnvironment,
 } from "./app-server-client.js";
 import { Mutex, errorMessage, isAbortError } from "../util.js";
-import type { JsonValue, SwarmConfig } from "../types.js";
+import type { JsonValue, ModelTokenUsage, SwarmConfig } from "../types.js";
 import {
   assertToolPolicySubset,
   normalizeWorkspaceScope,
@@ -78,6 +78,13 @@ const BROKER_ONLY_CODEX_ARGS = [
 /** Exact child-process feature boundary; returned as a copy for audit/tests. */
 export function codexAppServerIsolationArgs(): string[] {
   return [...BROKER_ONLY_CODEX_ARGS];
+}
+
+interface RawResponseCompletion {
+  threadId: string;
+  turnId: string;
+  responseId: string;
+  usage: unknown;
 }
 
 export interface CodexAppServerOptions {
@@ -272,6 +279,7 @@ export class CodexAppServerBackend implements AgentBackend {
       ...common,
       serviceName: "luna-swarm",
       threadSource: "luna-swarm-internal",
+      experimentalRawEvents: true,
       ...(request.hostToolSession
         ? { dynamicTools: normalizeHostToolSpecs(request.hostToolSession) }
         : {}),
@@ -306,6 +314,10 @@ export class CodexAppServerBackend implements AgentBackend {
     let completed: TurnCompletion | undefined;
     let finalItemText = "";
     let deltaText = "";
+    let tokenUsage: ModelTokenUsage | undefined;
+    let rawResponsesSeen = 0;
+    let rawResponsesMissingUsage = 0;
+    const rawResponseIds = new Set<string>();
     let terminalError: Error | undefined;
     let resolveCompletion!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -333,6 +345,15 @@ export class CodexAppServerBackend implements AgentBackend {
         if (params.willRetry !== true) {
           terminalError = new Error(error?.message ?? "Codex turn failed");
         }
+      } else if (method === "rawResponse/completed") {
+        const raw = params as unknown as RawResponseCompletion;
+        if (raw.threadId !== threadId || (turnId && raw.turnId !== turnId)) return;
+        if (typeof raw.responseId !== "string" || !raw.responseId || rawResponseIds.has(raw.responseId)) return;
+        rawResponseIds.add(raw.responseId);
+        rawResponsesSeen += 1;
+        const observed = parseModelTokenUsage(raw.usage);
+        if (observed) tokenUsage = addModelTokenUsage(tokenUsage, observed);
+        else rawResponsesMissingUsage += 1;
       } else if (method === "turn/completed") {
         completed = params as unknown as TurnCompletion;
         releaseOnce();
@@ -428,18 +449,25 @@ export class CodexAppServerBackend implements AgentBackend {
         threadId,
         turnId,
         durationMs: Date.now() - startedAt,
+        ...(tokenUsage ? { tokenUsage } : {}),
+        tokenUsageComplete: rawResponsesSeen > 0 && rawResponsesMissingUsage === 0,
         ...(hostToolBinding && hostToolBinding.receipts.length > 0
           ? { hostToolReceipts: Object.freeze([...hostToolBinding.receipts]) }
           : {}),
       };
     } catch (error) {
       if (signal?.aborted && !turnId) releaseDeferred = true;
-      if (signal?.aborted) throw agentAbortError(signal);
-      if (isAbortError(error)) throw error;
-      if (error instanceof AppServerTransportError) throw error;
+      const tokenUsageComplete = rawResponsesSeen > 0 && rawResponsesMissingUsage === 0;
+      if (signal?.aborted) throw attachModelTokenUsage(agentAbortError(signal), tokenUsage, tokenUsageComplete);
+      if (isAbortError(error)) {
+        const abort = error instanceof Error ? error : new Error(errorMessage(error));
+        abort.name = "AbortError";
+        throw attachModelTokenUsage(abort, tokenUsage, tokenUsageComplete);
+      }
+      if (error instanceof AppServerTransportError) throw attachModelTokenUsage(error, tokenUsage, tokenUsageComplete);
       const wrapped = new Error(errorMessage(error), { cause: error });
       Object.assign(wrapped, error && typeof error === "object" ? error : {});
-      throw wrapped;
+      throw attachModelTokenUsage(wrapped, tokenUsage, tokenUsageComplete);
     } finally {
       if (hostToolBinding && this.activeHostTools.get(threadId) === hostToolBinding) {
         this.activeHostTools.delete(threadId);
@@ -494,6 +522,59 @@ export class CodexAppServerBackend implements AgentBackend {
       contentItems: [{ type: "inputText", text }],
     };
   }
+}
+
+const TOKEN_USAGE_FIELDS = [
+  "totalTokens",
+  "inputTokens",
+  "cachedInputTokens",
+  "cacheWriteInputTokens",
+  "outputTokens",
+  "reasoningOutputTokens",
+] as const satisfies readonly (keyof ModelTokenUsage)[];
+
+function parseModelTokenUsage(value: unknown): ModelTokenUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const parsed = {} as ModelTokenUsage;
+  for (const field of TOKEN_USAGE_FIELDS) {
+    const amount = record[field];
+    if (!Number.isSafeInteger(amount) || (amount as number) < 0) return undefined;
+    parsed[field] = amount as number;
+  }
+  return parsed;
+}
+
+function addModelTokenUsage(
+  current: ModelTokenUsage | undefined,
+  observed: ModelTokenUsage,
+): ModelTokenUsage {
+  const total = current ? { ...current } : emptyModelTokenUsage();
+  for (const field of TOKEN_USAGE_FIELDS) total[field] += observed[field];
+  return total;
+}
+
+function emptyModelTokenUsage(): ModelTokenUsage {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+  };
+}
+
+function attachModelTokenUsage<T extends Error>(
+  error: T,
+  usage: ModelTokenUsage | undefined,
+  complete: boolean,
+): T {
+  Object.assign(error, {
+    ...(usage ? { tokenUsage: usage } : {}),
+    tokenUsageComplete: complete,
+  });
+  return error;
 }
 
 interface ReadOnlyRuntimePolicy {
@@ -714,7 +795,7 @@ function isMissingThreadError(error: unknown): boolean {
   return (
     code === -32001 ||
     code === 404 ||
-    /(?:thread).*(?:not found|unknown)|(?:not found|unknown).*(?:thread)/i.test(error.message)
+    /(?:thread).*(?:not found|unknown)|(?:not found|unknown).*(?:thread)|no rollout found for thread id/i.test(error.message)
   );
 }
 

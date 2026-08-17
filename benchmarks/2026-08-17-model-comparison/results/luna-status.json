@@ -1,0 +1,36 @@
+{
+  "runId": "benchmark-luna-final-v8-20260817",
+  "model": "gpt-5.6-luna",
+  "status": "completed",
+  "createdAt": "2026-08-17T01:44:43.028Z",
+  "updatedAt": "2026-08-17T02:12:48.420Z",
+  "externalWallMs": 1688051,
+  "stateWallMs": 1685392,
+  "modelCalls": 36,
+  "retries": 0,
+  "rateLimitEvents": 0,
+  "maxActiveCalls": 4,
+  "maxQueueWaitMs": 3153,
+  "queueP95Ms": 1,
+  "tokenUsage": {
+    "totalTokens": 1840095,
+    "inputTokens": 1724901,
+    "cachedInputTokens": 748544,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 115194,
+    "reasoningOutputTokens": 40443
+  },
+  "tokenMeteredCalls": 36,
+  "tokenUnmeteredCalls": 0,
+  "usageEvidence": "Codex App Server rawResponse/completed",
+  "costUsd": null,
+  "costEvidence": "not provided by the ChatGPT App Server account path",
+  "tasks": {
+    "planned": 4,
+    "accepted": 4,
+    "totalAttempts": 8
+  },
+  "immutableLeafClaims": 38,
+  "finalBytes": 67277,
+  "finalSha256": "0bab824afeec05d0e494964c45af10b0cfac4cc2f263eb765f8b87ea04827b58"
+}

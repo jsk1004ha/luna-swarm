@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentBackend, AgentRequest, AgentResponse } from "../backend/agent-backend.js";
 import type { ExecutionController, LaunchPermit } from "../controls/execution-controller.js";
-import type { AgentRole, RunEvent, RunMetrics, SwarmConfig } from "../types.js";
+import type { AgentRole, ModelTokenUsage, RunEvent, RunMetrics, SwarmConfig } from "../types.js";
 import {
   combineSignals,
   errorMessage,
@@ -54,6 +54,9 @@ export class AgentGateway {
   private priorMaxQueueWaitMs = 0;
   private priorQueueP95Ms = 0;
   private priorPriorityDispatches = 0;
+  private tokenUsage: ModelTokenUsage | undefined;
+  private tokenMeteredCalls = 0;
+  private tokenUnmeteredCalls = 0;
   private lastCooldownUntil = 0;
   private callSequence = 0;
 
@@ -67,6 +70,16 @@ export class AgentGateway {
     this.priorMaxQueueWaitMs = options.initialMetrics?.maxQueueWaitMs ?? 0;
     this.priorQueueP95Ms = options.initialMetrics?.queueP95Ms ?? 0;
     this.priorPriorityDispatches = options.initialMetrics?.priorityDispatches ?? 0;
+    this.tokenUsage = options.initialMetrics?.tokenUsage
+      ? { ...options.initialMetrics.tokenUsage }
+      : undefined;
+    this.tokenMeteredCalls = options.initialMetrics?.tokenMeteredCalls ?? 0;
+    this.tokenUnmeteredCalls = options.initialMetrics?.tokenUnmeteredCalls ?? 0;
+    const unclassifiedCalls = Math.max(
+      0,
+      this.modelCalls - this.tokenMeteredCalls - this.tokenUnmeteredCalls,
+    );
+    this.tokenUnmeteredCalls += unclassifiedCalls;
     this.pool =
       options.pool ??
       new AdaptivePermitPool({
@@ -172,6 +185,8 @@ export class AgentGateway {
         throw error;
       }
       let combined: ReturnType<typeof combineSignals> | undefined;
+      let backendInvoked = false;
+      let usageRecorded = false;
       try {
         const failureBeforeSend = this.getAuthFailure();
         if (failureBeforeSend) {
@@ -190,6 +205,7 @@ export class AgentGateway {
           );
         }
         this.modelCalls += 1;
+        backendInvoked = true;
         // Start the remote deadline and invoke the backend synchronously after
         // durable admission. Attach both promise branches immediately so a fast
         // rejection cannot become unhandled while telemetry is persisted.
@@ -214,6 +230,8 @@ export class AgentGateway {
         const outcome = await backendOutcome;
         if (!outcome.ok) throw outcome.error;
         const response = outcome.response;
+        this.recordTokenUsage(response.tokenUsage, response.tokenUsageComplete === true);
+        usageRecorded = true;
         const targetBeforeSuccess = this.pool.snapshot().target;
         this.pool.recordSuccess();
         if (this.pool.snapshot().target !== targetBeforeSuccess) {
@@ -236,9 +254,16 @@ export class AgentGateway {
           attempt,
           active: this.pool.snapshot().active,
           concurrency: this.pool.snapshot().target,
+          ...(response.tokenUsage ? { tokenUsage: response.tokenUsage } : {}),
+          tokenUsageComplete: response.tokenUsageComplete === true,
         });
         return { ...response, queueWaitMs: totalQueueWaitMs, modelTurns: attempt };
       } catch (error) {
+        if (backendInvoked && !usageRecorded) {
+          const failedUsage = tokenUsageFromError(error);
+          this.recordTokenUsage(failedUsage.usage, failedUsage.complete);
+          usageRecorded = true;
+        }
         const kind = classifyError(error, combined?.signal, signal);
         this.pool.recordFailure();
         if (kind === "rate_limit") {
@@ -308,6 +333,9 @@ export class AgentGateway {
     queueP95Ms: number;
     priorityDispatches: number;
     threadLocks: number;
+    tokenUsage?: ModelTokenUsage;
+    tokenMeteredCalls: number;
+    tokenUnmeteredCalls: number;
   } {
     const pool = this.pool.snapshot();
     return {
@@ -319,7 +347,22 @@ export class AgentGateway {
       queueP95Ms: Math.max(this.priorQueueP95Ms, pool.queueP95Ms),
       priorityDispatches: this.priorPriorityDispatches + pool.priorityDispatches,
       threadLocks: this.threadLocks.size,
+      ...(this.tokenUsage ? { tokenUsage: { ...this.tokenUsage } } : {}),
+      tokenMeteredCalls: this.tokenMeteredCalls,
+      tokenUnmeteredCalls: this.tokenUnmeteredCalls,
     };
+  }
+
+  private recordTokenUsage(usage: ModelTokenUsage | undefined, complete: boolean): void {
+    if (!usage || !isModelTokenUsage(usage)) {
+      this.tokenUnmeteredCalls += 1;
+      return;
+    }
+    if (complete) this.tokenMeteredCalls += 1;
+    else this.tokenUnmeteredCalls += 1;
+    const total = this.tokenUsage ? { ...this.tokenUsage } : emptyModelTokenUsage();
+    for (const field of TOKEN_USAGE_FIELDS) total[field] += usage[field];
+    this.tokenUsage = total;
   }
 
   private async emit(event: Omit<RunEvent, "at" | "runId">): Promise<void> {
@@ -422,6 +465,38 @@ export function classifyError(
   }
   if (isAbortError(error)) return "abort";
   return "permanent";
+}
+
+const TOKEN_USAGE_FIELDS = [
+  "totalTokens",
+  "inputTokens",
+  "cachedInputTokens",
+  "cacheWriteInputTokens",
+  "outputTokens",
+  "reasoningOutputTokens",
+] as const satisfies readonly (keyof ModelTokenUsage)[];
+
+function emptyModelTokenUsage(): ModelTokenUsage {
+  return {
+    totalTokens: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 0,
+    reasoningOutputTokens: 0,
+  };
+}
+
+function isModelTokenUsage(value: ModelTokenUsage): boolean {
+  return TOKEN_USAGE_FIELDS.every((field) => Number.isSafeInteger(value[field]) && value[field] >= 0);
+}
+
+function tokenUsageFromError(error: unknown): { usage?: ModelTokenUsage; complete: boolean } {
+  if (!error || typeof error !== "object") return { complete: false };
+  const value = (error as { tokenUsage?: unknown }).tokenUsage;
+  const complete = (error as { tokenUsageComplete?: unknown }).tokenUsageComplete === true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { complete: false };
+  return { usage: value as ModelTokenUsage, complete };
 }
 
 function parseRetryAfter(error: unknown): number | undefined {

@@ -168,6 +168,8 @@ test("search is deterministic, exact for text/regex, bounded, and never invokes 
   });
   assert.equal(textResult.output.kind, "search");
   if (textResult.output.kind === "search") {
+    assert.deepEqual(textResult.output.files, ["docs/a.txt", "docs/b.txt"]);
+    assert.equal(textResult.output.fileInventoryComplete, true);
     assert.deepEqual(textResult.output.matches.map(({ path, line, column }) => [path, line, column]), [
       ["docs/a.txt", 1, 1], ["docs/a.txt", 2, 6], ["docs/b.txt", 1, 1],
     ]);
@@ -404,6 +406,8 @@ test("search traversal, file count, depth, and cumulative byte budgets are bound
   assert.equal(result.output.kind, "search");
   if (result.output.kind === "search") {
     assert.equal(result.output.truncated, true);
+    assert.equal(result.output.fileInventoryComplete, false);
+    assert.deepEqual(result.output.files, ["bounded/a.txt", "bounded/b.txt"]);
     assert.ok(result.output.filesSearched <= 1);
   }
 });
@@ -436,6 +440,8 @@ test("streaming traversal stops at the entry cap and releases a huge directory i
   assert.equal(result.output.kind, "search");
   if (result.output.kind === "search") {
     assert.equal(result.output.truncated, true);
+    assert.equal(result.output.fileInventoryComplete, false);
+    assert.equal(result.output.files.length, 4);
     assert.equal(result.output.filesSearched, 4);
   }
   await rename(huge, join(root, "huge-moved")); // fails on Windows if opendir leaked

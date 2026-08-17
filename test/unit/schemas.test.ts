@@ -7,8 +7,9 @@ import {
   RESULT_SCHEMA,
   SYNTHESIS_SCHEMA,
   VOTE_SCHEMA,
+  assertResult,
 } from "../../src/schemas.js";
-import type { JsonValue } from "../../src/types.js";
+import type { AgentResult, JsonValue } from "../../src/types.js";
 
 const schemas = {
   FINAL_SCHEMA,
@@ -47,6 +48,30 @@ test("mission preflight schema rejects untraced tests and single-requirement con
   assert.ok(isObject(conflicts.items.properties));
   assert.ok(isObject(conflicts.items.properties.requirementIds));
   assert.equal(conflicts.items.properties.requirementIds.minItems, 2);
+});
+
+test("worker result validation requires exact task-scoped requirement coverage", () => {
+  const result: AgentResult = {
+    taskId: "T1",
+    summary: "Decision evidence",
+    claims: [{
+      statement: "R1 is supported",
+      support: "evidence item",
+      requirementIds: ["R1"],
+      evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
+    }],
+    evidence: ["evidence item"],
+    deliverables: ["decision"],
+    checks: ["checked"],
+    uncertainties: [],
+    confidence: 0.9,
+  };
+
+  assert.doesNotThrow(() => assertResult(result, "T1", ["R1"]));
+  assert.throws(
+    () => assertResult(result, "T1", ["R1", "R2"]),
+    /Result for T1 lacks claim coverage for requirements: R2/,
+  );
 });
 
 function visit(value: JsonValue, path: string, errors: string[]): void {

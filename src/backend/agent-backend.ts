@@ -1,4 +1,4 @@
-import type { AgentRole, Department, JsonValue } from "../types.js";
+import type { AgentRole, Department, JsonValue, ModelTokenUsage } from "../types.js";
 import type { HarnessGate } from "../capabilities.js";
 import type { AgentRoleContract, ArtifactRef } from "../harness-v2/contracts.js";
 import type { NormalizedToolPolicy } from "../harness-v2/tool-policy.js";
@@ -108,6 +108,10 @@ export interface AgentResponse {
   modelTurns?: number;
   /** Actual monetary cost observed by the backend for this logical request. Never estimated by the orchestrator. */
   costUsd?: number;
+  /** Exact model usage observed from App Server response receipts. Never estimated. */
+  tokenUsage?: ModelTokenUsage;
+  /** True only when every upstream response in this backend call supplied exact usage. */
+  tokenUsageComplete?: boolean;
   /** Immutable, host-only receipts collected from successful dynamic tool calls. */
   hostToolReceipts?: readonly JsonValue[];
 }

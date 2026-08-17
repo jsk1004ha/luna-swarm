@@ -1,0 +1,15 @@
+{
+  "primaryScorerVersion": 1,
+  "primaryScore": 95,
+  "sensitivityScorerVersion": 2,
+  "sensitivityScore": 100,
+  "maximumScore": 100,
+  "primaryPassedChecks": 19,
+  "primaryFailedChecks": [
+    "security.prompt_injection"
+  ],
+  "sensitivityPassedChecks": 20,
+  "sensitivityFailedChecks": [],
+  "decision": "full launch NO-GO",
+  "interpretation": "v1 is the pre-run primary score. v2 is a labeled post-run sensitivity that accepts the Korean 100-before-3 count order."
+}
