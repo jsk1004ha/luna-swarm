@@ -1,0 +1,42 @@
+{
+  "model": "gpt-5.6-luna",
+  "sourceIdentity": "luna-readme-editorial-20260817-v1",
+  "organizationHeadcount": 14,
+  "maxConcurrency": 2,
+  "appServerShardCount": 1,
+  "initialConcurrency": 2,
+  "minConcurrency": 1,
+  "maxTasks": 3,
+  "maxTeams": 3,
+  "maxHierarchyDepth": 3,
+  "maxDirectReports": 3,
+  "maxAgentTurns": 48,
+  "planningCommitteeSize": 1,
+  "validatorsLowRisk": 2,
+  "validatorsHighRisk": 2,
+  "maxAttempts": 2,
+  "maxRepairRounds": 1,
+  "maxContextChars": 60000,
+  "callTimeoutMs": 600000,
+  "gatewayMaxAttempts": 2,
+  "allowNetwork": false,
+  "ephemeralThreads": true,
+  "stateDirectory": ".luna-swarm",
+  "storageMaintenance": {
+    "enabled": false,
+    "autoCompact": false
+  },
+  "harnessEnabled": true,
+  "maxSkillsPerCall": 2,
+  "learningEnabled": false,
+  "learningAutoApply": false,
+  "reasoning": {
+    "planner": "medium",
+    "architect": "high",
+    "manager": "medium",
+    "worker": "medium",
+    "validator": "high",
+    "reducer": "medium",
+    "judge": "high"
+  }
+}

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
+import type { HostToolInvocationResult } from "../../src/backend/agent-backend.js";
 import {
   CapabilityAuthority,
   HostToolBroker,
@@ -456,6 +457,7 @@ test("run-scoped host sessions enforce Work Order scopes and emit authenticated 
   await mkdir(join(root, "docs"), { recursive: true });
   await mkdir(runDirectory, { recursive: true });
   await writeFile(join(root, "docs", "guide.txt"), "alpha\nbeta alpha\n", "utf8");
+  await writeFile(join(root, "docs", "large.txt"), "bounded performance evidence\n".repeat(3_000), "utf8");
   await writeFile(join(root, ".state", "private.txt"), "must-not-leak\n", "utf8");
 
   const runtime = await RunHostToolRuntime.create({
@@ -493,6 +495,21 @@ test("run-scoped host sessions enforce Work Order scopes and emit authenticated 
   assert.equal(read.receipt.tool, "read");
   assert.equal(read.receipt.workOrderId, "WO-1");
 
+  const repeatedRead = await session.invoke({
+    threadId: "thread-1",
+    turnId: "turn-1",
+    callId: "call-read-again",
+    tool: "read",
+    arguments: { path: "docs/guide.txt" },
+  });
+  assert.deepEqual(repeatedRead.content, {
+    kind: "reuse",
+    status: "already_supplied",
+    operationOrdinal: 1,
+    instruction: "Reuse the identical Host Tool result already present earlier in this turn; no new host read was performed.",
+  });
+  assert.equal(repeatedRead.receipt, undefined, "a memoized response must not fabricate a second read receipt");
+
   const search = await session.invoke({
     threadId: "thread-1",
     turnId: "turn-1",
@@ -502,6 +519,27 @@ test("run-scoped host sessions enforce Work Order scopes and emit authenticated 
   });
   assert.ok(runtime.verifyReceipt(search.receipt));
   assert.equal(search.receipt.tool, "search");
+
+  const largeRead = await session.invoke({
+    threadId: "thread-1",
+    turnId: "turn-1",
+    callId: "call-large-read",
+    tool: "read",
+    arguments: { path: "docs/large.txt" },
+  });
+  const repeatedLargeRead = await session.invoke({
+    threadId: "thread-1",
+    turnId: "turn-1",
+    callId: "call-large-read-again",
+    tool: "read",
+    arguments: { path: "docs/large.txt" },
+  });
+  const firstBytes = Buffer.byteLength(JSON.stringify(largeRead.content), "utf8");
+  const repeatedBytes = Buffer.byteLength(JSON.stringify(repeatedLargeRead.content), "utf8");
+  assert.ok(firstBytes > 64 * 1_024);
+  assert.ok(repeatedBytes < 512);
+  assert.ok(firstBytes / repeatedBytes > 100, "duplicate suppression must materially reduce replayed tool bytes");
+  assert.equal(repeatedLargeRead.receipt, undefined);
 
   await assert.rejects(
     () => session.invoke({
@@ -522,6 +560,57 @@ test("run-scoped host sessions enforce Work Order scopes and emit authenticated 
       arguments: { path: "docs/guide.txt", extra: true },
     }),
     (error: unknown) => error instanceof ToolBrokerError && error.code === "INVALID_REQUEST",
+  );
+});
+
+test("run-scoped host sessions memoize duplicates and bound one model turn to 32 tool calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "luna-tool-runtime-budget-"));
+  const runDirectory = join(root, ".state", "runs", "run-budget");
+  await mkdir(join(root, "docs"), { recursive: true });
+  await mkdir(runDirectory, { recursive: true });
+  await writeFile(join(root, "docs", "guide.txt"), "bounded evidence\n", "utf8");
+  const runtime = await RunHostToolRuntime.create({
+    workspaceRoot: root,
+    runDirectory,
+    runId: "run-budget",
+    generation: "generation-1",
+    stateDirectory: ".state",
+  });
+  const session = runtime.createSession({
+    agentId: "agent-budget",
+    workOrderId: "WO-BUDGET",
+    revision: 1,
+    attempt: 1,
+    policy: {
+      allowedTools: ["read"],
+      network: "off",
+      allowedDomains: [],
+      readScopes: ["workspace/**"],
+      writeScopes: [],
+    },
+  });
+  assert.ok(session);
+  assert.match(session.tools[0]?.description ?? "", /At most 32 calls/u);
+  for (let index = 0; index < 32; index += 1) {
+    const result: HostToolInvocationResult = await session.invoke({
+      threadId: "thread-budget",
+      turnId: "turn-budget",
+      callId: `call-${index}`,
+      tool: "read",
+      arguments: { path: "docs/guide.txt" },
+    });
+    if (index === 0) assert.ok(runtime.verifyReceipt(result.receipt));
+    else assert.equal((result.content as { kind?: string }).kind, "reuse");
+  }
+  await assert.rejects(
+    () => session.invoke({
+      threadId: "thread-budget",
+      turnId: "turn-budget",
+      callId: "call-33",
+      tool: "read",
+      arguments: { path: "docs/guide.txt" },
+    }),
+    (error: unknown) => error instanceof ToolBrokerError && error.code === "OUTPUT_LIMIT",
   );
 });
 

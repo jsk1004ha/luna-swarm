@@ -300,6 +300,10 @@ test("original mission capability demand cannot be laundered by a restricted pla
     "Write the report to docs",
     "Write the analysis into documentation",
     "Create a review memo under docs",
+    "Write the matrix to docs",
+    "Create a checklist file",
+    "매트릭스 파일을 생성해줘",
+    "파일을 수정하고 삭제하지 마",
   ]) {
     assert.deepEqual(
       semanticCapabilityDemandForText(mission),
@@ -337,6 +341,19 @@ test("original mission capability demand cannot be laundered by a restricted pla
     "Writing files is prohibited",
     "Editing the repository is not allowed",
     "Building the app is forbidden",
+    "Evolution rollback과 crash/resume 복구 실행 경계를 분석한다",
+    "장애 주입·복구 실행·저장소 검증은 수행하지 않고 문서 공백만 기록한다",
+    "read/search 전용이며 쓰기·명령 실행 없음",
+    "파일을 생성·수정·삭제하지 않으며 workspace-write를 요구하지 않는다",
+    "네트워크·쓰기·코드 실행 권한 없음",
+    "workspace-read/workspace-search만 사용, command-execution·workspace-write·네트워크 불가",
+    "command-execution, workspace-write, 네트워크, 코드 실행은 사용하지 않는다",
+    "command-execution·workspace-write·네트워크 결과는 생성하지 않는다",
+    "read/search 전용으로 다섯 기능 축 증거 매트릭스를 작성하고 workspace-write·command-execution 불가를 산출물 경계로 명시",
+    "기능 매트릭스를 작성해줘",
+    "보안 체크리스트를 작성해줘",
+    "문서 감사 결과이며 write·network·code execution 불가",
+    "read/search만 사용하고 write/network/code execution 권한 없음",
   ]) {
     assert.deepEqual(semanticCapabilityDemandForText(mission), [], mission);
   }
@@ -365,8 +382,17 @@ test("original mission capability demand cannot be laundered by a restricted pla
     "Test the API",
     "웹사이트를 테스트해줘",
     "컴포넌트를 테스트해줘",
+    "복구 스크립트를 실행해줘",
+    "저장소 검증 명령을 실행하라",
+    "write·network·code execution 불가; 기존 변경사항을 commit",
   ]) {
-    assert.deepEqual(semanticCapabilityDemandForText(mission), ["command-execution"], mission);
+    assert.deepEqual(
+      semanticCapabilityDemandForText(mission),
+      mission.includes("commit")
+        ? ["command-execution", "workspace-write"]
+        : ["command-execution"],
+      mission,
+    );
   }
 });
 

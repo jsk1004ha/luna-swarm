@@ -152,19 +152,19 @@ P0는 새 데이터베이스 의존성을 추가하지 않고 기존 파일 기�
 
 모든 경로는 workspace realpath 안에 있어야 하며 symlink/junction 탈출을 거부합니다. Stable Pointer와 평가 등록 lock은 token으로 소유권을 확인하고, 살아 있는 PID를 시간만으로 탈취하지 않으며 종료된 소유자의 lock만 복구합니다.
 
-## 현재 경계 밖이거나 추가 운영 검증이 필요한 단계
+## 의도적으로 미구현한 후속 단계
 
 다음 항목은 P0가 제공한다고 주장하지 않습니다.
 
 - Candidate Factory의 자동 변이와 후보 조합
 - exact/tool replay 실행기
-- 보호된 evaluator는 별도 hash-pinned 프로세스와 private execution closure로 구현했지만, 30×3 실제 승격 benchmark는 아직 수행하지 않음
-- Shadow·Canary traffic router와 signed SLO 자동 rollback control loop는 구현했지만, 실제 production candidate 장시간 canary와 operator promotion drill은 아직 수행하지 않음
+- 별도 OS 권한·프로세스로 격리된 hidden evaluator
+- Shadow·Canary traffic router와 자동 rollback SLO
 - MAP-Elites, Bayesian Optimization, contextual bandit
 - Evolution REST API와 원격 배포 제어
 - SQLite WAL registry migration
 
-남은 기능과 운영 검증은 현재 불변 Bundle, objective Trace/Outcome, paired receipt, manual CAS 경계를 재사용해 별도 단계로 추가해야 합니다.
+이 기능들은 현재 불변 Bundle, objective Trace/Outcome, paired receipt, manual CAS 경계를 재사용해 별도 단계로 추가해야 합니다.
 
 ## 핵심 불변식
 

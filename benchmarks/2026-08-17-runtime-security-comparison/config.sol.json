@@ -1,0 +1,42 @@
+{
+  "model": "gpt-5.6-sol",
+  "sourceIdentity": "luna-benchmark-runtime-security-20260817-v1",
+  "organizationHeadcount": 16,
+  "maxConcurrency": 4,
+  "appServerShardCount": 1,
+  "initialConcurrency": 4,
+  "minConcurrency": 1,
+  "maxTasks": 6,
+  "maxTeams": 4,
+  "maxHierarchyDepth": 4,
+  "maxDirectReports": 4,
+  "maxAgentTurns": 96,
+  "planningCommitteeSize": 3,
+  "validatorsLowRisk": 2,
+  "validatorsHighRisk": 2,
+  "maxAttempts": 3,
+  "maxRepairRounds": 1,
+  "maxContextChars": 60000,
+  "callTimeoutMs": 600000,
+  "gatewayMaxAttempts": 2,
+  "allowNetwork": false,
+  "ephemeralThreads": true,
+  "stateDirectory": ".luna-swarm",
+  "storageMaintenance": {
+    "enabled": false,
+    "autoCompact": false
+  },
+  "harnessEnabled": true,
+  "maxSkillsPerCall": 2,
+  "learningEnabled": false,
+  "learningAutoApply": false,
+  "reasoning": {
+    "planner": "medium",
+    "architect": "high",
+    "manager": "medium",
+    "worker": "medium",
+    "validator": "high",
+    "reducer": "medium",
+    "judge": "high"
+  }
+}

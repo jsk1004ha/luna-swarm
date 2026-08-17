@@ -769,6 +769,7 @@ async function launch(options: {
     process.removeListener("SIGTERM", onSigterm);
     try {
       await deploymentRuntime?.drain();
+      await managedRuntime?.orchestrator.flushMetrics();
       await backend.close();
     } finally {
       if (managedRuntime) options.onRuntimeDisposed?.(managedRuntime);

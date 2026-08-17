@@ -29,14 +29,14 @@ Harness v2는 모델을 무조건 128개 호출하는 기능이 아니라, 실�
 
 Program Knowledge Graph는 현재 **정적 AST 관계**입니다. 탐색은 파일·디렉터리·depth·metadata/source byte 상한을 순회 중 적용하며, runtime trace와 실제 Git history는 호출자가 구조화 record를 제공할 때만 합쳐집니다. 자동 subprocess 수집을 했다고 주장하지 않습니다. Oracle 봉인은 컨텍스트·상태 계약상 변경 방지이지 적대적인 파일 접근까지 막는 별도 암호화 sandbox가 아닙니다. Experiment Fabric은 실험 명세·관측 admission·통계·판정 엔진을 제공하지만 임의 코드를 실행하는 Tool Broker가 아닙니다. Knowledge Capsule은 실행 결과만으로 자동 검증되거나 모델 가중치를 변경하지 않습니다.
 
-현재 일반 Work Order의 Codex App Server sandbox는 계속 `read-only`입니다. `read`/`search`는 HMAC capability와 durable replay ledger를 사용하는 Host Tool Broker에 연결되지만, write·shell·network 권한은 열지 않습니다. 모델 출력은 immutable artifact로 보존됩니다. 실제 파일 쓰기는 일반 Swarm 권한이 아니라 별도의 opt-in `CodingPipeline`에서만 permission process, disposable clone, protected check, 독립 audit와 Single Committer CAS를 거쳐 수행합니다.
+현재 Codex App Server sandbox는 계속 `read-only`입니다. 따라서 Work Order의 write scope는 권한 상한을 기술하지만, 실제 patch 적용이나 단일 committer를 가장하지 않습니다. 모델 출력은 immutable artifact로 보존되며 실제 파일 쓰기 권한은 별도 Tool Broker/worktree 단계가 구현되기 전까지 주어지지 않습니다.
 
-## 일반 Work Order 경로에서 아직 제공하지 않는 부분
+## 아직 구현하지 않았다고 명시하는 부분
 
 - SQLite WAL을 canonical state로 사용하는 event/outbox/lease transaction
-- 실제 계정에서 64→256 단계까지 검증한 App Server shard soak 및 용량 보고서. bounded supervisor와 1→32 단계의 승인 결박 live soak만 검증됨
-- write·shell·network 호출을 일반 Work Order에 제공하는 Host Tool Broker. `read`/`search` 전용 Broker는 구현됨
-- 일반 Work Order의 자동 코딩 라우팅과 자동 병합. 별도 opt-in `CodingPipeline`과 Single Committer Git E2E는 구현됨
+- 실제 계정에서 8→256 단계로 검증한 App Server shard soak 및 용량 보고서 (bounded shard supervisor 자체는 구현됨)
+- capability token을 실제 파일·shell·network 호출에 연결하는 외부 Tool Broker
+- Git worktree 기반 구현자 격리와 Single Committer 자동 병합
 - G1 명령 실행 receipt와 run-level G4 release receipt. 현재 G2는 구조화 Oracle evaluator receipt이며 실제 shell/test command 실행은 주장하지 않습니다.
 - planner·architecture·cross-team integration 단계의 Council 자동 소집 adapter (현재 validator 충돌/고위험 검증 경로만 연결)
 - 1,000회 chaos와 cross-process exactly-once 보장

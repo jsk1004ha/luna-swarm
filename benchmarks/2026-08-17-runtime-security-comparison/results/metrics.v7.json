@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "protocol": "post-improvement-single-pair-diagnostic-v7",
+  "runs": {
+    "gpt-5.6-luna": {
+      "runId": "runtime-security-luna-v7-20260817",
+      "status": "partial",
+      "externalWallMs": 1746275,
+      "taskCounts": { "accepted": 4, "failed": 0, "blocked": 0 },
+      "acceptedClaimCount": 45,
+      "requirementCount": 8,
+      "uncoveredRequirementCount": 0,
+      "unresolvedFinalCriticIssueCount": 11,
+      "modelCalls": 40,
+      "retries": 0,
+      "rateLimitEvents": 0,
+      "maxActiveCalls": 3,
+      "maxQueueWaitMs": 1,
+      "queueP95Ms": 1,
+      "promptCharacters": 878799,
+      "promptUtf8Bytes": 1130151,
+      "tokenMeteredCalls": 40,
+      "tokenUnmeteredCalls": 0,
+      "tokenUsage": {
+        "totalTokens": 2850715,
+        "inputTokens": 2745789,
+        "cachedInputTokens": 1575936,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 104926,
+        "reasoningOutputTokens": 42226
+      },
+      "phaseUsage": {
+        "mission_preflight": { "calls": 1, "totalTokens": 26107 },
+        "candidate_plan": { "calls": 3, "totalTokens": 88972 },
+        "architect_plan": { "calls": 1, "totalTokens": 40598 },
+        "architect_repair": { "calls": 1, "totalTokens": 58006 },
+        "execute_task": { "calls": 8, "totalTokens": 1826828 },
+        "repair_task_result": { "calls": 2, "totalTokens": 52079 },
+        "manager_review": { "calls": 7, "totalTokens": 232442 },
+        "validate_task": { "calls": 14, "totalTokens": 410237 },
+        "team_synthesis": { "calls": 2, "totalTokens": 70408 },
+        "critic_review": { "calls": 1, "totalTokens": 45038 }
+      },
+      "final": {
+        "bytes": 115561,
+        "sha256": "d9ec385408625b3dc91751d7484c95648774cfaceda3f0fff2812a0a7c5b5b9d"
+      }
+    },
+    "gpt-5.6-sol": {
+      "runId": "runtime-security-sol-v7-20260817",
+      "status": "partial",
+      "externalWallMs": 1593909,
+      "taskCounts": { "accepted": 2, "failed": 1, "blocked": 3 },
+      "acceptedClaimCount": 20,
+      "requirementCount": 16,
+      "uncoveredRequirementCount": 7,
+      "unresolvedFinalCriticIssueCount": 11,
+      "modelCalls": 28,
+      "retries": 0,
+      "rateLimitEvents": 0,
+      "maxActiveCalls": 4,
+      "maxQueueWaitMs": 22074,
+      "queueP95Ms": 1,
+      "promptCharacters": 630856,
+      "promptUtf8Bytes": 841429,
+      "tokenMeteredCalls": 28,
+      "tokenUnmeteredCalls": 0,
+      "tokenUsage": {
+        "totalTokens": 8574243,
+        "inputTokens": 8462035,
+        "cachedInputTokens": 7372288,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 112208,
+        "reasoningOutputTokens": 36447
+      },
+      "phaseUsage": {
+        "mission_preflight": { "calls": 1, "totalTokens": 31189 },
+        "candidate_plan": { "calls": 3, "totalTokens": 105856 },
+        "architect_plan": { "calls": 1, "totalTokens": 50346 },
+        "architect_repair": { "calls": 1, "totalTokens": 75561 },
+        "execute_task": { "calls": 5, "totalTokens": 5252546 },
+        "manager_review": { "calls": 5, "totalTokens": 235388 },
+        "validate_task": { "calls": 10, "totalTokens": 2740992 },
+        "team_synthesis": { "calls": 1, "totalTokens": 38573 },
+        "critic_review": { "calls": 1, "totalTokens": 43792 }
+      },
+      "final": {
+        "bytes": 55284,
+        "sha256": "beda2c81fcc74e63d12e14d7a31cb1c56b29bd77192112a6ef3f03991d9861cf"
+      }
+    }
+  },
+  "descriptiveDeltas": {
+    "solWallVsLunaPercent": -8.7252,
+    "lunaTotalTokensVsSolPercent": -66.7526,
+    "solTotalTokenMultiple": 3.0078,
+    "lunaCallsVsSolPercent": 42.8571,
+    "lunaOutputTokensVsSolPercent": -6.4897,
+    "lunaReasoningTokensVsSolPercent": 15.8559,
+    "lunaCachedInputTokensVsSolPercent": -78.6235
+  },
+  "costUsd": null,
+  "costNote": "The ChatGPT App Server did not provide monetary cost telemetry; no price estimate was fabricated."
+}

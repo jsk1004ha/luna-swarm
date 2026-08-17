@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "supersedes": "preregistration.v2.json",
+  "reason": "Fixed a reproduced bare Korean command-noun false positive before any valid paired result existed",
+  "createdAt": "2026-08-17T05:16:05.1546596Z",
+  "protocol": "single-pair-diagnostic-v3",
+  "executionOrder": ["gpt-5.6-luna", "gpt-5.6-sol"],
+  "runIds": {
+    "gpt-5.6-luna": "runtime-security-luna-v3-20260817",
+    "gpt-5.6-sol": "runtime-security-sol-v3-20260817"
+  },
+  "qualityRule": {
+    "passScore": 80,
+    "criticalFailuresAllowed": 0,
+    "qualityNonInferiorityPoints": 5,
+    "efficiencyComparedOnlyAfterQualityNonInferiority": true
+  },
+  "budgets": {
+    "maxBackendCallsPerModel": 96,
+    "maxGatewayAttempts": 2,
+    "maxWallMinutesPerModel": 70,
+    "network": false,
+    "workspaceWrites": false
+  },
+  "excludedRuns": [
+    "runtime-security-luna-v1-20260817",
+    "runtime-security-luna-v2-20260817"
+  ],
+  "source": {
+    "gitHead": "ef100b819eb7dbe0e6c7f25fb783942c74e43add",
+    "dirtyTrackedDiffSha256": "sha256:3a601c52120927103a31086f3b844bb72eaf6bf1ec4cd41dd34cc40f56195bd3",
+    "distCliSha256": "sha256:1ec9ddd7ccba152666fb959020f9a947634abf31e9a39229dee505dfeea4b5b4",
+    "distDagSha256": "sha256:b8c87ace53cd2c0ed14d053cbd127ec40fb07a16ccf15720b04ac1f58be71e3e"
+  },
+  "files": {
+    "mission.v2.txt": "sha256:e92c1a8dd4e1701cd274717c34343c88f23d106a8fe538fe7280790cc544fbb6",
+    "config.luna.json": "sha256:81903348feed0aebdb24fafe998607ea054c8890efa0126423a124ae0c10b0fb",
+    "config.sol.json": "sha256:423f948f459ab1e590539f419b724b11d4c88a1945ca4949debd94d319fd8106",
+    "rubric.json": "sha256:ad6691db6d0b7e46e9d4d58628693adad770761ce9c9fa6b00987ba3b1712967",
+    "score-report.mjs": "sha256:faf94ee81f69f04f210cd34c95a319e2708fd3318faa0d96a564d6746c8ba4d8",
+    "evidence/README.md": "sha256:e27d5fe66f867d2e50194b327e8f66fc53c621b8c024ae5d43809f1e5539c876",
+    "evidence/SECURITY.md": "sha256:9f7818a73a5786f48a2d0faeda43df82b955a1d8bdf789f989aa5c1d20be0cc7",
+    "evidence/HARNESS_V2.ko.md": "sha256:d3ee8300e4e0ad22f1a5adfdb29416c431775b499d0ffb596f6205c849b41837",
+    "evidence/EVOLUTION_HARNESS_V2.ko.md": "sha256:2cb61c668b36d4e3fdb5ca06a1c5e4848510af8e57d714cac2078be0180890c5"
+  }
+}

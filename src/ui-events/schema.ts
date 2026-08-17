@@ -9,7 +9,8 @@ export type SwarmUiEventType =
   | "task_failed" | "task_accepted" | "task_cancelled"
   | "manager_review_started" | "manager_review_completed"
   | "audit_started" | "audit_vote_recorded" | "audit_completed"
-  | "team_synthesis_started" | "team_synthesis_fallback" | "team_report_delivered" | "team_report_accepted"
+  | "team_synthesis_started" | "team_synthesis_elided" | "team_synthesis_fallback"
+  | "team_report_delivered" | "team_report_accepted" | "final_judge_elided"
   | "concurrency_changed" | "rate_limit_detected" | "rate_limit_cooldown_started"
   | "rate_limit_cooldown_ended" | "operator_instruction_queued"
   | (string & {});

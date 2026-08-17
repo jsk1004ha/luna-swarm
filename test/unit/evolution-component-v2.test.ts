@@ -369,8 +369,17 @@ test("a registered prompt-module challenger changes actual prompts only after th
     workspace,
     sourceIdentity: "test-component-source",
   }).start("an oversized promoted prompt component fails before the gateway");
-  assert.equal(rejectedState.status, "failed");
+  assert.equal(
+    rejectedState.status,
+    "partial",
+    "an oversized component blocks its task and release while preserving independent verified work",
+  );
   assert.match(rejectedState.tasks.T1?.error ?? "", /verified evolution prompt module.+maxContextChars/i);
+  assert.ok(rejectedState.final);
+  assert.equal(
+    rejectedState.final.requirementsCoverage.some((coverage) => !coverage.covered),
+    true,
+  );
   assert.equal(
     rejectedBackend.calls.some((call) => call.executionPromptModule?.contentHash === oversizedPrompt.contentHash),
     false,

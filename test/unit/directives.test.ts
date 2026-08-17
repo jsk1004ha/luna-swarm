@@ -192,7 +192,7 @@ test("a directive added during an active call affects only later role calls and 
       "manager_review",
       "validate_task",
       "team_synthesis",
-      "final",
+      "critic_review",
     ];
     for (const purpose of laterPurposes) {
       const calls = backend.calls.filter((call) => call.purpose === purpose);
@@ -293,7 +293,7 @@ test("resume keeps acknowledged directives active without duplicating applied ev
   }
 });
 
-test("a directive queued during final judging triggers a new judge checkpoint", async () => {
+test("a directive queued during final criticism triggers a new critic checkpoint", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-directive-final-"));
   try {
     const cfg = config();
@@ -305,7 +305,7 @@ test("a directive queued during final judging triggers a new judge checkpoint", 
     };
     let queued = false;
     const backend = new MockAgentBackend(async (request) => {
-      if (!queued && request.purpose === "final") {
+      if (!queued && request.purpose === "critic_review") {
         queued = true;
         await store.appendDirective(lateDirective);
       }
@@ -315,12 +315,14 @@ test("a directive queued during final judging triggers a new judge checkpoint", 
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("late final directive goal");
     assert.equal(state.status, "completed");
-    const judgeCalls = backend.calls.filter(
-      (call) => call.purpose === "final" || call.purpose === "final_repair",
+    const criticCalls = backend.calls.filter((call) => call.purpose === "critic_review");
+    assert.equal(criticCalls.length, 2);
+    assert.doesNotMatch(criticCalls[0]?.prompt ?? "", /운영 리스크 완화책/);
+    assert.match(criticCalls[1]?.prompt ?? "", /운영 리스크 완화책/);
+    assert.equal(
+      backend.calls.filter((call) => call.purpose === "final" || call.purpose === "final_repair").length,
+      0,
     );
-    assert.equal(judgeCalls.length, 2);
-    assert.doesNotMatch(judgeCalls[0]?.prompt ?? "", /운영 리스크 완화책/);
-    assert.match(judgeCalls[1]?.prompt ?? "", /운영 리스크 완화책/);
     assert.deepEqual(await store.readAppliedDirectiveIds(), new Set([lateDirective.id]));
     assert.equal(await store.isDirectiveGateClosed(), true);
     await assert.rejects(

@@ -20,6 +20,7 @@ import type { AgentRequest, HostToolSession } from "../../src/backend/agent-back
 import { AgentPolicyError } from "../../src/backend/agent-backend.js";
 import { HARNESS_V2_ORG_VERSION, type AgentRoleContract } from "../../src/harness-v2/contracts.js";
 import { AgentGateway } from "../../src/runtime/gateway.js";
+import { ToolBrokerError } from "../../src/tool-broker/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fakeCodex = resolve(here, "../fixtures/fake-codex.mjs");
@@ -183,6 +184,22 @@ test("dynamic read calls reach the host session and return immutable receipts", 
     assert.equal(Object.isFrozen(response.hostToolReceipts), true);
     assert.equal(Object.isFrozen(response.hostToolReceipts?.[0]), true);
     assert.equal((instance as unknown as { activeHostTools: Map<string, unknown> }).activeHostTools.size, 0);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("dynamic tool failures expose only a safe broker error code", async () => {
+  const instance = backend();
+  try {
+    const response = await instance.run({
+      ...request("dynamic-read-limit", "dynamic-tool-read"),
+      hostToolSession: hostTools(async () => {
+        throw new ToolBrokerError("OUTPUT_LIMIT", "private path and capability details must not leak");
+      }),
+    });
+    assert.equal(response.text, "tool-error:Host request rejected (OUTPUT_LIMIT)");
+    assert.doesNotMatch(response.text, /private path|capability details/u);
   } finally {
     await instance.close();
   }

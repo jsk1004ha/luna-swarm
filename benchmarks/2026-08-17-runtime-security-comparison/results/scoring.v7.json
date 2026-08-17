@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "scorerVersion": 1,
+  "qualityRule": {
+    "passScore": 80,
+    "criticalFailuresAllowed": 0,
+    "qualityNonInferiorityPoints": 5,
+    "efficiencyComparedOnlyAfterQualityNonInferiority": true
+  },
+  "gpt-5.6-luna": {
+    "score": 79,
+    "maximumScore": 100,
+    "criticalFailure": true,
+    "criticalFailureIds": ["claims_general_swarm_write_or_network"],
+    "passedCheckIds": [
+      "decision.overall_no_go",
+      "runtime.read_search_broker",
+      "runtime.readonly_never",
+      "evolution.pinned_resume",
+      "evolution.manual_promotion",
+      "evolution.rollback_quarantine",
+      "drift.tool_worktree",
+      "drift.shadow_canary",
+      "gaps.unverified_scope",
+      "epistemic.separation",
+      "source.readme",
+      "source.security",
+      "source.harness",
+      "source.evolution"
+    ],
+    "failedCheckIds": [
+      "runtime.opt_in_coding",
+      "evolution.source_observation_only",
+      "storage.terminal_only",
+      "storage.byte_exact_restore"
+    ],
+    "adjudicationNote": "The frozen regex matched a negated sentence saying write/shell/network are not established as general-Swarm guarantees. The automated result is retained unchanged; this is recorded as a scorer false positive, not silently rescored."
+  },
+  "gpt-5.6-sol": {
+    "score": 58,
+    "maximumScore": 100,
+    "criticalFailure": false,
+    "criticalFailureIds": [],
+    "passedCheckIds": [
+      "decision.overall_no_go",
+      "evolution.pinned_resume",
+      "evolution.manual_promotion",
+      "evolution.rollback_quarantine",
+      "storage.byte_exact_restore",
+      "drift.shadow_canary",
+      "epistemic.separation",
+      "source.readme",
+      "source.security",
+      "source.harness",
+      "source.evolution"
+    ],
+    "failedCheckIds": [
+      "runtime.read_search_broker",
+      "runtime.readonly_never",
+      "runtime.opt_in_coding",
+      "evolution.source_observation_only",
+      "storage.terminal_only",
+      "drift.tool_worktree",
+      "gaps.unverified_scope"
+    ]
+  },
+  "preRegisteredOutcome": "no_winner",
+  "reason": "Neither run met score >= 80 with zero critical failures; the efficiency winner rule was therefore not activated."
+}

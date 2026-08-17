@@ -244,6 +244,139 @@ test("gateway persists exact token totals and counts unmetered backend calls", a
   });
   assert.equal(gateway.metrics().tokenMeteredCalls, 1);
   assert.equal(gateway.metrics().tokenUnmeteredCalls, 1);
+  assert.deepEqual(gateway.metrics().callBreakdown.map((entry) => ({
+    role: entry.role,
+    purpose: entry.purpose,
+    calls: entry.calls,
+    promptCharacters: entry.promptCharacters,
+    promptUtf8Bytes: entry.promptUtf8Bytes,
+    tokenUsage: entry.tokenUsage,
+    tokenMeteredCalls: entry.tokenMeteredCalls,
+    tokenUnmeteredCalls: entry.tokenUnmeteredCalls,
+  })), [{
+    role: "worker",
+    purpose: "test",
+    calls: 2,
+    promptCharacters: 8,
+    promptUtf8Bytes: 8,
+    tokenUsage: gateway.metrics().tokenUsage,
+    tokenMeteredCalls: 1,
+    tokenUnmeteredCalls: 1,
+  }]);
+  assert.ok(gateway.metrics().callBreakdown[0]!.totalDurationMs >= 1);
+});
+
+test("per-purpose call metrics resume without losing exact prompt or token attribution", async () => {
+  const initialBackend: AgentBackend = {
+    info: () => ({ name: "initial", model: "test", transport: "memory" }),
+    async run(): Promise<AgentResponse> {
+      return {
+        text: "ok",
+        threadId: "initial-thread",
+        turnId: "initial-turn",
+        durationMs: 4,
+        tokenUsage: {
+          totalTokens: 8,
+          inputTokens: 6,
+          cachedInputTokens: 2,
+          cacheWriteInputTokens: 0,
+          outputTokens: 2,
+          reasoningOutputTokens: 1,
+        },
+        tokenUsageComplete: true,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const first = new AgentGateway({ backend: initialBackend, config: testConfig() });
+  await first.run({ ...request, prompt: "first", purpose: "execute_task" });
+  const initialMetrics = first.metrics();
+
+  const resumedBackend: AgentBackend = {
+    info: () => ({ name: "resumed", model: "test", transport: "memory" }),
+    async run(): Promise<AgentResponse> {
+      return {
+        text: "ok",
+        threadId: "resumed-thread",
+        turnId: "resumed-turn",
+        durationMs: 3,
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  const resumed = new AgentGateway({
+    backend: resumedBackend,
+    config: testConfig(),
+    initialMetrics,
+  });
+  await resumed.run({
+    ...request,
+    threadKey: "review",
+    role: "validator",
+    purpose: "critic_review",
+    prompt: "검증",
+  });
+
+  const metrics = resumed.metrics();
+  assert.equal(metrics.modelCalls, 2);
+  assert.equal(metrics.tokenMeteredCalls, 1);
+  assert.equal(metrics.tokenUnmeteredCalls, 1);
+  assert.deepEqual(metrics.callBreakdown.map((entry) => [entry.role, entry.purpose]), [
+    ["validator", "critic_review"],
+    ["worker", "execute_task"],
+  ]);
+  const review = metrics.callBreakdown[0]!;
+  assert.equal(review.calls, 1);
+  assert.equal(review.promptCharacters, 2);
+  assert.equal(review.promptUtf8Bytes, 6);
+  assert.equal(review.tokenUnmeteredCalls, 1);
+  const execution = metrics.callBreakdown[1]!;
+  assert.equal(execution.promptCharacters, 5);
+  assert.equal(execution.promptUtf8Bytes, 5);
+  assert.deepEqual(execution.tokenUsage, initialMetrics.tokenUsage);
+});
+
+test("per-purpose telemetry is bounded without dropping aggregate model-call accounting", async () => {
+  const backend = new MockAgentBackend(() => ({ ok: true }));
+  const events: Array<Omit<RunEvent, "at" | "runId">> = [];
+  const gateway = new AgentGateway({
+    backend,
+    config: { ...testConfig(), maxAgentTurns: 100 },
+    onEvent: (event) => { events.push(event); },
+  });
+
+  for (let index = 0; index < 70; index += 1) {
+    await gateway.run({
+      ...request,
+      threadKey: `bounded-${index}`,
+      purpose: `purpose-${index}`,
+    });
+  }
+
+  const metrics = gateway.metrics();
+  assert.equal(metrics.modelCalls, 70);
+  assert.equal(metrics.callBreakdown.reduce((sum, entry) => sum + entry.calls, 0), 70);
+  assert.ok(metrics.callBreakdown.length <= 65);
+  assert.equal(
+    metrics.callBreakdown.find((entry) => entry.purpose === "__other__")?.calls,
+    6,
+  );
+
+  const privateEvents: Array<Omit<RunEvent, "at" | "runId">> = [];
+  const privateGateway = new AgentGateway({
+    backend,
+    config: testConfig(),
+    onEvent: (event) => { privateEvents.push(event); },
+  });
+  const sensitivePurpose = "customer@example.invalid needs a private review";
+  await privateGateway.run({
+    ...request,
+    threadKey: "sensitive-purpose",
+    purpose: sensitivePurpose,
+  });
+  const sensitiveEvents = privateEvents.slice(-2);
+  assert.ok(sensitiveEvents.every((event) => /^sha256:[a-f0-9]{64}$/.test(event.purpose ?? "")));
+  assert.equal(JSON.stringify(sensitiveEvents).includes(sensitivePurpose), false);
 });
 
 test("deadline AbortError is transient and retries after releasing both permits", async () => {
@@ -620,6 +753,10 @@ test("gateway lifecycle events preserve task and harness provenance", async () =
     assert.deepEqual(event.skillIds, ["implementation-test-loop"]);
     assert.deepEqual(event.memoryIds, ["memory-1"]);
     assert.equal(event.attempt, 1);
+    assert.equal(event.purpose, "test");
+    assert.equal(event.promptCharacters, 4);
+    assert.equal(event.promptUtf8Bytes, 4);
+    assert.match(event.promptHash ?? "", /^sha256:[a-f0-9]{64}$/);
   }
 });
 

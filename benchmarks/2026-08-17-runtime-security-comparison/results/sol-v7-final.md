@@ -1,0 +1,256 @@
+# Luna Swarm 결과
+
+20 immutable leaf claim(s) remain available as a verified partial result; release is blocked by 7 uncovered requirement(s) and 11 unresolved final critic issue(s).
+
+## 답변
+
+## Verified claims
+
+- 수동 rollback은 workload·expected generation·actor·reason을 입력받아 이전 Stable Pointer를 generation CAS로 복구하고 문제 Bundle을 quarantine한다. Bundle blob은 수정·삭제하지 않고 기존 run pin과 과거 blob을 보존하므로 현재 실행에는 소급 적용되지 않는다.
+  - support: 직접 문서 주장: EVOLUTION_HARNESS_V2.ko.md 108, 128~135, 175행. rollback 범위는 pointer와 quarantine으로 한정되어 있다.
+  - check: rollback CLI 입력, 이전 pointer 복구, quarantine, blob/run pin 보존을 확인했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 135~153행: 기존 run pin과 과거 Bundle blob 보존, evolution/evaluations 및 stable-pointers 저장 구조, token 기반 lock 복구를 확인했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 108, 128~133, 175행: 자동 Stable 승격 API 거부; rollback CLI는 workload, expected generation, actor, reason을 받고 이전 Stable 복구와 문제 Bundle quarantine을 수행하며 blob은 수정하지 않는다.
+- 각 대상 문서는 최소 하나의 관련 내용 search 결과와 정확한 파일명으로 연결된다.
+  - support: 직접 관찰: EVOLUTION_HARNESS_V2.ko.md는 Stable 검색, HARNESS_V2.ko.md와 SECURITY.md는 read-only 검색, README.md는 CodingPipeline 검색에서 일치했다.
+  - evidence: workspace-search(path="evidence", regex="Stable", flags="i")가 evidence/EVOLUTION_HARNESS_V2.ko.md의 Stable Pointer 관련 내용을 반환했다.
+  - evidence: workspace-search(path="evidence", regex="read-only", flags="i")가 evidence/HARNESS_V2.ko.md 32행과 evidence/SECURITY.md 3행을 포함한 관련 내용을 반환했다.
+  - check: 각 인벤토리 경로가 성공한 관련 내용 search의 match path에 최소 한 번 나타남을 확인했다.
+  - evidence: workspace-search(path="evidence", regex="CodingPipeline", flags="i")가 evidence/README.md 15행 등의 관련 내용을 반환했다.
+- evidence/로 제한한 workspace-search가 완전한 파일 인벤토리로 정확히 4개 경로를 반환했다.
+  - support: 직접 관찰: search 결과의 fileInventoryComplete=true이며 files 배열에 네 경로만 존재한다.
+  - evidence: workspace-search(path="evidence", regex=".")의 files는 evidence/EVOLUTION_HARNESS_V2.ko.md, evidence/HARNESS_V2.ko.md, evidence/README.md, evidence/SECURITY.md였고 fileInventoryComplete=true였다. match 출력은 크기 때문에 truncated=true였지만 파일 인벤토리는 완전하다고 명시됐다.
+  - check: 완전 인벤토리의 고유 경로 수를 계산해 4개임을 확인했고, 네 경로가 모두 evidence/ 아래에 있음을 확인했다.
+- 승격은 evaluation=PROMOTABLE, champion=현재 Stable Pointer, challenger=대상 Bundle, workload·receipt hash·expected generation 일치, operator actor/reason 존재를 모두 요구하며 자동 Stable 승격 API는 거부된다. 성공 시 workload별 Stable Pointer가 generation CAS로 변경되고 현재 실행이 아닌 다음 실행부터 적용된다.
+  - support: 직접 문서 주장: EVOLUTION_HARNESS_V2.ko.md 99~108행과 README.md 315행. 구체적 실패 상태명은 없지만 조건 불일치 시 승격되지 않는 fail-closed 경계가 기술돼 있다.
+  - check: 승격 조건 7개와 다음 run 적용, 자동 승격 거부를 EVOLUTION_HARNESS_V2.ko.md와 README.md에서 교차 확인했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 99~105행 검색: PROMOTABLE, 현재 Champion, 대상 Challenger, workload, receipt hash, expected generation, actor/reason의 승격 조건을 각각 확인했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 108, 128~133, 175행: 자동 Stable 승격 API 거부; rollback CLI는 workload, expected generation, actor, reason을 받고 이전 Stable 복구와 문제 Bundle quarantine을 수행하며 blob은 수정하지 않는다.
+- 자동 rollback 범위에는 문서 간 중대한 불일치가 있다. EVOLUTION_HARNESS_V2.ko.md는 Shadow/Canary router와 자동 rollback SLO를 의도적 미구현 후속 단계로 분류하지만 README.md는 protected evaluator와 durable Shadow/Canary 자동 rollback control loop가 구현됐다고 주장한다.
+  - support: 직접 충돌: EVOLUTION_HARNESS_V2.ko.md 155~167행과 README.md 16, 258, 392, 460행. 어느 주장이 실제 구현과 일치하는지는 네 문서만으로 검증할 수 없다.
+  - evidence: 문서 충돌 검색: evidence/EVOLUTION_HARNESS_V2.ko.md 162행은 Shadow·Canary router와 자동 rollback SLO를 미구현으로 분류하지만 evidence/README.md 16, 258, 392, 460행은 관련 제어 루프 구현과 fail-closed 동작을 주장한다.
+  - check: 자동 Shadow/Canary rollback의 구현/미구현 문구를 두 파일에서 직접 대조해 충돌을 보존했다.
+- 정확한 대상 파일명은 EVOLUTION_HARNESS_V2.ko.md, HARNESS_V2.ko.md, README.md, SECURITY.md이다.
+  - support: 직접 관찰: 완전한 search 인벤토리의 경로에서 파일명을 추출했으며 중복이 없다.
+  - evidence: workspace-search(path="evidence", regex=".")의 files는 evidence/EVOLUTION_HARNESS_V2.ko.md, evidence/HARNESS_V2.ko.md, evidence/README.md, evidence/SECURITY.md였고 fileInventoryComplete=true였다. match 출력은 크기 때문에 truncated=true였지만 파일 인벤토리는 완전하다고 명시됐다.
+  - check: 완전 인벤토리의 고유 경로 수를 계산해 4개임을 확인했고, 네 경로가 모두 evidence/ 아래에 있음을 확인했다.
+- Critical 위험은 자동 rollback 구현 상태의 충돌이다. 영향은 운영자가 존재하지 않거나 불완전한 자동 복구를 신뢰할 수 있다는 점이고, 실패 경로는 Canary 장애 후 stable-only 전환·quarantine·Failure Capsule 기록 중 일부가 실행되지 않는 경우다. 완화책은 충돌 해소 전 후보 트래픽을 비활성화하고 수동 CAS rollback만 출시 경계로 인정하는 것이다. 재확인은 signer 미설정 fail-closed, SLO 위반, 동시 generation 변경, 프로세스 crash를 포함한 독립 E2E rollback drill로 해야 한다.
+  - support: 위험 판정은 상충하는 문서 주장과 pointer-only 수동 rollback 범위에서 도출한 추론이며, E2E 실행 증거는 이번 범위에 없다.
+  - evidence: 문서 충돌 검색: evidence/EVOLUTION_HARNESS_V2.ko.md 162행은 Shadow·Canary router와 자동 rollback SLO를 미구현으로 분류하지만 evidence/README.md 16, 258, 392, 460행은 관련 제어 루프 구현과 fail-closed 동작을 주장한다.
+  - check: 자동 Shadow/Canary rollback의 구현/미구현 문구를 두 파일에서 직접 대조해 충돌을 보존했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 108, 128~133, 175행: 자동 Stable 승격 API 거부; rollback CLI는 workload, expected generation, actor, reason을 받고 이전 Stable 복구와 문제 Bundle quarantine을 수행하며 blob은 수정하지 않는다.
+- archive는 파일별 크기·모드·SHA-256 manifest를 검증하고 동일 볼륨 quarantine으로 이동한 뒤 이동된 tree를 재검증해야 원본을 삭제하며, restore는 byte-for-byte 복원을 주장한다. Outcome registry 손상이나 불확실한 파일 경계에서는 삭제 없이 fail-closed한다.
+  - support: 직접 문서 주장: README.md 311~313행.
+  - evidence: evidence/README.md 311~313, 371행: hot/cold 보존 조건, 비정리 상태, Outcome 참조 보호, manifest 검증, quarantine 후 재검증·삭제, byte-for-byte restore, 손상 시 fail-closed를 확인했다.
+  - check: archive manifest·quarantine·재검증·삭제·byte 복원·손상 시 fail-closed 순서를 확인했다.
+- 복구 공백은 명확하다. 실행 체크포인트의 저장 단위, state·Blackboard·event·command 간 다중 파일 원자성, 모든 작업의 중복 실행 방지, state/Blackboard/archive 손상 자동 복구는 문서에 없다. commands.jsonl은 마지막 미종결 레코드만 복구하고 더 앞선 손상이나 개행 완료 레코드 손상은 hard error다. cross-process exactly-once와 1,000회 chaos 보장도 미구현으로 선언된다.
+  - support: 직접 문서 한계와 반례 검색의 결합: SECURITY.md 11행, HARNESS_V2.ko.md 36~42행, README.md의 snapshot/command 설명 및 checkpoint·corrupt·exactly-once 검색 결과.
+  - evidence: evidence/README.md 307행과 evidence/SECURITY.md 8~11행: 명령 append/종료 직렬화, request ID idempotency, 누락 audit event reconciliation, 마지막 미종결 commands.jsonl 레코드만 수리하며 앞선 손상은 hard error임을 확인했다.
+  - evidence: evidence/HARNESS_V2.ko.md 36~42행: SQLite WAL event/outbox/lease transaction, G1/G4, 1,000회 chaos와 cross-process exactly-once 보장이 아직 구현되지 않았다고 명시한다.
+  - evidence: workspace-search 반례 검사: atomic 검색은 영문 일치가 없었고 원자 검색은 state snapshot·pointer·command barrier만 반환했다. checkpoint/체크포인트는 지시 반영 지점만, corrupt/손상은 제한된 commands.jsonl 수리와 storage 삭제 fail-closed만, exactly-once는 HARNESS_V2.ko.md의 미구현 선언과 README.md의 Shadow/Canary 주장만 반환했다.
+  - check: checkpoint, atomic/원자, corrupt/손상, duplicate/중복, exactly-once를 반례 검색해 체크포인트 단위·다중 파일 원자성·일반 중복 방지·손상 복구의 공백을 미검증으로 표시했다.
+- 평가 진입 조건은 동일 case/environment/budget, objective L3/L4, 반복 횟수와 중요 slice 표본이며, 점수는 Outcome Receipt·원본 Decision Trace·보호된 evaluator의 immutable quality receipt에 결합된다고 문서가 주장한다.
+  - support: 직접 문서 주장: EVOLUTION_HARNESS_V2.ko.md 62, 68~78행. L0/L1/L2는 진단용이고 승격에는 L3/L4만 허용된다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 18, 37, 62, 68~78행: Stable Pointer는 generation CAS로만 변경되고 run은 Bundle을 snapshot하며, L3/L4 Outcome/Trace/quality receipt 기반 paired evaluation을 설명한다.
+  - check: 평가 진입 조건, PROMOTABLE 결과, authority 실패 처리, receipt 재사용 금지, L3/L4 제한을 파일명과 검색 일치로 교차 확인했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 78행 및 workspace-search(PROMOTABLE, L3/L4, paired evaluation, allowlist, 재사용): allowlist/검증 실패 시 evaluation 저장과 승격 실패, receipt/trace 재사용 거부, 명시 결과 상태 PROMOTABLE을 확인했다.
+- High 위험은 pointer-only rollback이 외부·데이터 상태를 복구하지 않는 점이다. 영향은 이전 Bundle 복귀 후에도 호환되지 않는 데이터나 외부 부작용이 남는 것이고, 실패 경로는 승격 Bundle이 비가역 변경을 수행한 뒤 pointer만 이전 Stable로 복구되는 경우다. 완화책은 Bundle 호환성 계약, migration/compensation runbook, 배포 전 복원 지점을 요구하는 것이다. 재확인은 상태 변경을 포함한 rollback drill에서 pointer·Bundle quarantine·데이터·감사 기록을 각각 검증해야 한다.
+  - support: rollback의 명시 범위가 pointer 복구와 Bundle 격리에 한정된다는 직접 증거에서 도출한 위험 추론이다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 135~153행: 기존 run pin과 과거 Bundle blob 보존, evolution/evaluations 및 stable-pointers 저장 구조, token 기반 lock 복구를 확인했다.
+  - check: pointer 외 workspace·외부·데이터·스키마·commit 복구 문구가 없음을 rollback/Bundle blob 관련 검색으로 점검했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 108, 128~133, 175행: 자동 Stable 승격 API 거부; rollback CLI는 workload, expected generation, actor, reason을 받고 이전 Stable 복구와 문제 Bundle quarantine을 수행하며 blob은 수정하지 않는다.
+- rollback이 작업공간 파일, 외부 발신, 데이터베이스·스키마, 자격증명, evaluator 상태, Trace/Outcome/Failure/Evaluation 기록 또는 CodingPipeline commit을 되돌린다는 보장은 없다.
+  - support: 추론 및 범위 공백: 문서는 rollback이 Bundle blob을 수정하지 않고 pointer만 복구한다고 명시하며, 다른 상태의 역변환·보상 트랜잭션을 기술하지 않는다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 135~153행: 기존 run pin과 과거 Bundle blob 보존, evolution/evaluations 및 stable-pointers 저장 구조, token 기반 lock 복구를 확인했다.
+  - check: pointer 외 workspace·외부·데이터·스키마·commit 복구 문구가 없음을 rollback/Bundle blob 관련 검색으로 점검했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 108, 128~133, 175행: 자동 Stable 승격 API 거부; rollback CLI는 workload, expected generation, actor, reason을 받고 이전 Stable 복구와 문제 Bundle quarantine을 수행하며 blob은 수정하지 않는다.
+- 대상 선정 예외나 미해결 범위 차단점은 없다. 초기 일부 동적 search 요청은 실패했지만 이후 허용된 regex search로 모든 파일별 검색 조건을 충족했다.
+  - support: 직접 관찰과 판정: 반복된 완전 인벤토리에서 제5의 파일이 나타나지 않았고, 네 read와 후속 regex search가 모두 성공했다. 초기 실패는 별도로 보존했다.
+  - evidence: workspace-search(path="evidence", regex="Stable", flags="i")가 evidence/EVOLUTION_HARNESS_V2.ko.md의 Stable Pointer 관련 내용을 반환했다.
+  - check: 후속 regex search들의 files 배열도 동일한 네 경로와 fileInventoryComplete=true를 반환하는지 비교하여 제5 파일 가능성을 반례 검색했다.
+  - evidence: workspace-search(path="evidence", regex="read-only", flags="i")가 evidence/HARNESS_V2.ko.md 32행과 evidence/SECURITY.md 3행을 포함한 관련 내용을 반환했다.
+  - evidence: 파일별 병렬 search 및 text-mode search 시도 일부는 "dynamic tool request failed"를 반환했다. 이후 순차 regex search가 성공하여 파일별 내용 검색 증거를 확보했다.
+  - evidence: workspace-search(path="evidence", regex="CodingPipeline", flags="i")가 evidence/README.md 15행 등의 관련 내용을 반환했다.
+  - evidence: workspace-search(path="evidence", regex=".")의 files는 evidence/EVOLUTION_HARNESS_V2.ko.md, evidence/HARNESS_V2.ko.md, evidence/README.md, evidence/SECURITY.md였고 fileInventoryComplete=true였다. match 출력은 크기 때문에 truncated=true였지만 파일 인벤토리는 완전하다고 명시됐다.
+  - check: 초기 search 오류 뒤 성공한 regex 검색 결과가 네 파일 모두를 포괄하는지 재확인했다.
+- 분석 대상은 evidence/EVOLUTION_HARNESS_V2.ko.md, evidence/HARNESS_V2.ko.md, evidence/README.md, evidence/SECURITY.md의 정확히 네 문서이며 모두 workspace-read로 확인됐다.
+  - support: 직접 관찰: 네 read 응답의 path가 요청 파일명과 일치했고 각각 양의 bytesRead를 반환했다. 관련 workspace-search도 동일한 네 파일의 완전한 인벤토리를 반환했다.
+  - evidence: workspace-read 성공: evidence/EVOLUTION_HARNESS_V2.ko.md bytesRead=8588, evidence/HARNESS_V2.ko.md bytesRead=9031, evidence/README.md bytesRead=46173, evidence/SECURITY.md bytesRead=2755; 모두 redactions=0이었다.
+  - check: 네 정확한 파일 경로를 각각 workspace-read하고 path·bytesRead·redactions를 확인했다.
+  - check: workspace-search 결과의 files 배열이 동일한 네 파일이고 fileInventoryComplete=true인지 확인했다.
+- storage는 state.json을 revision·SHA-256 checksum·임시 파일·fsync·rename으로 원자 저장한다고 주장한다. 기본 보존 경계는 최근 종료 실행 20개와 7일이며, 더 오래된 종료 실행만 pass당 최대 2개씩 archive한다. 진행 중·interrupted·활성 lock·Objective Outcome 참조 실행은 자동 정리하지 않는다.
+  - support: 직접 문서 주장: README.md 305, 311, 371행.
+  - evidence: evidence/README.md 311~313, 371행: hot/cold 보존 조건, 비정리 상태, Outcome 참조 보호, manifest 검증, quarantine 후 재검증·삭제, byte-for-byte restore, 손상 시 fail-closed를 확인했다.
+  - check: storage 보존 기간·최근 실행 수·pass 상한·제외 상태·Outcome 참조 보호를 확인했다.
+  - evidence: evidence/README.md 305행: state.json은 revision/checksum을 가진 임시 파일+fsync+rename snapshot이며 재시작 시 running/validating 작업은 새 lease로 되돌리고 accepted 작업은 재실행하지 않는다고 주장한다.
+- 네 대상 문서는 모두 workspace-read로 읽혔으며 읽기 실패는 없다.
+  - support: 직접 관찰: 각 read 응답이 정확한 경로와 양의 bytesRead를 반환했다.
+  - evidence: workspace-read("evidence/SECURITY.md") 성공: path 일치, bytesRead=2755, redactions=0.
+  - evidence: workspace-read("evidence/README.md") 성공: path 일치, bytesRead=46173, redactions=0.
+  - check: 네 read 응답 모두 요청 경로와 응답 path가 일치하고 bytesRead가 0보다 큼을 확인했다.
+  - evidence: workspace-read("evidence/EVOLUTION_HARNESS_V2.ko.md") 성공: path 일치, bytesRead=8588, redactions=0.
+  - evidence: workspace-read("evidence/HARNESS_V2.ko.md") 성공: path 일치, bytesRead=9031, redactions=0.
+- resume의 제어 흐름은 interrupted→ready, ready→running(new lease)이며, 재시작 시 running/validating 작업은 새 lease로 되돌리고 accepted 작업은 다시 실행하지 않는 것으로 문서화돼 있다. resume 동안 Evolution Bundle identity도 저장된 bundleId/bundleHash로 고정된다.
+  - support: 직접 문서 주장: README.md 305, 324~334, 441행과 EVOLUTION_HARNESS_V2.ko.md 37행.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 18, 37, 62, 68~78행: Stable Pointer는 generation CAS로만 변경되고 run은 Bundle을 snapshot하며, L3/L4 Outcome/Trace/quality receipt 기반 paired evaluation을 설명한다.
+  - evidence: evidence/README.md 305행: state.json은 revision/checksum을 가진 임시 파일+fsync+rename snapshot이며 재시작 시 running/validating 작업은 새 lease로 되돌리고 accepted 작업은 재실행하지 않는다고 주장한다.
+  - evidence: evidence/README.md 324~334행 및 resume 검색: planned→ready, ready→running, running→validating/failed/interrupted/cancelled, validating→accepted/retry_wait, interrupted→ready 상태 전이를 확인했다.
+  - check: resume 상태 전이, running/validating lease 복구, accepted 비재실행, Bundle pin 유지 문구를 독립적으로 확인했다.
+- 평가 결과 상태로 명시된 값은 PROMOTABLE뿐이다. suite ID/hash 또는 evaluator version이 allowlist에 없거나 별도 evaluator 검증에 실패하면 평가 저장과 Stable 승격이 모두 실패하며 receipt/trace 재사용도 거부된다. 그 밖의 비승격·오류 결과 상태 명칭과 재시도 전이는 문서에 없다.
+  - support: 앞부분은 직접 문서 주장이고, 결과 상태 집합이 완전하지 않다는 평가는 네 문서에서 PROMOTABLE 외 상태를 찾지 못한 반례 검색에 근거한 미검증 판정이다.
+  - evidence: workspace-search 반례 검사: atomic 검색은 영문 일치가 없었고 원자 검색은 state snapshot·pointer·command barrier만 반환했다. checkpoint/체크포인트는 지시 반영 지점만, corrupt/손상은 제한된 commands.jsonl 수리와 storage 삭제 fail-closed만, exactly-once는 HARNESS_V2.ko.md의 미구현 선언과 README.md의 Shadow/Canary 주장만 반환했다.
+  - check: PROMOTABLE 외 평가 결과 상태와 재시도 전이를 반례 검색했으나 문서상 완전한 상태 집합을 찾지 못해 미검증으로 유지했다.
+  - evidence: evidence/EVOLUTION_HARNESS_V2.ko.md 78행 및 workspace-search(PROMOTABLE, L3/L4, paired evaluation, allowlist, 재사용): allowlist/검증 실패 시 evaluation 저장과 승격 실패, receipt/trace 재사용 거부, 명시 결과 상태 PROMOTABLE을 확인했다.
+- High 위험은 crash 시 cross-file 부분 지속과 제한된 손상 복구다. 영향은 중복 작업, 지시 누락 또는 권위 증거 접근 불가이며, 실패 경로는 state snapshot·Blackboard·events·commands·archive 이동 사이의 전원 차단이나 앞선 commands.jsonl 손상이다. 완화책은 권위 데이터별 transaction/journal 경계와 복구 runbook을 명문화하고 백업 전 삭제를 금지하는 것이다. 재확인은 각 쓰기 단계 fault injection, checksum 불일치, earlier-record corruption, restore 후 provenance 비교를 포함한 chaos 시험으로 해야 한다.
+  - support: 문서화된 단일 파일 원자 저장과 제한된 명령 복구, 미구현 exactly-once 사이의 공백에서 도출한 위험 추론이다.
+  - evidence: evidence/README.md 307행과 evidence/SECURITY.md 8~11행: 명령 append/종료 직렬화, request ID idempotency, 누락 audit event reconciliation, 마지막 미종결 commands.jsonl 레코드만 수리하며 앞선 손상은 hard error임을 확인했다.
+  - evidence: evidence/HARNESS_V2.ko.md 36~42행: SQLite WAL event/outbox/lease transaction, G1/G4, 1,000회 chaos와 cross-process exactly-once 보장이 아직 구현되지 않았다고 명시한다.
+  - evidence: evidence/README.md 305행: state.json은 revision/checksum을 가진 임시 파일+fsync+rename snapshot이며 재시작 시 running/validating 작업은 새 lease로 되돌리고 accepted 작업은 재실행하지 않는다고 주장한다.
+  - check: checkpoint, atomic/원자, corrupt/손상, duplicate/중복, exactly-once를 반례 검색해 체크포인트 단위·다중 파일 원자성·일반 중복 방지·손상 복구의 공백을 미검증으로 표시했다.
+- resume 제어 흐름 복구와 storage 데이터 보존·일관성은 동일한 보장이 아니다. 전자는 lease·작업 상태·Bundle pin 복구이고, 후자는 checksummed state와 Blackboard, 명령 원장 및 archive의 보존 절차에 관한 별도 주장이다.
+  - support: 분류적 추론: README.md는 제어 전이와 저장 형식을 서로 다른 절에서 기술하고 SECURITY.md는 accepted 결과 보존 및 commands.jsonl 복구 한계를 별도로 명시한다.
+  - check: resume 제어 흐름 증거와 storage 보존·일관성 증거를 별도 claim으로 분리했다.
+  - evidence: evidence/README.md 307행과 evidence/SECURITY.md 8~11행: 명령 append/종료 직렬화, request ID idempotency, 누락 audit event reconciliation, 마지막 미종결 commands.jsonl 레코드만 수리하며 앞선 손상은 hard error임을 확인했다.
+  - evidence: evidence/README.md 305행: state.json은 revision/checksum을 가진 임시 파일+fsync+rename snapshot이며 재시작 시 running/validating 작업은 새 lease로 되돌리고 accepted 작업은 재실행하지 않는다고 주장한다.
+  - evidence: evidence/SECURITY.md 6행과 evidence/README.md 419행: accepted 결과는 checksum-protected run state에, 장애 재개 권위 상태는 checksummed run state와 Blackboard에 보존된다는 문서 주장을 확인했다.
+  - evidence: evidence/README.md 324~334행 및 resume 검색: planned→ready, ready→running, running→validating/failed/interrupted/cancelled, validating→accepted/retry_wait, interrupted→ready 상태 전이를 확인했다.
+
+## Requirement coverage
+
+- R-01: evidence/의 감사 대상이 정확히 네 문서인지 workspace-search로 확인하고 네 문서를 workspace-read와 workspace-search로 모두 확인한다.
+  - evidence/로 제한한 workspace-search가 완전한 파일 인벤토리로 정확히 4개 경로를 반환했다.
+- R-02: 모든 핵심 근거에 추정하거나 축약하지 않은 정확한 파일명을 표시한다.
+  - 정확한 대상 파일명은 EVOLUTION_HARNESS_V2.ko.md, HARNESS_V2.ko.md, README.md, SECURITY.md이다.; 분석 대상은 evidence/EVOLUTION_HARNESS_V2.ko.md, evidence/HARNESS_V2.ko.md, evidence/README.md, evidence/SECURITY.md의 정확히 네 문서이며 모두 workspace-read로 확인됐다.
+- R-03: 사실 근거를 지정된 네 문서와 workspace read/search에서 관찰한 로컬 경로·내용 정보로 한정한다.
+  - 분석 대상은 evidence/EVOLUTION_HARNESS_V2.ko.md, evidence/HARNESS_V2.ko.md, evidence/README.md, evidence/SECURITY.md의 정확히 네 문서이며 모두 workspace-read로 확인됐다.; 네 대상 문서는 모두 workspace-read로 읽혔으며 읽기 실패는 없다.
+- R-04: 기본 일반 Swarm의 동작, 기본 활성 상태와 권한 경계를 독립적으로 설명한다.
+  - No verified supporting claim.
+- R-05: read/search Host Tool Broker의 허용 기능과 중개 경계를 일반 Swarm 권한과 분리한다.
+  - No verified supporting claim.
+- R-06: CodingPipeline의 명시적 opt-in 조건과 기본 활성 여부를 다른 실행 표면과 분리한다.
+  - No verified supporting claim.
+- R-07: Evolution의 평가, 승격, rollback을 각각의 조건·상태 전이·보장·공백으로 구분한다.
+  - 평가 진입 조건은 동일 case/environment/budget, objective L3/L4, 반복 횟수와 중요 slice 표본이며, 점수는 Outcome Receipt·원본 Decision Trace·보호된 evaluator의 immutable quality receipt에 결합된다고 문서가 주장한다.; 평가 결과 상태로 명시된 값은 PROMOTABLE뿐이다. suite ID/hash 또는 evaluator version이 allowlist에 없거나 별도 evaluator 검증에 실패하면 평가 저장과 Stable 승격이 모두 실패하며 receipt/trace 재사용도 거부된다. 그 밖의 비승격·오류 결과 상태 명칭과 재시도 전이는 문서에 없다.
+- R-08: crash/resume 제어 흐름과 storage 보존·내구성·복구 경계를 분리한다.
+  - 수동 rollback은 workload·expected generation·actor·reason을 입력받아 이전 Stable Pointer를 generation CAS로 복구하고 문제 Bundle을 quarantine한다. Bundle blob은 수정·삭제하지 않고 기존 run pin과 과거 blob을 보존하므로 현재 실행에는 소급 적용되지 않는다.; 승격은 evaluation=PROMOTABLE, champion=현재 Stable Pointer, challenger=대상 Bundle, workload·receipt hash·expected generation 일치, operator actor/reason 존재를 모두 요구하며 자동 Stable 승격 API는 거부된다. 성공 시 workload별 Stable Pointer가 generation CAS로 변경되고 현재 실행이 아닌 다음 실행부터 적용된다.; Critical 위험은 자동 rollback 구현 상태의 충돌이다. 영향은 운영자가 존재하지 않거나 불완전한 자동 복구를 신뢰할 수 있다는 점이고, 실패 경로는 Canary 장애 후 stable-only 전환·quarantine·Failure Capsule 기록 중 일부가 실행되지 않는 경우다. 완화책은 충돌 해소 전 후보 트래픽을 비활성화하고 수동 CAS rollback만 출시 경계로 인정하는 것이다. 재확인은 signer 미설정 fail-closed, SLO 위반, 동시 generation 변경, 프로세스 crash를 포함한 독립 E2E rollback drill로 해야 한다.; High 위험은 pointer-only rollback이 외부·데이터 상태를 복구하지 않는 점이다. 영향은 이전 Bundle 복귀 후에도 호환되지 않는 데이터나 외부 부작용이 남는 것이고, 실패 경로는 승격 Bundle이 비가역 변경을 수행한 뒤 pointer만 이전 Stable로 복구되는 경우다. 완화책은 Bundle 호환성 계약, migration/compensation runbook, 배포 전 복원 지점을 요구하는 것이다. 재확인은 상태 변경을 포함한 rollback drill에서 pointer·Bundle quarantine·데이터·감사 기록을 각각 검증해야 한다.; rollback이 작업공간 파일, 외부 발신, 데이터베이스·스키마, 자격증명, evaluator 상태, Trace/Outcome/Failure/Evaluation 기록 또는 CodingPipeline commit을 되돌린다는 보장은 없다.
+- R-09: 직접 근거가 있는 구현 보장, 기본값, 명시적 opt-in, 문서상 미래 기능, 문서 주장, 문서 간 불일치와 미검증 항목을 혼합하지 않는다.
+  - 복구 공백은 명확하다. 실행 체크포인트의 저장 단위, state·Blackboard·event·command 간 다중 파일 원자성, 모든 작업의 중복 실행 방지, state/Blackboard/archive 손상 자동 복구는 문서에 없다. commands.jsonl은 마지막 미종결 레코드만 복구하고 더 앞선 손상이나 개행 완료 레코드 손상은 hard error다. cross-process exactly-once와 1,000회 chaos 보장도 미구현으로 선언된다.; resume의 제어 흐름은 interrupted→ready, ready→running(new lease)이며, 재시작 시 running/validating 작업은 새 lease로 되돌리고 accepted 작업은 다시 실행하지 않는 것으로 문서화돼 있다. resume 동안 Evolution Bundle identity도 저장된 bundleId/bundleHash로 고정된다.; High 위험은 crash 시 cross-file 부분 지속과 제한된 손상 복구다. 영향은 중복 작업, 지시 누락 또는 권위 증거 접근 불가이며, 실패 경로는 state snapshot·Blackboard·events·commands·archive 이동 사이의 전원 차단이나 앞선 commands.jsonl 손상이다. 완화책은 권위 데이터별 transaction/journal 경계와 복구 runbook을 명문화하고 백업 전 삭제를 금지하는 것이다. 재확인은 각 쓰기 단계 fault injection, checksum 불일치, earlier-record corruption, restore 후 provenance 비교를 포함한 chaos 시험으로 해야 한다.; resume 제어 흐름 복구와 storage 데이터 보존·일관성은 동일한 보장이 아니다. 전자는 lease·작업 상태·Bundle pin 복구이고, 후자는 checksummed state와 Blackboard, 명령 원장 및 archive의 보존 절차에 관한 별도 주장이다.
+- R-10: 문서 간 일치·불일치와 독립 실행 증거가 없는 반복 주장을 정확한 파일명 단위로 대조한다.
+  - 수동 rollback은 workload·expected generation·actor·reason을 입력받아 이전 Stable Pointer를 generation CAS로 복구하고 문제 Bundle을 quarantine한다. Bundle blob은 수정·삭제하지 않고 기존 run pin과 과거 blob을 보존하므로 현재 실행에는 소급 적용되지 않는다.; archive는 파일별 크기·모드·SHA-256 manifest를 검증하고 동일 볼륨 quarantine으로 이동한 뒤 이동된 tree를 재검증해야 원본을 삭제하며, restore는 byte-for-byte 복원을 주장한다. Outcome registry 손상이나 불확실한 파일 경계에서는 삭제 없이 fail-closed한다.; 복구 공백은 명확하다. 실행 체크포인트의 저장 단위, state·Blackboard·event·command 간 다중 파일 원자성, 모든 작업의 중복 실행 방지, state/Blackboard/archive 손상 자동 복구는 문서에 없다. commands.jsonl은 마지막 미종결 레코드만 복구하고 더 앞선 손상이나 개행 완료 레코드 손상은 hard error다. cross-process exactly-once와 1,000회 chaos 보장도 미구현으로 선언된다.; High 위험은 pointer-only rollback이 외부·데이터 상태를 복구하지 않는 점이다. 영향은 이전 Bundle 복귀 후에도 호환되지 않는 데이터나 외부 부작용이 남는 것이고, 실패 경로는 승격 Bundle이 비가역 변경을 수행한 뒤 pointer만 이전 Stable로 복구되는 경우다. 완화책은 Bundle 호환성 계약, migration/compensation runbook, 배포 전 복원 지점을 요구하는 것이다. 재확인은 상태 변경을 포함한 rollback drill에서 pointer·Bundle quarantine·데이터·감사 기록을 각각 검증해야 한다.; storage는 state.json을 revision·SHA-256 checksum·임시 파일·fsync·rename으로 원자 저장한다고 주장한다. 기본 보존 경계는 최근 종료 실행 20개와 7일이며, 더 오래된 종료 실행만 pass당 최대 2개씩 archive한다. 진행 중·interrupted·활성 lock·Objective Outcome 참조 실행은 자동 정리하지 않는다.; High 위험은 crash 시 cross-file 부분 지속과 제한된 손상 복구다. 영향은 중복 작업, 지시 누락 또는 권위 증거 접근 불가이며, 실패 경로는 state snapshot·Blackboard·events·commands·archive 이동 사이의 전원 차단이나 앞선 commands.jsonl 손상이다. 완화책은 권위 데이터별 transaction/journal 경계와 복구 runbook을 명문화하고 백업 전 삭제를 금지하는 것이다. 재확인은 각 쓰기 단계 fault injection, checksum 불일치, earlier-record corruption, restore 후 provenance 비교를 포함한 chaos 시험으로 해야 한다.; resume 제어 흐름 복구와 storage 데이터 보존·일관성은 동일한 보장이 아니다. 전자는 lease·작업 상태·Bundle pin 복구이고, 후자는 checksummed state와 Blackboard, 명령 원장 및 archive의 보존 절차에 관한 별도 주장이다.
+- R-11: 네 문서로 입증할 수 없는 구현 상태, 실행 결과 및 운영·보안 보장을 미검증으로 유지한다.
+  - 각 대상 문서는 최소 하나의 관련 내용 search 결과와 정확한 파일명으로 연결된다.; 자동 rollback 범위에는 문서 간 중대한 불일치가 있다. EVOLUTION_HARNESS_V2.ko.md는 Shadow/Canary router와 자동 rollback SLO를 의도적 미구현 후속 단계로 분류하지만 README.md는 protected evaluator와 durable Shadow/Canary 자동 rollback control loop가 구현됐다고 주장한다.; Critical 위험은 자동 rollback 구현 상태의 충돌이다. 영향은 운영자가 존재하지 않거나 불완전한 자동 복구를 신뢰할 수 있다는 점이고, 실패 경로는 Canary 장애 후 stable-only 전환·quarantine·Failure Capsule 기록 중 일부가 실행되지 않는 경우다. 완화책은 충돌 해소 전 후보 트래픽을 비활성화하고 수동 CAS rollback만 출시 경계로 인정하는 것이다. 재확인은 signer 미설정 fail-closed, SLO 위반, 동시 generation 변경, 프로세스 crash를 포함한 독립 E2E rollback drill로 해야 한다.; 분석 대상은 evidence/EVOLUTION_HARNESS_V2.ko.md, evidence/HARNESS_V2.ko.md, evidence/README.md, evidence/SECURITY.md의 정확히 네 문서이며 모두 workspace-read로 확인됐다.
+- R-12: 각 Critical/High 위험에 영향, 가능한 실패 경로, 완화책, 재확인 방법과 심각도 근거를 제시한다.
+  - No verified supporting claim.
+- R-13: 전체 제품 출시 가능, 조건부 출시, 보류 중 정확히 하나를 선택하고 미해제 출시 차단 조건을 연결한다.
+  - No verified supporting claim.
+- R-14: 출시 차단 조건과 해제 증거에 연결된 30/60/90일 상대 우선순위를 제시한다.
+  - No verified supporting claim.
+- R-15: 모든 관찰은 workspace-read와 workspace-search에 한정하며 외부 자료나 workspace 변경 결과를 근거로 사용하지 않는다.
+  - 자동 rollback 범위에는 문서 간 중대한 불일치가 있다. EVOLUTION_HARNESS_V2.ko.md는 Shadow/Canary router와 자동 rollback SLO를 의도적 미구현 후속 단계로 분류하지만 README.md는 protected evaluator와 durable Shadow/Canary 자동 rollback control loop가 구현됐다고 주장한다.; Critical 위험은 자동 rollback 구현 상태의 충돌이다. 영향은 운영자가 존재하지 않거나 불완전한 자동 복구를 신뢰할 수 있다는 점이고, 실패 경로는 Canary 장애 후 stable-only 전환·quarantine·Failure Capsule 기록 중 일부가 실행되지 않는 경우다. 완화책은 충돌 해소 전 후보 트래픽을 비활성화하고 수동 CAS rollback만 출시 경계로 인정하는 것이다. 재확인은 signer 미설정 fail-closed, SLO 위반, 동시 generation 변경, 프로세스 crash를 포함한 독립 E2E rollback drill로 해야 한다.; 복구 공백은 명확하다. 실행 체크포인트의 저장 단위, state·Blackboard·event·command 간 다중 파일 원자성, 모든 작업의 중복 실행 방지, state/Blackboard/archive 손상 자동 복구는 문서에 없다. commands.jsonl은 마지막 미종결 레코드만 복구하고 더 앞선 손상이나 개행 완료 레코드 손상은 hard error다. cross-process exactly-once와 1,000회 chaos 보장도 미구현으로 선언된다.; High 위험은 pointer-only rollback이 외부·데이터 상태를 복구하지 않는 점이다. 영향은 이전 Bundle 복귀 후에도 호환되지 않는 데이터나 외부 부작용이 남는 것이고, 실패 경로는 승격 Bundle이 비가역 변경을 수행한 뒤 pointer만 이전 Stable로 복구되는 경우다. 완화책은 Bundle 호환성 계약, migration/compensation runbook, 배포 전 복원 지점을 요구하는 것이다. 재확인은 상태 변경을 포함한 rollback drill에서 pointer·Bundle quarantine·데이터·감사 기록을 각각 검증해야 한다.; rollback이 작업공간 파일, 외부 발신, 데이터베이스·스키마, 자격증명, evaluator 상태, Trace/Outcome/Failure/Evaluation 기록 또는 CodingPipeline commit을 되돌린다는 보장은 없다.; 대상 선정 예외나 미해결 범위 차단점은 없다. 초기 일부 동적 search 요청은 실패했지만 이후 허용된 regex search로 모든 파일별 검색 조건을 충족했다.; 평가 결과 상태로 명시된 값은 PROMOTABLE뿐이다. suite ID/hash 또는 evaluator version이 allowlist에 없거나 별도 evaluator 검증에 실패하면 평가 저장과 Stable 승격이 모두 실패하며 receipt/trace 재사용도 거부된다. 그 밖의 비승격·오류 결과 상태 명칭과 재시도 전이는 문서에 없다.; High 위험은 crash 시 cross-file 부분 지속과 제한된 손상 복구다. 영향은 중복 작업, 지시 누락 또는 권위 증거 접근 불가이며, 실패 경로는 state snapshot·Blackboard·events·commands·archive 이동 사이의 전원 차단이나 앞선 commands.jsonl 손상이다. 완화책은 권위 데이터별 transaction/journal 경계와 복구 runbook을 명문화하고 백업 전 삭제를 금지하는 것이다. 재확인은 각 쓰기 단계 fault injection, checksum 불일치, earlier-record corruption, restore 후 provenance 비교를 포함한 chaos 시험으로 해야 한다.
+- R-16: 경영진이 구현 보장, 문서 주장, 미검증 사항과 남은 출시 차단 조건을 즉시 구분할 수 있는 구체적인 한국어 보고서를 제공한다.
+  - No verified supporting claim.
+
+## Release decision
+
+BLOCKED — this is a partial evidence report, not release approval.
+- Uncovered requirement: R-04
+- Uncovered requirement: R-05
+- Uncovered requirement: R-06
+- Uncovered requirement: R-12
+- Uncovered requirement: R-13
+- Uncovered requirement: R-14
+- Uncovered requirement: R-16
+- Unresolved final critic issue: 30/60/90일 계획이 없으며 각 단계가 어떤 차단 조건을 어떤 실행 증거로 해제하는지 정의되지 않았다.
+- Unresolved final critic issue: 근본적으로 누락된 승인 증거가 필요하므로 최종 답안의 문구 수정만으로는 복구할 수 없다. T-02를 재검증하고 R-04~R-06 근거를 승인된 lineage에 포함한 뒤 최종 보고서를 다시 합성해야 한다.
+- Unresolved final critic issue: 기본 일반 Swarm의 기본 활성 상태, 동작 및 권한 경계를 설명할 승인된 근거가 없어 R-04를 충족할 수 없다.
+- Unresolved final critic issue: 자동 rollback 문서 충돌은 Critical로 적절히 식별됐지만, 기본 Swarm 및 CodingPipeline 권한 경계가 누락되어 전체 제품 출시 결정을 안전하게 내릴 수 없다.
+- Unresolved final critic issue: 출시 가능·조건부 출시·보류 중 하나의 결정과 미해제 차단 조건 연결이 없다.
+- Unresolved final critic issue: CodingPipeline은 T-02 검토에서 README.md와 HARNESS_V2.ko.md의 범위·시점 관계가 미검증이라는 중대한 문제가 남았다. rejected artifact의 내용을 최종 근거로 사용해서는 안 된다.
+- Unresolved final critic issue: Failed criterion: evidence-provenance — 정확히 네 문서의 read/search provenance는 충분히 보존됐다. 그러나 의미 분석은 승인된 T-01과 T-03에만 의존하며, R-04~R-06을 담당한 T-02는 rejected 상태다. T-02 오류 메시지의 문서 위치와 수정 제안은 승인된 근거로 승격할 수 없다.
+- Unresolved final critic issue: Failed criterion: independent-review — T-02가 독립 검토에서 revise 후 rejected 되었고 T-04~T-06은 차단됐다. 따라서 제품 전체 표면과 최종 출시 판단을 포괄하는 독립 검증 체인이 완성되지 않았다.
+- Unresolved final critic issue: Failed criterion: requirement-traceability — R-01~R-03, R-07~R-12, R-15 일부는 추적 가능하지만 R-04 기본 일반 Swarm, R-05 read/search Host Tool Broker, R-06 CodingPipeline 경계가 검증된 합성에 없다. R-13 단일 출시 결정, R-14 30/60/90 우선순위, R-16 경영진 보고서도 충족되지 않았다. 일부 claim은 평가·승격·resume 내용을 R-08/R-09에 잘못 연결한다.
+- Unresolved final critic issue: Failed criterion: test-or-verification — 문서 인벤토리·읽기·검색은 확인됐지만 구현 코드, 실행 receipt, E2E rollback, crash fault injection, 복구 chaos 시험은 수행되지 않았다고 명시돼 있다. 따라서 자동 rollback, exactly-once, 내구성 및 CodingPipeline 구현 상태는 검증된 보장으로 제시할 수 없다.
+- Unresolved final critic issue: read/search Host Tool Broker의 허용 기능과 중개 경계를 일반 Swarm 권한에서 분리할 승인된 분석이 없어 R-05를 충족할 수 없다.
+
+## 요구사항 커버리지
+
+- [x] R-01: Verified by 1 immutable claim(s) and 2 linked evidence item(s).
+- [x] R-02: Verified by 2 immutable claim(s) and 5 linked evidence item(s).
+- [x] R-03: Verified by 2 immutable claim(s) and 8 linked evidence item(s).
+- [ ] R-04: No accepted immutable claim/evidence trace covers this requirement; release remains blocked.
+- [ ] R-05: No accepted immutable claim/evidence trace covers this requirement; release remains blocked.
+- [ ] R-06: No accepted immutable claim/evidence trace covers this requirement; release remains blocked.
+- [x] R-07: Verified by 2 immutable claim(s) and 5 linked evidence item(s).
+- [x] R-08: Verified by 5 immutable claim(s) and 8 linked evidence item(s).
+- [x] R-09: Verified by 4 immutable claim(s) and 10 linked evidence item(s).
+- [x] R-10: Verified by 7 immutable claim(s) and 15 linked evidence item(s).
+- [x] R-11: Verified by 4 immutable claim(s) and 10 linked evidence item(s).
+- [ ] R-12: No accepted immutable claim/evidence trace covers this requirement; release remains blocked.
+- [ ] R-13: No accepted immutable claim/evidence trace covers this requirement; release remains blocked.
+- [ ] R-14: No accepted immutable claim/evidence trace covers this requirement; release remains blocked.
+- [x] R-15: Verified by 8 immutable claim(s) and 19 linked evidence item(s).
+- [ ] R-16: No accepted immutable claim/evidence trace covers this requirement; release remains blocked.
+
+## 주의점
+
+- 네 문서는 구현 상태를 주장하는 문서 증거일 뿐 실제 코드 또는 실행 receipt가 아니다. 따라서 '구현됨'은 문서상 주장으로만 분류했다.
+- 본 과업은 대상 문서 식별과 read/search 가능 여부만 판정한다. 문서 내용의 보안·운영 주장 자체의 진실성이나 구현 검증은 T-01 범위 밖이며 아직 판정하지 않았다.
+- 실행 체크포인트가 task, Work Order, model turn, gate 또는 파일 snapshot 중 무엇을 원자 단위로 삼는지 명시되지 않았다.
+- 자동 Shadow/Canary rollback은 EVOLUTION_HARNESS_V2.ko.md와 README.md가 충돌하므로 독립 실행 검증 전 어느 쪽도 확정할 수 없다.
+- 초기 '.' 검색의 match 본문은 출력 한도로 잘렸지만 fileInventoryComplete=true인 files 인벤토리는 잘리지 않았으며 네 경로를 명시했다.
+- 평가 상태는 PROMOTABLE 외 값, terminal/error 상태, 재시도·폐기 규칙이 완전하게 열거되지 않았다.
+- accepted 작업과 dashboard request의 제한된 중복 방지는 기술됐지만 일반적인 cross-process exactly-once는 미구현으로 명시된다.
+- commands.jsonl 마지막 미종결 레코드 외 손상은 hard error이며 state/Blackboard/archive의 자동 손상 복구 절차와 복구 목표 시간·손실 허용치는 없다.
+- generation CAS 실패와 rollback 도중 crash가 발생했을 때의 구체 상태 및 재개 절차가 문서에 없다.
+- rollback은 pointer와 Bundle quarantine만 명시하므로 외부 부작용·데이터 migration·CodingPipeline 산출물의 복구 여부가 불명확하다.
+- state.json 단일 파일 원자성은 기술됐지만 state, Blackboard, events, commands, evaluation registry 사이의 cross-file transaction은 검증되지 않았다.
+- T-02: failed
+- T-04: blocked
+- T-05: blocked
+- T-06: blocked
+- Uncovered requirement: R-04
+- Uncovered requirement: R-05
+- Uncovered requirement: R-06
+- Uncovered requirement: R-12
+- Uncovered requirement: R-13
+- Uncovered requirement: R-14
+- Uncovered requirement: R-16
+- Unresolved final critic issue: 30/60/90일 계획이 없으며 각 단계가 어떤 차단 조건을 어떤 실행 증거로 해제하는지 정의되지 않았다.
+- Unresolved final critic issue: 근본적으로 누락된 승인 증거가 필요하므로 최종 답안의 문구 수정만으로는 복구할 수 없다. T-02를 재검증하고 R-04~R-06 근거를 승인된 lineage에 포함한 뒤 최종 보고서를 다시 합성해야 한다.
+- Unresolved final critic issue: 기본 일반 Swarm의 기본 활성 상태, 동작 및 권한 경계를 설명할 승인된 근거가 없어 R-04를 충족할 수 없다.
+- Unresolved final critic issue: 자동 rollback 문서 충돌은 Critical로 적절히 식별됐지만, 기본 Swarm 및 CodingPipeline 권한 경계가 누락되어 전체 제품 출시 결정을 안전하게 내릴 수 없다.
+- Unresolved final critic issue: 출시 가능·조건부 출시·보류 중 하나의 결정과 미해제 차단 조건 연결이 없다.
+- Unresolved final critic issue: CodingPipeline은 T-02 검토에서 README.md와 HARNESS_V2.ko.md의 범위·시점 관계가 미검증이라는 중대한 문제가 남았다. rejected artifact의 내용을 최종 근거로 사용해서는 안 된다.
+- Unresolved final critic issue: Failed criterion: evidence-provenance — 정확히 네 문서의 read/search provenance는 충분히 보존됐다. 그러나 의미 분석은 승인된 T-01과 T-03에만 의존하며, R-04~R-06을 담당한 T-02는 rejected 상태다. T-02 오류 메시지의 문서 위치와 수정 제안은 승인된 근거로 승격할 수 없다.
+- Unresolved final critic issue: Failed criterion: independent-review — T-02가 독립 검토에서 revise 후 rejected 되었고 T-04~T-06은 차단됐다. 따라서 제품 전체 표면과 최종 출시 판단을 포괄하는 독립 검증 체인이 완성되지 않았다.
+- Unresolved final critic issue: Failed criterion: requirement-traceability — R-01~R-03, R-07~R-12, R-15 일부는 추적 가능하지만 R-04 기본 일반 Swarm, R-05 read/search Host Tool Broker, R-06 CodingPipeline 경계가 검증된 합성에 없다. R-13 단일 출시 결정, R-14 30/60/90 우선순위, R-16 경영진 보고서도 충족되지 않았다. 일부 claim은 평가·승격·resume 내용을 R-08/R-09에 잘못 연결한다.
+- Unresolved final critic issue: Failed criterion: test-or-verification — 문서 인벤토리·읽기·검색은 확인됐지만 구현 코드, 실행 receipt, E2E rollback, crash fault injection, 복구 chaos 시험은 수행되지 않았다고 명시돼 있다. 따라서 자동 rollback, exactly-once, 내구성 및 CodingPipeline 구현 상태는 검증된 보장으로 제시할 수 없다.
+- Unresolved final critic issue: read/search Host Tool Broker의 허용 기능과 중개 경계를 일반 Swarm 권한에서 분리할 승인된 분석이 없어 R-05를 충족할 수 없다.
+
+## 다음 행동
+
+- 대상 경로 및 상태: evidence/EVOLUTION_HARNESS_V2.ko.md — read 성공, Stable 관련 search 일치; evidence/HARNESS_V2.ko.md — read 성공, read-only 관련 search 일치; evidence/README.md — read 성공, CodingPipeline 관련 search 일치; evidence/SECURITY.md — read 성공, read-only 관련 search 일치. 읽기 실패 없음. 대상 선정 예외 없음. 정확히 네 문서 확인. 후속 T-02/T-03 범위 선행조건 충족.
+- 불일치 및 출시 차단 입력 — EVOLUTION_HARNESS_V2.ko.md의 자동 rollback 미구현 선언과 README.md의 구현 주장이 충돌한다. 이를 실제 독립 E2E로 해소하기 전에는 자동 rollback을 구현 보장으로 취급할 수 없다. rollback은 pointer 이외 상태의 복구 범위가 없고, crash/storage는 checkpoint 단위·cross-file 원자성·exactly-once·광범위 손상 복구가 검증되지 않았다.
+- 상태·보장·미검증 표 — 평가: 진입=L3/L4 paired 조건 및 세 receipt 결합; 결과=PROMOTABLE만 명시; 실패=authority/receipt 검증 실패 시 저장·승격 거부; 지속=evolution/evaluations와 감사 이력; 미검증=전체 상태 열거·재시도 전이. 승격: 진입=PROMOTABLE+Champion/Challenger/workload/hash/generation/actor/reason; 결과=다음 run부터 Stable Pointer 변경; 실패=자동 API 거부 및 조건 불일치 fail-closed; 지속=stable-pointers와 감사 이력; 미검증=구체 오류 상태·동시 실패 복구 시험. rollback: 진입=workload/generation/actor/reason; 결과=이전 pointer 복구+Bundle quarantine; 지속=blob/run pin/과거 증거 보존; 미검증=외부·데이터·스키마·commit 복구. crash/resume: interrupted→ready와 새 lease, accepted 비재실행, Bundle pin 유지; 미검증=체크포인트 저장 단위·모든 task의 exactly-once. storage: checksummed atomic state snapshot, 조건부 cold archive와 byte 복원; 미검증=다중 파일 transaction·광범위 손상 복구·실제 chaos 결과.
+- 위험 재확인 패키지 — Critical: signer/SLO/CAS/crash를 포함한 Shadow/Canary rollback drill. High: 각 지속 단계 fault injection과 earlier-log corruption/restore provenance chaos 시험. High: 외부·데이터 상태 변경을 포함한 pointer rollback 호환성 시험. 모든 시험은 문서 주장과 분리된 실행 receipt가 필요하다.
+- 정확한 파일명별 근거 — evidence/EVOLUTION_HARNESS_V2.ko.md: 평가·수동 승격·pointer-only rollback·미구현 후속 단계. evidence/HARNESS_V2.ko.md: CAS/Gate 보존 계약과 미구현 SQLite WAL·cross-process exactly-once. evidence/README.md: run 상태 전이, snapshot·command·archive 경계 및 자동 Shadow/Canary 구현 주장. evidence/SECURITY.md: idempotent command reconciliation과 commands.jsonl 복구 한계.
+- 후속 과업에 전달할 응답 데이터: workspace-search에서 발견한 대상 경로, 정확한 파일명 네 개, 파일별 read/search 관찰 상태, 읽기 실패와 대상 선정 예외. 정확히 네 문서임이 확인되지 않으면 통과 결과 대신 범위 차단점을 반환한다.
+- Produce independently validated evidence for R-04.
+- Produce independently validated evidence for R-05.
+- Produce independently validated evidence for R-06.
+- Produce independently validated evidence for R-12.
+- Produce independently validated evidence for R-13.
+- Produce independently validated evidence for R-14.
+- Produce independently validated evidence for R-16.
+- Resolve and independently re-review: 30/60/90일 계획이 없으며 각 단계가 어떤 차단 조건을 어떤 실행 증거로 해제하는지 정의되지 않았다.
+- Resolve and independently re-review: 근본적으로 누락된 승인 증거가 필요하므로 최종 답안의 문구 수정만으로는 복구할 수 없다. T-02를 재검증하고 R-04~R-06 근거를 승인된 lineage에 포함한 뒤 최종 보고서를 다시 합성해야 한다.
+- Resolve and independently re-review: 기본 일반 Swarm의 기본 활성 상태, 동작 및 권한 경계를 설명할 승인된 근거가 없어 R-04를 충족할 수 없다.
+- Resolve and independently re-review: 자동 rollback 문서 충돌은 Critical로 적절히 식별됐지만, 기본 Swarm 및 CodingPipeline 권한 경계가 누락되어 전체 제품 출시 결정을 안전하게 내릴 수 없다.
+- Resolve and independently re-review: 출시 가능·조건부 출시·보류 중 하나의 결정과 미해제 차단 조건 연결이 없다.
+- Resolve and independently re-review: CodingPipeline은 T-02 검토에서 README.md와 HARNESS_V2.ko.md의 범위·시점 관계가 미검증이라는 중대한 문제가 남았다. rejected artifact의 내용을 최종 근거로 사용해서는 안 된다.
+- Resolve and independently re-review: Failed criterion: evidence-provenance — 정확히 네 문서의 read/search provenance는 충분히 보존됐다. 그러나 의미 분석은 승인된 T-01과 T-03에만 의존하며, R-04~R-06을 담당한 T-02는 rejected 상태다. T-02 오류 메시지의 문서 위치와 수정 제안은 승인된 근거로 승격할 수 없다.
+- Resolve and independently re-review: Failed criterion: independent-review — T-02가 독립 검토에서 revise 후 rejected 되었고 T-04~T-06은 차단됐다. 따라서 제품 전체 표면과 최종 출시 판단을 포괄하는 독립 검증 체인이 완성되지 않았다.
+- Resolve and independently re-review: Failed criterion: requirement-traceability — R-01~R-03, R-07~R-12, R-15 일부는 추적 가능하지만 R-04 기본 일반 Swarm, R-05 read/search Host Tool Broker, R-06 CodingPipeline 경계가 검증된 합성에 없다. R-13 단일 출시 결정, R-14 30/60/90 우선순위, R-16 경영진 보고서도 충족되지 않았다. 일부 claim은 평가·승격·resume 내용을 R-08/R-09에 잘못 연결한다.
+- Resolve and independently re-review: Failed criterion: test-or-verification — 문서 인벤토리·읽기·검색은 확인됐지만 구현 코드, 실행 receipt, E2E rollback, crash fault injection, 복구 chaos 시험은 수행되지 않았다고 명시돼 있다. 따라서 자동 rollback, exactly-once, 내구성 및 CodingPipeline 구현 상태는 검증된 보장으로 제시할 수 없다.
+- Resolve and independently re-review: read/search Host Tool Broker의 허용 기능과 중개 경계를 일반 Swarm 권한에서 분리할 승인된 분석이 없어 R-05를 충족할 수 없다.
+- T-04에 전달할 응답 데이터: 평가·승격·rollback 및 crash·resume·storage를 독립 단계로 나눈 상태·보장·미검증 표와 정확한 파일명별 근거, 불일치, rollback·복구 범위 공백.

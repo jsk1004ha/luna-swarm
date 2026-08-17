@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import type { AgentBackend, AgentRequest, AgentResponse } from "../backend/agent-backend.js";
 import type { ExecutionController, LaunchPermit } from "../controls/execution-controller.js";
-import type { AgentRole, ModelTokenUsage, RunEvent, RunMetrics, SwarmConfig } from "../types.js";
+import type {
+  AgentRole,
+  CallPurposeMetrics,
+  ModelTokenUsage,
+  RunEvent,
+  RunMetrics,
+  SwarmConfig,
+} from "../types.js";
 import {
   combineSignals,
   errorMessage,
@@ -57,6 +64,7 @@ export class AgentGateway {
   private tokenUsage: ModelTokenUsage | undefined;
   private tokenMeteredCalls = 0;
   private tokenUnmeteredCalls = 0;
+  private readonly callBreakdown = new Map<string, CallPurposeMetrics>();
   private lastCooldownUntil = 0;
   private callSequence = 0;
 
@@ -75,6 +83,10 @@ export class AgentGateway {
       : undefined;
     this.tokenMeteredCalls = options.initialMetrics?.tokenMeteredCalls ?? 0;
     this.tokenUnmeteredCalls = options.initialMetrics?.tokenUnmeteredCalls ?? 0;
+    for (const entry of (options.initialMetrics?.callBreakdown ?? []).slice(0, MAX_CALL_BREAKDOWN_ENTRIES)) {
+      if (!isCallPurposeMetrics(entry)) continue;
+      this.callBreakdown.set(callPurposeKey(entry.role, entry.purpose), cloneCallPurposeMetrics(entry));
+    }
     const unclassifiedCalls = Math.max(
       0,
       this.modelCalls - this.tokenMeteredCalls - this.tokenUnmeteredCalls,
@@ -186,7 +198,9 @@ export class AgentGateway {
       }
       let combined: ReturnType<typeof combineSignals> | undefined;
       let backendInvoked = false;
-      let usageRecorded = false;
+      let callMetricsRecorded = false;
+      let callMetrics: CallPurposeMetrics | undefined;
+      let backendStartedAt = 0;
       try {
         const failureBeforeSend = this.getAuthFailure();
         if (failureBeforeSend) {
@@ -206,6 +220,10 @@ export class AgentGateway {
         }
         this.modelCalls += 1;
         backendInvoked = true;
+        callMetrics = this.recordCallStarted(effectiveRequest, permit.queueWaitMs);
+        backendStartedAt = this.clock.now();
+        const promptHash = sha256(effectiveRequest.prompt);
+        const metricPurpose = callMetrics.purpose;
         // Start the remote deadline and invoke the backend synchronously after
         // durable admission. Attach both promise branches immediately so a fast
         // rejection cannot become unhandled while telemetry is persisted.
@@ -226,12 +244,21 @@ export class AgentGateway {
           attempt,
           active: this.pool.snapshot().active,
           concurrency: this.pool.snapshot().target,
+          purpose: metricPurpose,
+          promptCharacters: effectiveRequest.prompt.length,
+          promptUtf8Bytes: Buffer.byteLength(effectiveRequest.prompt, "utf8"),
+          promptHash,
         });
         const outcome = await backendOutcome;
         if (!outcome.ok) throw outcome.error;
         const response = outcome.response;
-        this.recordTokenUsage(response.tokenUsage, response.tokenUsageComplete === true);
-        usageRecorded = true;
+        this.recordCallCompleted(
+          callMetrics,
+          response.tokenUsage,
+          response.tokenUsageComplete === true,
+          response.durationMs,
+        );
+        callMetricsRecorded = true;
         const targetBeforeSuccess = this.pool.snapshot().target;
         this.pool.recordSuccess();
         if (this.pool.snapshot().target !== targetBeforeSuccess) {
@@ -254,15 +281,24 @@ export class AgentGateway {
           attempt,
           active: this.pool.snapshot().active,
           concurrency: this.pool.snapshot().target,
+          purpose: metricPurpose,
+          promptCharacters: effectiveRequest.prompt.length,
+          promptUtf8Bytes: Buffer.byteLength(effectiveRequest.prompt, "utf8"),
+          promptHash,
           ...(response.tokenUsage ? { tokenUsage: response.tokenUsage } : {}),
           tokenUsageComplete: response.tokenUsageComplete === true,
         });
         return { ...response, queueWaitMs: totalQueueWaitMs, modelTurns: attempt };
       } catch (error) {
-        if (backendInvoked && !usageRecorded) {
+        if (backendInvoked && !callMetricsRecorded) {
           const failedUsage = tokenUsageFromError(error);
-          this.recordTokenUsage(failedUsage.usage, failedUsage.complete);
-          usageRecorded = true;
+          this.recordCallCompleted(
+            callMetrics,
+            failedUsage.usage,
+            failedUsage.complete,
+            Math.max(0, this.clock.now() - backendStartedAt),
+          );
+          callMetricsRecorded = true;
         }
         const kind = classifyError(error, combined?.signal, signal);
         this.pool.recordFailure();
@@ -336,6 +372,7 @@ export class AgentGateway {
     tokenUsage?: ModelTokenUsage;
     tokenMeteredCalls: number;
     tokenUnmeteredCalls: number;
+    callBreakdown: CallPurposeMetrics[];
   } {
     const pool = this.pool.snapshot();
     return {
@@ -350,7 +387,60 @@ export class AgentGateway {
       ...(this.tokenUsage ? { tokenUsage: { ...this.tokenUsage } } : {}),
       tokenMeteredCalls: this.tokenMeteredCalls,
       tokenUnmeteredCalls: this.tokenUnmeteredCalls,
+      callBreakdown: [...this.callBreakdown.values()]
+        .map(cloneCallPurposeMetrics)
+        .sort((left, right) => left.role.localeCompare(right.role) || left.purpose.localeCompare(right.purpose)),
     };
+  }
+
+  private recordCallStarted(request: AgentRequest, queueWaitMs: number): CallPurposeMetrics {
+    let purpose = normalizedMetricPurpose(request.purpose);
+    let key = callPurposeKey(request.role, purpose);
+    let entry = this.callBreakdown.get(key);
+    if (!entry && this.callBreakdown.size >= MAX_DISTINCT_CALL_PURPOSES) {
+      purpose = OVERFLOW_CALL_PURPOSE;
+      key = callPurposeKey(request.role, purpose);
+      entry = this.callBreakdown.get(key);
+    }
+    if (!entry) {
+      entry = {
+        role: request.role,
+        purpose,
+        calls: 0,
+        promptCharacters: 0,
+        promptUtf8Bytes: 0,
+        totalDurationMs: 0,
+        totalQueueWaitMs: 0,
+        tokenMeteredCalls: 0,
+        tokenUnmeteredCalls: 0,
+      };
+      this.callBreakdown.set(key, entry);
+    }
+    entry.calls += 1;
+    entry.promptCharacters += request.prompt.length;
+    entry.promptUtf8Bytes += Buffer.byteLength(request.prompt, "utf8");
+    entry.totalQueueWaitMs += observedMilliseconds(queueWaitMs);
+    return entry;
+  }
+
+  private recordCallCompleted(
+    entry: CallPurposeMetrics | undefined,
+    usage: ModelTokenUsage | undefined,
+    complete: boolean,
+    durationMs: number,
+  ): void {
+    this.recordTokenUsage(usage, complete);
+    if (!entry) return;
+    entry.totalDurationMs += observedMilliseconds(durationMs);
+    if (!usage || !isModelTokenUsage(usage)) {
+      entry.tokenUnmeteredCalls += 1;
+      return;
+    }
+    if (complete) entry.tokenMeteredCalls += 1;
+    else entry.tokenUnmeteredCalls += 1;
+    const total = entry.tokenUsage ? { ...entry.tokenUsage } : emptyModelTokenUsage();
+    for (const field of TOKEN_USAGE_FIELDS) total[field] += usage[field];
+    entry.tokenUsage = total;
   }
 
   private recordTokenUsage(usage: ModelTokenUsage | undefined, complete: boolean): void {
@@ -438,6 +528,10 @@ function shortHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
 }
 
+function sha256(value: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
 export function classifyError(
   error: unknown,
   combinedSignal?: AbortSignal,
@@ -489,6 +583,57 @@ function emptyModelTokenUsage(): ModelTokenUsage {
 
 function isModelTokenUsage(value: ModelTokenUsage): boolean {
   return TOKEN_USAGE_FIELDS.every((field) => Number.isSafeInteger(value[field]) && value[field] >= 0);
+}
+
+const AGENT_ROLES = new Set<AgentRole>([
+  "planner",
+  "architect",
+  "worker",
+  "manager",
+  "validator",
+  "reducer",
+  "judge",
+]);
+const MAX_DISTINCT_CALL_PURPOSES = 64;
+const MAX_CALL_BREAKDOWN_ENTRIES = MAX_DISTINCT_CALL_PURPOSES + AGENT_ROLES.size;
+const OVERFLOW_CALL_PURPOSE = "__other__";
+
+function callPurposeKey(role: AgentRole, purpose: string): string {
+  return `${role}\0${purpose}`;
+}
+
+function normalizedMetricPurpose(purpose: string): string {
+  if (/^[a-z][a-z0-9_-]{0,63}$/.test(purpose)) return purpose;
+  return `sha256:${createHash("sha256").update(purpose).digest("hex")}`;
+}
+
+function isCallPurposeMetrics(value: CallPurposeMetrics): boolean {
+  const integerCounters = [
+    value.calls,
+    value.promptCharacters,
+    value.promptUtf8Bytes,
+    value.tokenMeteredCalls,
+    value.tokenUnmeteredCalls,
+  ];
+  return AGENT_ROLES.has(value.role) &&
+    typeof value.purpose === "string" &&
+    value.purpose.length > 0 &&
+    value.purpose.length <= 120 &&
+    integerCounters.every((counter) => Number.isSafeInteger(counter) && counter >= 0) &&
+    [value.totalDurationMs, value.totalQueueWaitMs]
+      .every((duration) => Number.isFinite(duration) && duration >= 0) &&
+    (!value.tokenUsage || isModelTokenUsage(value.tokenUsage));
+}
+
+function observedMilliseconds(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function cloneCallPurposeMetrics(value: CallPurposeMetrics): CallPurposeMetrics {
+  return {
+    ...value,
+    ...(value.tokenUsage ? { tokenUsage: { ...value.tokenUsage } } : {}),
+  };
 }
 
 function tokenUsageFromError(error: unknown): { usage?: ModelTokenUsage; complete: boolean } {

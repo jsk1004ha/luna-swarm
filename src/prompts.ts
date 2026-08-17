@@ -87,7 +87,7 @@ function planningExecutionModeContract(
     .map((mode) => `${mode}=[${taskCapabilitiesForExecutionMode(mode).join(",")}]`)
     .join(", ");
   const restricted = uniqueModes.length < TASK_EXECUTION_MODES.length
-    ? " This runtime is restricted to the listed modes. Preserve every unavailable authority demand explicitly in the task title, objective, deliverable, and acceptance criteria; never rename or omit it to make the plan appear executable. The host independently checks the original mission and every task contract, and fails closed when required authority is unavailable. Never schedule or claim an unobserved action."
+    ? " This runtime is restricted to the listed modes. Preserve every positively requested unavailable authority demand explicitly in the task title, objective, deliverable, and acceptance criteria; never rename or omit it to make the plan appear executable. Do not invent an unavailable demand from a read-only scope or a prohibition. For a task whose artifact is only a report, audit, or synthesis, use a neutral kind such as analysis, audit, or synthesis; never put denied capability identifiers or mutation/command verbs in kind. The host independently checks the original mission and every task contract, and fails closed when required authority is unavailable. Never schedule or claim an unobserved action."
     : "";
   return `ACTIVE RUNTIME EXECUTION MODES (the only executionMode values you may emit): ${rendered}.${restricted}`;
 }
@@ -116,8 +116,12 @@ export function validatorPrompt(
   result: AgentResult,
   validatorId: string,
   auditLens: string,
+  workspaceEvidenceAccess: boolean = true,
 ): string {
-  return `Blindly validate a worker result. You have not seen other validators' votes.\n\nAUDIT LENS:\n${auditLens}\n\nGOAL:\n${goal}\n\nTASK:\n${JSON.stringify({
+  const toolBoundary = workspaceEvidenceAccess
+    ? "You have bounded read/search access for source verification. Use it only for a material evidence question, inspect a given path at most once, and reuse every earlier tool result in this turn."
+    : "This is an artifact-only review lane. The immutable proposed result and task contract are your complete evidence boundary; no workspace tools are provided. Do not attempt to reopen files or penalize the worker merely because this lane is intentionally tool-free.";
+  return `Blindly validate a worker result. You have not seen other validators' votes.\n\nAUDIT LENS:\n${auditLens}\n\nREVIEW AUTHORITY:\n${toolBoundary}\n\nGOAL:\n${goal}\n\nTASK:\n${JSON.stringify({
     id: task.id,
     objective: task.objective,
     deliverable: task.deliverable,
@@ -132,7 +136,7 @@ export function managerPrompt(
   result: AgentResult,
   managerId: string,
 ): string {
-  return `Review a direct report's result as the accountable department manager. You have not seen the independent auditors' votes.\n\nGOAL:\n${goal}\n\nTASK CONTRACT:\n${JSON.stringify({
+  return `Review a direct report's result as the accountable department manager. You have not seen the independent auditors' votes.\n\nREVIEW AUTHORITY:\nThis is an artifact-only accountability review. The immutable direct-report result and task contract are your complete evidence boundary; no workspace tools are provided. Do not reopen files or duplicate the independent evidence auditor's source inspection.\n\nGOAL:\n${goal}\n\nTASK CONTRACT:\n${JSON.stringify({
     id: task.id,
     department: task.department,
     ownerRole: task.ownerRole,

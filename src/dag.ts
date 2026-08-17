@@ -131,14 +131,14 @@ export function normalizeAndValidatePlan(
       (capability) => !expectedCapabilities.includes(capability),
     );
     if (missingSemanticCapabilities.length > 0) {
-      const contractExcerpt = [task.title, task.objective, task.deliverable, ...task.acceptanceCriteria]
+      const contractExcerpt = [task.kind, task.title, task.objective, task.deliverable, ...task.acceptanceCriteria]
         .join(" | ")
         .replace(/\s+/gu, " ")
         .trim()
         .slice(0, 600);
       throw new Error(
         `Task ${task.id} contract under-declares execution authority: ` +
-          `${missingSemanticCapabilities.join(", ")} required by its objective/deliverable; ` +
+          `${missingSemanticCapabilities.join(", ")} required by its kind/objective/deliverable; ` +
           `contract excerpt=${JSON.stringify(contractExcerpt)}`,
       );
     }
@@ -258,15 +258,31 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
   const contract = value.toLocaleLowerCase("en-US");
   const required = new Set<TaskCapability>();
 
-  const clauses = contract
+  // Canonical capability identifiers are declarative metadata, not natural
+  // language actions. Leaving `workspace-write` in the action scan makes the
+  // `write` suffix look like an imperative even in explicit denial lists such
+  // as `command-execution·workspace-write·network unavailable`.
+  const actionContract = contract.replace(
+    /\b(?:workspace-(?:read|search|write)|command-execution|external-network)\b/gu,
+    " ",
+  );
+
+  const clauses = actionContract
     .split(/\r?\n|[.!?。;；,，]+|\b(?:and|then|but|however|instead)\b|(?:그리고|그다음|하지만|그러나|대신)/u)
     .map((clause) => clause.trim())
     .filter(Boolean);
   const actionIsNegated = (clause: string, start: number, end: number): boolean => {
     const before = clause.slice(Math.max(0, start - 100), start);
     const after = clause.slice(end, Math.min(clause.length, end + 100));
+    const groupedActionNegation = new RegExp(
+      "^(?:\\s*[·/]\\s*(?:(?:workspace\\s*)?write|network|external\\s*network|shell|command\\s*execution|code\\s*execution|" +
+      "수정|편집|변경|갱신|업데이트|삭제|제거|이동|저장|패치|리팩터링|구현|적용|추가|설치|업그레이드|포맷|개발|제작|생성|작성|쓰기|명령\\s*실행|코드\\s*실행|실행|빌드|컴파일|타입\\s*체크|린트)(?:하|해|할|했)?)*" +
+      "(?:\\s|를|을|은|는|이|가|만|도){0,8}(?:권한\\s*)?(?:지\\s*(?:않|말|마)|없이|금지|불가|불필요|없(?:음|다)|요구하지|사용하지)",
+      "u",
+    );
     return /\b(?:do\s+not|don't|must\s+not|never|avoid|without)\b[^.!?;,]{0,96}$/u.test(before) ||
       /^(?:\s|를|을|은|는|이|가|만|도){0,8}(?:지\s*(?:않|말|마)|없이|금지|불가|안\s*(?:함|하고|한다|할))/u.test(after) ||
+      groupedActionNegation.test(after) ||
       /^[^.!?;,]{0,96}\b(?:is|are|was|were)\s+(?:forbidden|prohibited|disallowed|not\s+(?:allowed|required|needed))\b/u.test(after);
   };
   const hasPositiveAction = (
@@ -310,12 +326,12 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
   const koreanWorkspaceObject =
     /(?:readme|소스\s*코드|코드|파일|폴더|디렉터리|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|저장소|리포지토리|설정|스크립트|패키지|의존성|브랜치|풀\s*리퀘스트|pr|테스트|버그|기능|변경사항|패치)/u;
   const informationalOutput =
-    /\b(?:report|analysis|review|assessment|plan|strategy|recommendations?|proposal|summary|argument|brief|memo)\b|(?:보고서|분석|리뷰|검토|평가|계획|전략|추천|제안|개선안|요약|메모)/u;
+    /\b(?:report|analysis|review|assessment|plan|strategy|recommendations?|proposal|summary|argument|brief|memo|matrix|table|checklist|register|inventory|catalog|hand-?off)\b|(?:보고서|분석|리뷰|검토|평가|계획|전략|추천|제안|개선안|요약|메모|매트릭스|표|체크리스트|레지스터|인벤토리|카탈로그|핸드오프)/u;
   const englishPersistsInformationalOutput = (clause: string): boolean => {
     if (/\b(?:to|into|under)\s+(?:the\s+)?(?:readme|docs?|documentation|files?|director(?:y|ies)|folders?|website|web\s*app|applications?|apps?|components?|pages?|repositor(?:y|ies)|repos?|configs?|scripts?|packages?|branches?|pull\s*requests?)\b/u.test(clause)) {
       return true;
     }
-    const outputs = clause.matchAll(/\b(?:report|analysis|review|assessment|plan|strategy|recommendations?|proposal|summary|argument|brief|memo)\b/gu);
+    const outputs = clause.matchAll(/\b(?:report|analysis|review|assessment|plan|strategy|recommendations?|proposal|summary|argument|brief|memo|matrix|table|checklist|register|inventory|catalog|hand-?off)\b/gu);
     const targets = [...clause.matchAll(/\b(?:readme|docs?|documentation|files?|director(?:y|ies)|folders?|website|web\s*app|applications?|apps?|components?|pages?|repositor(?:y|ies)|repos?|configs?|scripts?|packages?|branches?|pull\s*requests?)\b/gu)];
     for (const output of outputs) {
       const outputEnd = (output.index ?? 0) + output[0].length;
@@ -330,7 +346,7 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
   };
   const koreanPersistsInformationalOutput = (clause: string): boolean =>
     /(?:readme|소스\s*코드|코드|파일|폴더|디렉터리|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|저장소|리포지토리|설정|스크립트|패키지|브랜치|풀\s*리퀘스트|pr)(?:에|로|으로)(?!\s*(?:대한|관한|관해|대해|기반))(?:\s|$)/u.test(clause) ||
-    /(?:보고서|분석|리뷰|검토|평가|계획|전략|추천|제안|개선안|요약|메모).{0,24}(?:readme|파일|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|설정|스크립트|패키지|브랜치|풀\s*리퀘스트|pr)/u.test(clause);
+    /(?:보고서|분석|리뷰|검토|평가|계획|전략|추천|제안|개선안|요약|메모|매트릭스|표|체크리스트|레지스터|인벤토리|카탈로그|핸드오프).{0,24}(?:readme|파일|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|설정|스크립트|패키지|브랜치|풀\s*리퀘스트|pr)/u.test(clause);
   const materialWorkspaceChange = clauses.some((clause) =>
     hasPositiveAction(
       clause,
@@ -396,7 +412,7 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
     ) ||
     hasPositiveAction(
       clause,
-      /(?:(?:실행|빌드|컴파일|타입\s*체크|린트)(?:하|해|할|했|려|고|기|자|줘|주세요|어)?|돌(?:리|려|려줘|려주세요))/gu,
+      /(?:(?:실행|빌드|컴파일|타입\s*체크|린트)(?:하|해|할|했|시켜|시킨)|돌(?:리|려|려줘|려주세요))/gu,
       koreanCommandObject,
     )
   );

@@ -1,68 +1,23 @@
-<div align="center">
-
-# 🌙 Luna Swarm
-
-### 목표를 던지면, 검증 가능한 수직 조직이 실행합니다.
-
-ChatGPT 인증 Codex App Server 위에서 움직이는 **적응형 수직 조직형 다중 에이전트 오케스트레이터**
+# Luna Swarm
 
 [![CI](https://github.com/jsk1004ha/luna-swarm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jsk1004ha/luna-swarm/actions/workflows/ci.yml?query=branch%3Amain)
-![Node](https://img.shields.io/badge/Node.js-20.19%20%7C%2022.x-339933?logo=nodedotjs&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-111827)
-![Release](https://img.shields.io/badge/Production-NO--GO-E5484D)
 
-[빠른 시작](#quickstart) · [작동 방식](#architecture) · [운영 명령](#commands) · [안전 경계](#safety) · [검증](#verification) · [문서 지도](#documents)
+ChatGPT 로그인으로 `gpt-5.6-luna`를 사용하는 **수직 조직형 다중 에이전트 오케스트레이터**입니다. 동시 호출 100은 하드 캡이 아닙니다. 기본 상한은 128, 설정 가능 상한은 1,024이며, 처음에는 8개만 실행해 계정과 서버 상태에 맞춰 적응합니다.
 
-</div>
+핵심은 “같은 질문을 100번”이 아닙니다. 목표를 DAG로 나누고, 서로 다른 책임과 정보 경계를 가진 조직이 기획 → 실행 → 부서 검토 → 독립 감사 → 계층 병합 → 최종 심의를 수행합니다.
 
-> [!IMPORTANT]
-> Luna Swarm은 “같은 질문을 여러 번 던지는” fan-out 도구가 아닙니다. 목표를 DAG와 revisioned Work Order로 바꾸고, 실행자·관리자·독립 감사자·Oracle·최종 critic을 서로 다른 권위 경계에 배치합니다. 기본 Swarm은 `read`/`search` 전용이며, 쓰기는 별도 opt-in 코딩 파이프라인만 담당합니다.
+## 현재 상태
 
-기본 활성 호출 상한은 128이고 설정 가능한 hard cap은 1,024입니다. 다만 실행은 8개 호출에서 시작해 계정·서버 상태에 맞춰 적응하며, 논리 조직 규모와 실제 동시성은 서로 독립입니다.
+| 경계 | 현재 검증 상태 |
+|---|---|
+| `main` CI | Node.js 20.19.0·22.x에서 타입 검사, 전체 테스트, 빌드, production dependency audit, 패키지 검증 통과 |
+| Host 도구 | HMAC capability와 durable replay ledger를 사용하는 `read`/`search` 전용 Host Tool Broker가 App Server 호출 경계에 연결됨 |
+| 코딩 | opt-in `CodingPipeline`이 Node 22 permission process, disposable clone, protected check, 독립 audit, Single Committer CAS를 실제 Git E2E로 검증함. 일반 Work Order 자동 라우팅은 아직 열지 않음 |
+| 평가·배포 | hash-pinned 별도 evaluator process와 protected benchmark runner, signed Shadow/Canary SLO, stable-only 자동 rollback·후보 quarantine·Failure Capsule 경로 구현 |
+| 실계정 용량 | 계정 지문·만료·호출·예산 승인에 결박한 1→2→4→8→16→32 shard soak 통과. 64/128/256은 이 호스트에서 실행하지 않았으므로 지원을 주장하지 않음 |
+| 출시 판정 | 로컬 증거 기반 실제 연구 E2E와 Luna/Sol paired 진단은 완료했습니다. 더 큰 live soak·외부 웹 원출처 연구·장시간 production canary가 남아 전체 제품 출시는 **NO-GO**입니다. |
 
-## ✨ 한눈에 보기
-
-| 원하는 것 | Luna가 하는 일 | 남기는 증거 |
-|---|---|---|
-| 복잡한 목표 분해 | Mission Preflight → 최소 DAG → 목표별 수직 조직 | 요구사항 ID, 조직도, Work Order |
-| 근거 기반 실행 | scoped Host Tool Broker로 필요한 로컬 자료만 조회 | HMAC capability, 서명 receipt, artifact hash |
-| 독립 품질 검증 | manager 책임 검토 + blind audit quorum + sealed Oracle | G0/G2/G3, vote, Council decision |
-| 안전한 코딩 | opt-in permission process + disposable clone + Single Committer | exact tree, check/audit receipt, target CAS |
-| 운영과 진화 | immutable run state, paired evaluator, Shadow/Canary control plane | outcome, signed SLO, rollback/quarantine record |
-
-<a id="architecture"></a>
-
-```mermaid
-flowchart LR
-  G["🎯 Goal"] --> P["Mission Preflight"]
-  P --> D["DAG + Vertical Org"]
-  D --> W["Revisioned Work Orders"]
-  W --> E["Scoped Execution"]
-  E --> V["Manager + Blind Audit + Oracle"]
-  V --> R["Verified / Partial Report"]
-  V -->|"fail closed"| X["Rework · Block · Evidence preserved"]
-```
-
-## 🧭 검증 상태 · 2026-08-17
-
-`✅ 로컬 검증` · `🧪 제한적 실계정` · `⚠️ opt-in` · `🚧 기본 경로 미연결` · `🛑 출시 차단`
-
-| 경계 | 상태 | 정확한 범위 |
-|---|---|---|
-| Core orchestration | ✅ | 타입 검사·전체 테스트·빌드와 deterministic DAG/검증 E2E를 로컬에서 통과 |
-| Host 도구 | ✅ | HMAC capability와 durable replay ledger를 사용하는 `read`/`search` 전용 Broker가 실제 App Server dynamic tool 경계에 연결됨 |
-| 코딩 | ⚠️ | `CodingPipeline`의 permission process, disposable clone, protected check, 독립 audit, Single Committer CAS를 실제 Git E2E로 검증. 일반 Work Order가 자동으로 코딩 경로에 들어가지는 않음 |
-| 평가·배포 제어 | ✅ / 🧪 | hash-pinned evaluator process와 signed Shadow/Canary rollback 경로는 로컬 E2E로 검증. 실제 production candidate 장시간 canary는 미검증 |
-| 실계정 shard | 🧪 | 계정 지문·만료·호출·예산 승인에 결박한 1→2→4→8→16→32 단계 통과. 64/128/256 지원은 주장하지 않음 |
-| 제품 출시 | 🛑 | 외부 웹 원출처 연구, 더 큰 live soak, 장시간 production canary, 30×3 승격 benchmark가 남아 **NO-GO** |
-
-정확한 명령, 로컬 테스트, live 측정치와 남은 위험은 [구현 감사 보고서](docs/IMPLEMENTATION_AUDIT_2026-08-13.ko.md)에 기록합니다. 이 README의 2026-08-17 개편도 실제 Luna Swarm에 맡겼으며, `partial` 결과의 검증된 주장과 final critic 지적만 반영했습니다. [편집 실행 기록](benchmarks/2026-08-17-readme-editorial/README.md)
-
-<details>
-<summary><strong>📊 실제 Luna/Sol paired benchmark 펼치기</strong></summary>
-
-<br>
+정확한 명령, 테스트 수치, live 측정치와 남은 위험은 [구현 감사 보고서](docs/IMPLEMENTATION_AUDIT_2026-08-13.ko.md)에 기록합니다.
 
 ## 실제 모델 비교 · 2026-08-17
 
@@ -94,39 +49,9 @@ flowchart LR
 
 결정론적 전체 DAG 회귀에서는 같은 accepted tasks, claim/evidence lineage, G0/G2/G3 receipts와 최종 보고서를 유지하면서 모델 호출이 23회에서 19회로 4회(17.4%) 줄었습니다. 이는 mock fixture의 실측이며 위 실제 계정 36/56회 benchmark 수치를 소급 변경하거나 실제 토큰 절감을 주장하는 값은 아닙니다.
 
-새 실행은 `metrics.callBreakdown`에 bounded role/purpose별 실제 호출 수, exact prompt 문자·UTF-8 byte, duration, queue wait, exact token usage와 계측 완전성을 누적합니다. 이벤트에는 prompt 원문 대신 크기와 SHA-256만 기록합니다. `npm start -- status <run-id> -- --workspace .`에서 이 분해 지표를 확인할 수 있습니다. 아래 후속 paired 진단도 이 계측으로 비교했으며, 앞으로도 품질·critical failure 조건을 먼저 통과한 경우에만 효율 개선으로 판정합니다.
+새 실행은 `metrics.callBreakdown`에 bounded role/purpose별 실제 호출 수, exact prompt 문자·UTF-8 byte, duration, queue wait, exact token usage와 계측 완전성을 누적합니다. 이벤트에는 prompt 원문 대신 크기와 SHA-256만 기록합니다. `npm start -- status <run-id> -- --workspace .`에서 이 분해 지표를 확인할 수 있으며, 다음 동일 paired benchmark에서 품질 95점과 권위 artifact 불변을 먼저 확인한 뒤 실제 uncached input 절감을 판정합니다.
 
-### 개선 후 다른 주제 실제 비교
-
-위 최적화와 bounded evidence-reference repair, verified partial final, model-turn당 Host Tool 64회 상한을 반영한 뒤, 기존 HelioDesk와 다른 **Luna Swarm 보안·운영 출시 감사**를 동일 로컬 문서 네 개로 다시 비교했습니다.
-
-이 표는 v7 당시의 64회 상한을 기록합니다. v7 계측에서 worker+validator가 Sol token의 93.2%를 사용한 것을 확인한 뒤 현재 런타임은 manager와 requirements-auditor를 immutable artifact-only 검토로 분리하고 evidence-auditor만 bounded read/search를 유지합니다. 동일 Host Tool 요청은 한 turn에서 한 번만 실행·서명되고 이후에는 compact reuse marker가 반환되며, 새 hard bound는 32회·단일 구조화 출력 256 KiB입니다. 독립 투표 수, quorum, Oracle, G0/G2/G3, final critic은 줄이지 않았습니다.
-
-| 지표 | `gpt-5.6-luna` | `gpt-5.6-sol` |
-|---|---:|---:|
-| 상태 | partial | partial |
-| accepted / failed / blocked | **4 / 0 / 0** | 2 / 1 / 3 |
-| immutable claims / uncovered requirements | **45 / 0** | 20 / 7 |
-| frozen scorer | **79/100, critical flag 1** | 58/100, critical 0 |
-| wall time | 29:06.275 | **26:33.909** |
-| model calls | 40 | **28** |
-| exact total tokens | **2,850,715** | 8,574,243 |
-| input / cached input | **2,745,789 / 1,575,936** | 8,462,035 / 7,372,288 |
-| output / reasoning output | **104,926** / 42,226 | 112,208 / **36,447** |
-
-사전등록 기준은 80점 이상과 critical 0건을 모두 요구하므로 공식 결론은 **승자 없음**입니다. Luna critical flag는 “파일 쓰기·shell·network Broker는 기본 Swarm 보장이 아니다”라는 부정문을 frozen regex가 허용 주장으로 오탐한 것이지만 결과 확인 뒤 점수를 바꾸지 않았습니다. 구조적으로 Luna가 더 많은 검증 결과를 완성했고 총 토큰은 66.75% 적었으며, Sol은 8.73% 빨랐지만 품질 전제와 10% 효율 문턱을 충족하지 못했습니다.
-
-- [v7 전체 비교와 한계](benchmarks/2026-08-17-runtime-security-comparison/results/comparison.v7.md)
-- [Luna v7 최종 결과](benchmarks/2026-08-17-runtime-security-comparison/results/luna-v7-final.md)
-- [Sol v7 최종 결과](benchmarks/2026-08-17-runtime-security-comparison/results/sol-v7-final.md)
-- [exact token/call metrics](benchmarks/2026-08-17-runtime-security-comparison/results/metrics.v7.json)
-- [사전등록·evidence·scorer](benchmarks/2026-08-17-runtime-security-comparison/README.md)
-
-</details>
-
-<a id="quickstart"></a>
-
-## 🚀 5분 시작
+## 5분 시작
 
 필요 조건은 Node.js 20.19.x 또는 22.12 이상과 ChatGPT 계정입니다.
 
@@ -184,7 +109,7 @@ UI 서버가 시작한 실행은 `소유 실행`으로 표시되어 일시정지
 
 > 계정 화면의 “무료/무제한” 표시는 ChatGPT 사용 권한을 뜻합니다. 100개 이상의 동시 요청을 서버가 항상 수용하거나 정책이 영구히 유지된다는 보장은 아닙니다. 그래서 숫자를 고정하지 않고 실제 동시성을 자동 조절합니다.
 
-## 🏢 목표마다 새로 만드는 수직 조직
+## 목표마다 새로 만드는 수직 조직
 
 ```mermaid
 flowchart TD
@@ -225,13 +150,13 @@ npm start -- org <run-id>
 
 전체 직급을 펼친 형태는 [examples/reference-vertical-organization.md](examples/reference-vertical-organization.md)에 있습니다. 각 실행은 `<run>/organization.md`에 실제 생성된 Mermaid 조직도를 남깁니다.
 
-## 🧠 왜 SDK 100개가 아닌가
+## 왜 SDK 100개가 아닌가
 
 `@openai/codex-sdk`의 각 `thread.run()`은 내부적으로 별도 `codex exec` 프로세스를 실행합니다. 이를 100개 병렬화하면 CLI 프로세스, 메모리, 파일 디스크립터와 ChatGPT 인증 갱신이 동시에 경쟁합니다.
 
 Luna Swarm은 SDK를 모델 실행에 직접 사용하지 않습니다. SDK 패키지에 포함된 공식 Codex 바이너리로 기본 1개, 설정에 따라 여러 개의 **`codex app-server` stdio shard**를 띄웁니다. bounded supervisor가 thread affinity, shard별 inflight/queue, backpressure, circuit breaker와 shutdown drain을 관리하며, 모든 기획자·관리자·실무자·감사자·통합자·심의자 호출은 shard 진입 전에 하나의 전역 동시성 관문을 통과합니다.
 
-## 🧬 더 똑똑하게 만드는 장치
+## 더 똑똑하게 만드는 장치
 
 | 장치 | 같은 모델에서도 도움이 되는 이유 |
 |---|---|
@@ -260,9 +185,7 @@ Luna Swarm은 SDK를 모델 실행에 직접 사용하지 않습니다. SDK 패�
 
 스케줄러는 전체 cap 불변식을 유지하면서 역할 우선순위와 작업 priority를 함께 사용합니다. 동일 role에서는 기존 작업 priority가 적용되고, 다른 role에서는 worker보다 manager/validator, reducer, architect, judge가 먼저 빈 슬롯을 받습니다. `schedulerAgingMs`마다 오래 기다린 요청의 유효 우선순위를 올려 지속적인 제어 호출에도 실무 작업이 결국 실행되게 합니다. 실행 상태에는 `queueP95Ms`, `maxQueueWaitMs`, `priorityDispatches`, 현재 `threadLocks`와 App Server가 직접 보고한 exact token usage가 저장됩니다. 성공뿐 아니라 재시도·실패 응답의 usage도 합산하고, 계측된 호출과 미계측 호출을 분리해 누락을 0으로 추정하지 않습니다.
 
-<a id="commands"></a>
-
-## 🧰 명령
+## 명령
 
 ```bash
 # 환경, ChatGPT 로그인, App Server 쓰기 권한, Luna 카탈로그 확인
@@ -338,7 +261,7 @@ Shadow/Canary 운영 제어 루프는 trusted operations signer가 명시적으�
 
 `npm` 자체도 `--workspace` 옵션을 사용하므로 npm 11에서는 위 예시처럼 그 앞에 두 번째 `--` 구분자를 둡니다. 빌드된 `luna-swarm` 바이너리를 직접 실행할 때는 추가 구분자가 필요 없습니다.
 
-## ⚙️ 동시성 동작
+## 동시성 동작
 
 - `maxConcurrency`는 **동시에 실행 중인 모든 모델 호출의 상한**입니다. planner, 팀장, validator도 예외가 아닙니다.
 - 기본 시작값은 8입니다.
@@ -350,7 +273,7 @@ Shadow/Canary 운영 제어 루프는 trusted operations signer가 명시적으�
 
 100은 더 이상 코드의 하드 캡이 아닙니다. 다만 작은 작업은 3~10개 에이전트가 더 빠르고 정확할 수 있고, `maxAgentTurns`가 runaway 조직 확장을 막습니다.
 
-## ♻️ 상태와 복구
+## 상태와 복구
 
 실행 상태는 기본적으로 다음 위치에 저장됩니다.
 
@@ -411,7 +334,7 @@ stateDiagram-v2
   running --> cancelled: operator cancel
 ```
 
-## 🔧 주요 설정
+## 주요 설정
 
 | 키 | 기본값 | 의미 |
 |---|---:|---|
@@ -450,9 +373,7 @@ stateDiagram-v2
 
 예시는 [examples/luna-swarm.config.json](examples/luna-swarm.config.json)에 있습니다.
 
-<a id="safety"></a>
-
-## 🛡️ 안전 범위
+## 안전 범위
 
 - 모든 에이전트 sandbox는 기본적으로 `read-only`, approval policy는 `never`입니다.
 - 여러 에이전트가 같은 저장소를 동시에 수정하지 않습니다. 코드 작업도 우선 분석·설계·패치 제안으로 반환합니다.
@@ -464,15 +385,13 @@ stateDiagram-v2
 
 일반 Swarm 실행은 계속 read-only입니다. Host Tool Broker도 `read`/`search`만 허용하고, HMAC capability, durable replay/idempotency ledger, canonical path scope, credential/state deny scope, 서명 receipt를 매 호출에 강제합니다. 파일을 쓰는 코딩은 별도의 opt-in `CodingPipeline`에서만 실행됩니다. 이 경로는 hash-pinned 프로세스 executor, disposable Git clone, bounded snapshot, 보호된 check와 독립 audit receipt, plumbing-only commit 생성, target-ref CAS, Single Committer를 하나의 트랜잭션 경계로 묶습니다.
 
-## 🧪 Harness v2
+## Harness v2
 
 실행 계획은 고유 이름을 가진 가변형 Harness v2 조직의 revisioned Work Order로 투영됩니다. 기본 `auto` 모드는 계획의 작업 수·동시성·검증자 수에 맞춰 14~256명의 논리 조직을 산정하며, 산정된 roster는 실행에 고정되어 재시도·재개에도 같은 직원 배정을 보존합니다. `lab-128@2`는 기존 실행 호환을 위해 유지한 조직 계약 버전 이름이며 인원 제한을 뜻하지 않습니다. 계획 전 Mission Preflight가 숨은 가정과 경계 위험을 구조화하고, deterministic topology router가 `single`·`centralized`·`parallel-research`·`review-loop` 중 하나를 선택합니다. 순차 코딩은 planner 1명과 독립 검증 loop를 우선하고, 서로 독립적인 조사만 제한적으로 fan-out합니다. bounded AST 기반 Program Knowledge Graph는 각 Work Order에 필요한 코드 관계만 Context Compiler에 공급하며, compiler가 whole item으로 승인한 mission·Work Order·dependency frame은 최종 prompt 조립에서도 절단되지 않습니다. Oracle Forge는 실행 전에 평가 기준을 봉인하고 제출된 artifact hash를 별도 evaluator가 재평가해 G2 receipt를 만들며, 고위험 작업은 Experiment Fabric에 metric·seed·stopping rule을 사전등록합니다. 작업 결과, 실제 envelope 검사, Oracle 평가, run-pinned reviewer slot의 manager/auditor vote, G0/G2/G3 receipt는 immutable Blackboard CAS에 저장됩니다. 실행에서 얻은 지식은 candidate capsule로만 남고, trusted verifier가 evidence와 recipe를 재검증한 capsule만 다음 컨텍스트에 회상됩니다. Dashboard는 사전등록·후보·검증 완료를 서로 다른 상태로 표시합니다. 설계 근거와 acceptance test는 [실행 품질 최적화 문서](docs/HARNESS_OPTIMIZATION_2026-08-17.ko.md)에 정리했습니다.
 
 실제 쓰기·shell·network Tool Broker, arbitrary experiment runner, 모든 Evolution component loader는 아직 구현됐다고 주장하지 않습니다. 보호된 평가는 별도 hash-pinned evaluator 프로세스가 hidden suite와 개인키를 소유하고, allowlist된 benchmark runner의 전체 실행 closure를 private copy에서 실행해 서명 receipt만 반환합니다. Shadow/Canary는 operator approval과 operations signer가 구성된 경우에만 후보 트래픽을 열며, signed SLO 위반은 stable-only 전환, 후보 quarantine, Failure Capsule을 durable exactly-once 경로로 연결합니다. App Server는 bounded multi-shard supervisor를 사용하지만 이 저장소에서 실제 계정 검증을 완료한 상한과 미검증 상한은 아래 배포 경계에 구분해 기록합니다.
 
-<a id="verification"></a>
-
-## ✅ 개발 및 검증
+## 개발 및 검증
 
 의존성은 저장소 루트에서 한 번 설치합니다.
 
@@ -545,21 +464,7 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 
 현재 구현 범위와 출시 판정은 [2026-08-13 구현 감사 보고서](docs/IMPLEMENTATION_AUDIT_2026-08-13.ko.md)에 기록했습니다.
 
-<a id="documents"></a>
-
-## 📚 문서 지도
-
-| 문서 | 용도 |
-|---|---|
-| [Architecture](docs/ARCHITECTURE.ko.md) | 런타임 구성요소와 실행 흐름 |
-| [Harness v2](docs/HARNESS_V2.ko.md) | Work Order, Blackboard, G0/G2/G3, Council 계약 |
-| [Evolution Harness v2](docs/EVOLUTION_HARNESS_V2.ko.md) | Bundle, outcome, paired evaluation, promotion/rollback |
-| [Implementation Audit](docs/IMPLEMENTATION_AUDIT_2026-08-13.ko.md) | 구현 증거, 보안 경계, 출시 NO-GO 근거 |
-| [Harness Optimization](docs/HARNESS_OPTIMIZATION_2026-08-17.ko.md) | 실제 비교 이후 품질·효율 개선 근거 |
-| [Security](SECURITY.md) | 보안 정책과 취약점 제보 |
-| [Design](DESIGN.md) | 운영 UI의 정보·상호작용 기준 |
-
-### 공식 참고 문서
+## 공식 참고 문서
 
 - [Codex 인증](https://learn.chatgpt.com/docs/auth)
 - [Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)
@@ -572,6 +477,6 @@ Vite 개발 서버는 `http://127.0.0.1:4311`에서 `/api`와 WebSocket을 4310�
 - [Hermes Agent skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)
 - [Pixel Agents](https://github.com/pixel-agents-hq/pixel-agents)
 
-## 📄 라이선스
+## 라이선스
 
 MIT

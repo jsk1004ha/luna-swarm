@@ -12,7 +12,9 @@ test("planning prompts expose only execution modes supported by the active runti
     assert.match(prompt, /reasoning-only=\[\]/);
     assert.match(prompt, /workspace-inspection=\[workspace-read,workspace-search\]/);
     assert.match(prompt, /only executionMode values you may emit/);
-    assert.match(prompt, /Preserve every unavailable authority demand explicitly/);
+    assert.match(prompt, /Preserve every positively requested unavailable authority demand explicitly/);
+    assert.match(prompt, /Do not invent an unavailable demand from a read-only scope or a prohibition/);
+    assert.match(prompt, /use a neutral kind such as analysis, audit, or synthesis/);
     assert.match(prompt, /fails closed when required authority is unavailable/);
     assert.doesNotMatch(prompt, /Do not put names, verbs, validation steps, or negated requirements/);
     assert.doesNotMatch(prompt, /external-research=\[/);
@@ -159,4 +161,13 @@ test("manager and validator reviews stay inside the task requirement allowlist",
     assert.match(prompt, /Evaluate only the requirements listed in/);
     assert.match(prompt, /Never require or reward adding a mission requirement outside/);
   }
+  assert.match(managerPrompt("Mission", task, result, "MANAGER"), /artifact-only accountability review/);
+  assert.match(
+    validatorPrompt("Mission", task, result, "V2", "acceptance coverage", false),
+    /artifact-only review lane/,
+  );
+  assert.match(
+    validatorPrompt("Mission", task, result, "V1", "evidence integrity", true),
+    /inspect a given path at most once/,
+  );
 });

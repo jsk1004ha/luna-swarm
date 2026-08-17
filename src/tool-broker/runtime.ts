@@ -12,16 +12,18 @@ import type { JsonValue } from "../types.js";
 import type { NormalizedToolPolicy } from "../harness-v2/tool-policy.js";
 import { CapabilityAuthority, normalizeRelativePath, pathMatchesScope } from "./capability.js";
 import { HostToolBroker } from "./broker.js";
-import { ToolBrokerError, type BrokerTool, type ToolReceipt } from "./types.js";
+import { ToolBrokerError, type BrokerResult, type BrokerTool, type ToolReceipt } from "./types.js";
 
 const RECEIPT_KEY_BYTES = 32;
 const CAPABILITY_TTL_MS = 30_000;
+const MAX_HOST_TOOL_CALLS_PER_SESSION = 32;
+const MAX_RUNTIME_TOOL_OUTPUT_BYTES = 256 * 1_024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 const READ_TOOL: HostToolSpec = Object.freeze({
   type: "function",
   name: "read",
-  description: "Read one UTF-8 text file through the host-enforced read-only broker.",
+  description: "Read one UTF-8 text file through the host-enforced read-only broker. Use a workspace-relative path with forward slashes (example: src/app.ts), never an absolute path. At most 32 calls are accepted in this turn; an identical request is supplied once and later calls return a compact reuse marker.",
   inputSchema: Object.freeze({
     type: "object",
     properties: { path: { type: "string", minLength: 1, maxLength: 4_096 } },
@@ -33,7 +35,7 @@ const READ_TOOL: HostToolSpec = Object.freeze({
 const SEARCH_TOOL: HostToolSpec = Object.freeze({
   type: "function",
   name: "search",
-  description: "Search UTF-8 workspace text through the bounded host-enforced read-only broker. The result also includes a deterministic files inventory and whether that inventory is complete.",
+  description: "Search UTF-8 workspace text through the bounded host-enforced read-only broker. Use a workspace-relative path with forward slashes, batch related terms, and reuse results. The response includes a deterministic file inventory and completeness flag. At most 32 calls are accepted in this turn; identical requests return a compact reuse marker.",
   inputSchema: Object.freeze({
     type: "object",
     properties: {
@@ -103,6 +105,14 @@ export class RunHostToolRuntime {
       authority,
       statePath: join(generationDirectory, "ledger.json"),
       ...(protectedPathScopes.length > 0 ? { protectedPathScopes } : {}),
+      limits: {
+        // A single dynamic-tool response is subsequently replayed in every
+        // upstream model turn. Keep that multiplicative input cost bounded;
+        // callers can use search to narrow files larger than this limit.
+        maxFileBytes: MAX_RUNTIME_TOOL_OUTPUT_BYTES,
+        maxOutputBytes: MAX_RUNTIME_TOOL_OUTPUT_BYTES,
+        maxSearchMatches: 256,
+      },
       environment: {},
       allowedEnvironmentKeys: [],
     });
@@ -128,9 +138,20 @@ export class RunHostToolRuntime {
       throw new ToolBrokerError("CAPABILITY_DENIED", "A read/search Work Order requires at least one read scope");
     }
     const specs = tools.map((tool) => tool === "read" ? READ_TOOL : SEARCH_TOOL);
+    let callCount = 0;
+    let completedOperationCount = 0;
+    const completedRequests = new Map<string, number>();
+    const inFlightRequests = new Map<string, Promise<BrokerResult>>();
     return Object.freeze({
       tools: Object.freeze(specs),
       invoke: async (call: HostToolCall): Promise<HostToolInvocationResult> => {
+        callCount += 1;
+        if (callCount > MAX_HOST_TOOL_CALLS_PER_SESSION) {
+          throw new ToolBrokerError(
+            "OUTPUT_LIMIT",
+            `Host tool call budget exhausted (${MAX_HOST_TOOL_CALLS_PER_SESSION} calls per model turn)`,
+          );
+        }
         if (!tools.includes(call.tool as BrokerTool)) {
           throw new ToolBrokerError("CAPABILITY_DENIED", "Dynamic tool is not authorized by this Work Order");
         }
@@ -138,6 +159,18 @@ export class RunHostToolRuntime {
         const normalizedPath = normalizeRelativePath(parsed.path);
         if (!pathScopes.some((scope) => pathMatchesScope(normalizedPath, scope))) {
           throw new ToolBrokerError("CAPABILITY_DENIED", "Requested path is outside the Work Order read scopes");
+        }
+        const requestKey = hostToolRequestKey(parsed, normalizedPath);
+        const completedOrdinal = completedRequests.get(requestKey);
+        if (completedOrdinal !== undefined) return reusedInvocation(completedOrdinal);
+        const inFlight = inFlightRequests.get(requestKey);
+        if (inFlight) {
+          await inFlight;
+          const ordinal = completedRequests.get(requestKey);
+          if (ordinal === undefined) {
+            throw new ToolBrokerError("LEDGER_FAILURE", "Completed Host Tool request was not memoized");
+          }
+          return reusedInvocation(ordinal);
         }
         const token = this.#authority.issue({
           agentId: binding.agentId,
@@ -152,7 +185,7 @@ export class RunHostToolRuntime {
         const idempotencyKey = `call-${createHash("sha256")
           .update(`${call.threadId}\0${call.turnId}\0${call.callId}`)
           .digest("hex")}`;
-        const result = await this.#broker.execute(
+        const operation = this.#broker.execute(
           parsed.tool === "read"
             ? { tool: "read", path: normalizedPath, token, idempotencyKey }
             : {
@@ -165,7 +198,15 @@ export class RunHostToolRuntime {
                 idempotencyKey,
               },
         );
-        return { content: result.output as unknown as JsonValue, receipt: result.receipt };
+        inFlightRequests.set(requestKey, operation);
+        try {
+          const result = await operation;
+          completedOperationCount += 1;
+          completedRequests.set(requestKey, completedOperationCount);
+          return { content: result.output as unknown as JsonValue, receipt: result.receipt };
+        } finally {
+          inFlightRequests.delete(requestKey);
+        }
       },
     });
   }
@@ -178,6 +219,29 @@ export class RunHostToolRuntime {
 type ParsedCall =
   | { tool: "read"; path: string }
   | { tool: "search"; path: string; query: string; mode: "text" | "regex"; flags?: "i" | "m" | "im" | "mi" };
+
+function hostToolRequestKey(parsed: ParsedCall, normalizedPath: string): string {
+  return parsed.tool === "read"
+    ? JSON.stringify({ tool: parsed.tool, path: normalizedPath })
+    : JSON.stringify({
+        tool: parsed.tool,
+        path: normalizedPath,
+        query: parsed.query,
+        mode: parsed.mode,
+        flags: parsed.flags ?? "",
+      });
+}
+
+function reusedInvocation(operationOrdinal: number): HostToolInvocationResult {
+  return {
+    content: Object.freeze({
+      kind: "reuse",
+      status: "already_supplied",
+      operationOrdinal,
+      instruction: "Reuse the identical Host Tool result already present earlier in this turn; no new host read was performed.",
+    }) as unknown as JsonValue,
+  };
+}
 
 function parseCall(tool: string, value: JsonValue): ParsedCall {
   if (!isRecord(value)) throw new ToolBrokerError("INVALID_REQUEST", "Host tool arguments must be an object");

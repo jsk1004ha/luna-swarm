@@ -328,6 +328,29 @@ export interface RunMetrics {
   tokenMeteredCalls?: number;
   /** Backend calls with no exact token receipt; never estimated as zero usage. */
   tokenUnmeteredCalls?: number;
+  /**
+   * Exact per-purpose call cost observed at the gateway boundary. Entries are
+   * sorted by role and purpose so persisted metrics remain deterministic.
+   */
+  callBreakdown?: CallPurposeMetrics[];
+}
+
+export interface CallPurposeMetrics {
+  role: AgentRole;
+  purpose: string;
+  /** Actual backend invocations, including retries. */
+  calls: number;
+  /** JavaScript character count of the exact prompt sent to the backend. */
+  promptCharacters: number;
+  /** UTF-8 bytes of the exact prompt sent to the backend. */
+  promptUtf8Bytes: number;
+  /** Backend-reported duration for successes and observed wall time for failures. */
+  totalDurationMs: number;
+  /** Permit wait attributed to these actual backend invocations. */
+  totalQueueWaitMs: number;
+  tokenUsage?: ModelTokenUsage;
+  tokenMeteredCalls: number;
+  tokenUnmeteredCalls: number;
 }
 
 export interface ModelTokenUsage {
@@ -500,6 +523,11 @@ export interface RunEvent {
   learningPolicyImprovement?: number;
   tokenUsage?: ModelTokenUsage;
   tokenUsageComplete?: boolean;
+  purpose?: string;
+  promptCharacters?: number;
+  promptUtf8Bytes?: number;
+  /** SHA-256 of the exact prompt; prompt contents are never stored in telemetry. */
+  promptHash?: `sha256:${string}`;
   message?: string;
 }
 

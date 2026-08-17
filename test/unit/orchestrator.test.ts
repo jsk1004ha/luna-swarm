@@ -335,6 +335,40 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       assert.ok(call.effectiveToolPolicy, `${call.purpose} must carry an enforceable runtime policy`);
       assert.deepEqual(call.effectiveToolPolicy?.writeScopes, []);
     }
+    const t1Manager = backend.calls.find((entry) => entry.purpose === "manager_review" && entry.taskId === "T1");
+    const t1EvidenceAuditor = backend.calls.find((entry) =>
+      entry.purpose === "validate_task" && entry.taskId === "T1" &&
+      (entry.data as { validatorId?: string }).validatorId === "V1");
+    const t1RequirementsAuditor = backend.calls.find((entry) =>
+      entry.purpose === "validate_task" && entry.taskId === "T1" &&
+      (entry.data as { validatorId?: string }).validatorId === "V2");
+    assert.deepEqual(t1Manager?.effectiveToolPolicy?.allowedTools, [], "manager review must not repeat source reads");
+    assert.deepEqual(
+      t1EvidenceAuditor?.effectiveToolPolicy?.allowedTools,
+      ["read", "search"],
+      "the dedicated evidence auditor retains bounded source verification",
+    );
+    assert.deepEqual(
+      t1RequirementsAuditor?.effectiveToolPolicy?.allowedTools,
+      [],
+      "requirements coverage is checked against the immutable result packet",
+    );
+    assert.equal(
+      (t1EvidenceAuditor?.data as { reviewEvidenceMode?: string }).reviewEvidenceMode,
+      "workspace-verified",
+    );
+    assert.equal(
+      (t1RequirementsAuditor?.data as { reviewEvidenceMode?: string }).reviewEvidenceMode,
+      "artifact-only",
+    );
+    assert.match(t1Manager?.prompt ?? "", /artifact-only accountability review/);
+    assert.match(t1RequirementsAuditor?.prompt ?? "", /artifact-only review lane/);
+    assert.equal(
+      [t1Manager, t1EvidenceAuditor, t1RequirementsAuditor]
+        .filter((call) => (call?.effectiveToolPolicy?.allowedTools.length ?? 0) > 0).length,
+      1,
+      "only one of the three independent review lanes should reopen workspace evidence",
+    );
     for (const call of backend.calls.filter((entry) => entry.purpose === "execute_task")) {
       assert.ok(call.executionBundlePin, "workers must carry the run-pinned Bundle");
       assert.ok(call.attemptIdentity, "workers must carry the Work Order AttemptIdentity");
@@ -378,16 +412,16 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
         `${call.purpose} prompt must be rendered from the declared component hash`,
       );
     }
-    for (const purpose of ["team_synthesis", "critic_review", "final"]) {
+    for (const purpose of ["team_synthesis", "critic_review"]) {
       const calls = backend.calls.filter((call) => call.purpose === purpose);
       assert.ok(calls.length > 0, `${purpose} must execute`);
       assert.ok(calls.every((call) => call.executionBundlePin && call.executionPromptModule));
     }
     assert.equal(backend.calls.filter((call) => call.purpose === "critic_review").length, 1);
-    const finalCall = backend.calls.find((call) => call.purpose === "final");
     assert.equal(
-      (finalCall?.data as { critic?: { validatorId?: string } }).critic?.validatorId,
-      "FINAL-CRITIC",
+      backend.calls.filter((call) => ["final", "final_repair"].includes(call.purpose)).length,
+      0,
+      "the host-canonical final must not spend a redundant judge call",
     );
     assert.equal(
       backend.calls.some(
@@ -409,7 +443,7 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     assert.ok(workerPurposes.indexOf("T3") > workerPurposes.indexOf("T1"));
     assert.ok(workerPurposes.indexOf("T3") > workerPurposes.indexOf("T2"));
     const teamCalls = backend.calls.filter((call) => call.purpose === "team_synthesis");
-    assert.equal(teamCalls.length, 4);
+    assert.equal(teamCalls.length, 1, "three one-packet teams must use deterministic pass-through");
     assert.equal(
       (teamCalls.at(-1)?.data as { team: { id: string } }).team.id,
       "TEAM-ROOT",
@@ -419,6 +453,73 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     };
     assert.equal(rootInput.packets.length, 3);
     assert.ok(rootInput.packets.every((packet) => packet.sourceTaskIds.length === 1));
+    assert.equal(state.metrics.modelCalls, backend.calls.length);
+    assert.equal(
+      state.metrics.modelCalls,
+      19,
+      "host-canonical synthesis/final paths save four of the prior 23 deterministic fixture calls",
+    );
+    assert.equal(
+      state.metrics.callBreakdown?.find((entry) => entry.purpose === "team_synthesis")?.calls,
+      1,
+    );
+    assert.equal(state.metrics.callBreakdown?.some((entry) => entry.purpose === "final"), false);
+    const runtimeEvents = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string; status?: string });
+    assert.equal(
+      runtimeEvents.filter((event) => event.type === "team_synthesis_elided").length,
+      3,
+    );
+    assert.equal(
+      runtimeEvents.filter((event) => event.type === "final_judge_elided").length,
+      1,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("flushMetrics persists detached calls that finish after the last orchestration commit", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-late-metrics-"));
+  try {
+    const cfg = config();
+    const backend = new MockAgentBackend(async (request) => {
+      if (request.purpose === "late_shadow_observation") return { observed: true };
+      return demoHandler(request);
+    });
+    const store = await createdRunStore(workspace, ".state", "run-late-metrics");
+    const gateway = new AgentGateway({ backend, config: cfg });
+    const orchestrator = new SwarmOrchestrator({
+      gateway,
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-late-metrics",
+    });
+    const completed = await orchestrator.start("late shadow metrics flush");
+    assert.equal(completed.status, "completed", completed.error);
+    const committedCalls = completed.metrics.modelCalls;
+
+    await gateway.run({
+      threadKey: "late-shadow-observation",
+      role: "worker",
+      purpose: "late_shadow_observation",
+      prompt: "observe candidate after the stable result is committed",
+      reasoningEffort: "low",
+    });
+    assert.equal(
+      (await store.load()).metrics.modelCalls,
+      committedCalls,
+      "a detached call cannot mutate the persisted snapshot before an explicit flush",
+    );
+
+    await orchestrator.flushMetrics();
+    const persisted = await store.load();
+    assert.equal(persisted.metrics.modelCalls, committedCalls + 1);
+    assert.equal(
+      persisted.metrics.callBreakdown?.find((entry) => entry.purpose === "late_shadow_observation")?.calls,
+      1,
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -892,7 +993,7 @@ test("execution rework fits exact escaped evidence into the remaining required-c
   }
 });
 
-test("worker result contract failures are fed back before the next attempt", async () => {
+test("invalid worker evidence references are repaired exactly without repeating task tools", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-result-contract-rework-"));
   try {
     let injectedInvalidReference = false;
@@ -900,8 +1001,25 @@ test("worker result contract failures are fed back before the next attempt", asy
       if (request.purpose === "execute_task" && request.taskId === "T3" && !injectedInvalidReference) {
         injectedInvalidReference = true;
         const result = await demoHandler(request) as AgentResult;
+        result.claims.push({
+          ...structuredClone(result.claims[0]!),
+          statement: `${result.claims[0]!.statement} 두 번째`,
+        });
         result.claims[0]!.evidenceRefs = [{ kind: "evidence", ordinal: 999 }];
+        result.claims[1]!.evidenceRefs = [{ kind: "check", ordinal: 999 }];
         return result;
+      }
+      if (request.purpose === "repair_task_result") {
+        return {
+          taskId: "T3",
+          repairs: [{
+            claimIndex: 0,
+            evidenceRefs: [{ kind: "evidence", ordinal: 0 }, { kind: "check", ordinal: 0 }],
+          }, {
+            claimIndex: 1,
+            evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
+          }],
+        };
       }
       return demoHandler(request);
     });
@@ -916,17 +1034,78 @@ test("worker result contract failures are fed back before the next attempt", asy
     }).start("worker result contract feedback");
 
     assert.equal(state.status, "completed", state.error);
-    assert.equal(state.tasks.T3?.attempts, 2);
+    assert.equal(state.tasks.T3?.attempts, 1);
     const workerCalls = backend.calls.filter((call) => call.purpose === "execute_task" && call.taskId === "T3");
-    assert.equal(workerCalls.length, 2);
-    const second = workerCalls[1]!;
-    const rework = (second.data as {
-      reworkContext?: { feedback?: string[] };
-    }).reworkContext;
-    assert.ok(rework?.feedback?.some((item) =>
-      item.includes("HOST RESULT CONTRACT: Claim 0 for T3 has invalid evidence references"),
+    assert.equal(workerCalls.length, 1);
+    const repairCalls = backend.calls.filter((call) => call.purpose === "repair_task_result");
+    assert.equal(repairCalls.length, 1);
+    const repair = repairCalls[0]!;
+    assert.match(repair.prompt, /Claim 0 for T3 has invalid evidence references/);
+    assert.match(repair.prompt, /invalid claim index: 0, 1/);
+    assert.equal(repair.taskId, undefined);
+    assert.equal(repair.workOrderId, undefined);
+    assert.equal(repair.roleContract, undefined);
+    assert.equal(repair.effectiveToolPolicy, undefined);
+    assert.equal(repair.hostToolSession, undefined);
+    assert.deepEqual(state.tasks.T3?.result?.claims[0]?.evidenceRefs, [
+      { kind: "evidence", ordinal: 0 },
+      { kind: "check", ordinal: 0 },
+    ]);
+    assert.deepEqual(state.tasks.T3?.result?.claims[1]?.evidenceRefs, [
+      { kind: "evidence", ordinal: 0 },
+    ]);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("incomplete evidence-reference repair is rejected before a clean task retry", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-result-contract-incomplete-repair-"));
+  try {
+    let injectedInvalidReferences = false;
+    const backend = new MockAgentBackend(async (request) => {
+      if (request.purpose === "execute_task" && request.taskId === "T3" && !injectedInvalidReferences) {
+        injectedInvalidReferences = true;
+        const result = await demoHandler(request) as AgentResult;
+        result.claims.push({
+          ...structuredClone(result.claims[0]!),
+          statement: `${result.claims[0]!.statement} 두 번째`,
+        });
+        result.claims[0]!.evidenceRefs = [{ kind: "evidence", ordinal: 999 }];
+        result.claims[1]!.evidenceRefs = [{ kind: "check", ordinal: 999 }];
+        return result;
+      }
+      if (request.purpose === "repair_task_result") {
+        return {
+          taskId: "T3",
+          repairs: [{
+            claimIndex: 0,
+            evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
+          }],
+        };
+      }
+      return demoHandler(request);
+    });
+    const store = await createdRunStore(workspace, ".state", "run-incomplete-reference-repair");
+    const cfg = config();
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+      sourceIdentity: "build:test-incomplete-reference-repair",
+    }).start("incomplete evidence reference repair");
+
+    assert.equal(state.status, "completed", state.error);
+    assert.equal(state.tasks.T3?.attempts, 2);
+    assert.equal(
+      backend.calls.filter((call) => call.purpose === "execute_task" && call.taskId === "T3").length,
+      2,
+    );
+    assert.equal(backend.calls.filter((call) => call.purpose === "repair_task_result").length, 1);
+    assert.ok(state.tasks.T3?.feedback.some((item) =>
+      item.includes("must cover exactly invalid claims: 0, 1"),
     ));
-    assert.match(second.prompt, /HOST RESULT CONTRACT: Claim 0 for T3 has invalid evidence references/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1011,7 +1190,7 @@ test("team synthesis releases a ready parent without waiting for a slow sibling 
   }
 });
 
-test("missing accepted work prevents false final requirement coverage", async () => {
+test("missing accepted work produces partial output without false requirement coverage", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-manager-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1047,12 +1226,17 @@ test("missing accepted work prevents false final requirement coverage", async ()
       sourceIdentity: "build:test-manager-negative-trace",
     });
     const state = await orchestrator.start("manager gate goal");
-    assert.equal(state.status, "failed");
+    assert.equal(state.status, "partial", state.error);
     assert.equal(state.tasks.T1?.status, "failed");
     assert.equal(state.tasks.T2?.status, "accepted");
     assert.equal(state.tasks.T3?.status, "blocked");
-    assert.equal(state.final, undefined);
-    assert.match(state.error ?? "", /Final coverage gate failed/);
+    assert.ok(state.final);
+    const uncovered = state.final.requirementsCoverage.filter((coverage) => !coverage.covered);
+    assert.ok(uncovered.length > 0);
+    assert.ok(uncovered.every((coverage) =>
+      coverage.supportingClaimIds.length === 0 && coverage.supportingEvidenceIds.length === 0,
+    ));
+    assert.match(state.final.answer, /BLOCKED — this is a partial evidence report/);
     const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
       .map((line) => JSON.parse(line) as { type: string; taskId?: string; message?: string });
     assert.equal(events.filter((event) => event.type === "task_rework" && event.taskId === "T1").length, 1);
@@ -1120,7 +1304,7 @@ test("zero accepted tasks surface the causal root failures instead of a generic 
   }
 });
 
-test("deterministic synthesis replaces untrusted reducer unions without a repair turn", async () => {
+test("deterministic synthesis replaces untrusted multi-packet reducer unions without a repair turn", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-repair-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1134,7 +1318,7 @@ test("deterministic synthesis replaces untrusted reducer unions without a repair
           attempt: number;
           team: { id: string };
         };
-        if (data.team.id === "TEAM-RISK" && data.attempt === 0) {
+        if (data.team.id === "TEAM-ROOT" && data.attempt === 0) {
           const packet = await demoHandler(request) as { sourceTaskIds: string[] };
           packet.sourceTaskIds = [...packet.sourceTaskIds, packet.sourceTaskIds[0]!];
           return packet;
@@ -1153,7 +1337,7 @@ test("deterministic synthesis replaces untrusted reducer unions without a repair
       backend.calls.filter(
         (call) =>
           call.purpose === "team_synthesis" &&
-          (call.data as { team: { id: string } }).team.id === "TEAM-RISK",
+          (call.data as { team: { id: string } }).team.id === "TEAM-ROOT",
       ).length,
       1,
     );
@@ -1162,13 +1346,13 @@ test("deterministic synthesis replaces untrusted reducer unions without a repair
   }
 });
 
-test("deterministic synthesis removes an invented reducer claim", async () => {
+test("deterministic synthesis removes an invented multi-packet reducer claim", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-invented-reducer-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
       if (
         request.purpose === "team_synthesis" &&
-        (request.data as { team: { id: string }; attempt: number }).team.id === "TEAM-RISK" &&
+        (request.data as { team: { id: string }; attempt: number }).team.id === "TEAM-ROOT" &&
         (request.data as { attempt: number }).attempt === 0
       ) {
         const original = await demoHandler(request);
@@ -1194,8 +1378,18 @@ test("deterministic synthesis removes an invented reducer claim", async () => {
     assert.equal(state.status, "completed", state.error);
     assert.equal(backend.calls.filter((call) =>
       call.purpose === "team_synthesis" &&
-      (call.data as { team: { id: string } }).team.id === "TEAM-RISK",
+      (call.data as { team: { id: string } }).team.id === "TEAM-ROOT",
     ).length, 1);
+    assert.equal(
+      JSON.stringify({
+        supportedClaims: state.final?.supportedClaims,
+        answer: state.final?.answer,
+        conflicts: state.final?.conflicts,
+        caveats: state.final?.caveats,
+        nextActions: state.final?.nextActions,
+      }).includes("invented reducer claim"),
+      false,
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1207,7 +1401,7 @@ test("a reducer failure falls back to an immutable deterministic team packet", a
     const backend = new MockAgentBackend(async (request) => {
       if (
         request.purpose === "team_synthesis" &&
-        (request.data as { team: { id: string } }).team.id === "TEAM-RISK"
+        (request.data as { team: { id: string } }).team.id === "TEAM-ROOT"
       ) {
         throw new Error("reducer unavailable after accepted leaf work");
       }
@@ -1223,8 +1417,8 @@ test("a reducer failure falls back to an immutable deterministic team packet", a
     }).start("deterministic reducer fallback");
 
     assert.equal(state.status, "completed", state.error);
-    assert.equal(state.teams["TEAM-RISK"]?.status, "accepted");
-    assert.deepEqual(state.teams["TEAM-RISK"]?.packet?.sourceTaskIds, ["T2"]);
+    assert.equal(state.teams["TEAM-ROOT"]?.status, "accepted");
+    assert.deepEqual(state.teams["TEAM-ROOT"]?.packet?.sourceTaskIds, ["T1", "T2", "T3"]);
     const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
       .map((line) => JSON.parse(line) as { type: string; status?: string });
     assert.ok(events.some((event) =>
@@ -1234,7 +1428,7 @@ test("a reducer failure falls back to an immutable deterministic team packet", a
   }
 });
 
-test("final gate canonicalizes duplicate, uncovered, unexplained, and untraced model coverage", async () => {
+test("host-canonical final derives complete coverage without a redundant judge call", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-final-coverage-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1269,6 +1463,7 @@ test("final gate canonicalizes duplicate, uncovered, unexplained, and untraced m
     const state = await orchestrator.start("strict final coverage");
 
     assert.equal(state.status, "completed");
+    assert.equal(backend.calls.filter((call) => call.purpose === "final").length, 0);
     assert.equal(backend.calls.filter((call) => call.purpose === "final_repair").length, 0);
     assert.ok(state.final?.requirementsCoverage.every((item) =>
       item.covered && item.supportingClaimIds.length > 0 && item.supportingEvidenceIds.length > 0,
@@ -1278,7 +1473,7 @@ test("final gate canonicalizes duplicate, uncovered, unexplained, and untraced m
   }
 });
 
-test("final gate discards invented claims and canonicalizes requirement traces", async () => {
+test("host-canonical final binds exact claims and requirement traces without a judge call", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-final-semantic-trace-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1315,13 +1510,14 @@ test("final gate discards invented claims and canonicalizes requirement traces",
     const state = await orchestrator.start("strict semantic trace");
 
     assert.equal(state.status, "completed", state.error);
+    assert.equal(backend.calls.filter((call) => call.purpose === "final").length, 0);
     assert.equal(backend.calls.filter((call) => call.purpose === "final_repair").length, 0);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
-test("valid claim IDs cannot smuggle invented free-form prose into the final output", async () => {
+test("host-canonical final cannot contain untrusted judge prose", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-final-prose-render-"));
   const invented = "INVENTED-PROSE-MUST-NOT-SURVIVE";
   try {
@@ -1350,6 +1546,7 @@ test("valid claim IDs cannot smuggle invented free-form prose into the final out
     const state = await orchestrator.start("deterministic final prose");
 
     assert.equal(state.status, "completed", state.error);
+    assert.equal(backend.calls.filter((call) => call.purpose === "final").length, 0);
     assert.equal(backend.calls.filter((call) => call.purpose === "final_repair").length, 0);
     assert.equal(JSON.stringify({
       executiveSummary: state.final?.executiveSummary,
@@ -1383,7 +1580,7 @@ test("trusted leaf gaps and recommendations survive while invented reducer prose
       }
       if (
         request.purpose === "team_synthesis" &&
-        (request.data as { team: { id: string }; attempt: number }).team.id === "TEAM-INTEL" &&
+        (request.data as { team: { id: string }; attempt: number }).team.id === "TEAM-ROOT" &&
         (request.data as { attempt: number }).attempt === 0
       ) {
         const packet = structuredClone(await demoHandler(request)) as {
@@ -1407,7 +1604,7 @@ test("trusted leaf gaps and recommendations survive while invented reducer prose
     assert.equal(state.status, "completed", state.error);
     assert.equal(backend.calls.filter((call) =>
       call.purpose === "team_synthesis" &&
-      (call.data as { team: { id: string } }).team.id === "TEAM-INTEL",
+      (call.data as { team: { id: string } }).team.id === "TEAM-ROOT",
     ).length, 1);
     assert.ok(state.final?.caveats.includes(leafGap));
     assert.ok(state.final?.nextActions.includes(leafAction));
@@ -1419,7 +1616,7 @@ test("trusted leaf gaps and recommendations survive while invented reducer prose
   }
 });
 
-test("critic rejection deterministically blocks completion", async () => {
+test("critic rejection produces a verified partial report without release approval", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-critic-contract-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1440,9 +1637,13 @@ test("critic rejection deterministically blocks completion", async () => {
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("critic resolution contract");
 
-    assert.equal(state.status, "failed");
-    assert.equal(state.final, undefined);
-    assert.match(state.error ?? "", /Final critic did not accept/);
+    assert.equal(state.status, "partial", state.error);
+    assert.equal(state.final?.criticResolution.verdict, "reject");
+    assert.ok(state.final?.criticResolution.issueResolutions.length);
+    assert.ok(state.final?.criticResolution.issueResolutions.every((item) =>
+      !item.resolved && item.supportingClaimIds.length === 0 && item.supportingEvidenceIds.length === 0,
+    ));
+    assert.match(state.final?.answer ?? "", /BLOCKED — this is a partial evidence report/);
     assert.equal(
       backend.calls.filter((call) => ["final", "final_repair"].includes(call.purpose)).length,
       0,
@@ -1452,7 +1653,7 @@ test("critic rejection deterministically blocks completion", async () => {
   }
 });
 
-test("repairable final critic issues fail closed before the executive judge", async () => {
+test("repairable final critic issues remain unresolved in a partial report", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-critic-revise-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1473,9 +1674,11 @@ test("repairable final critic issues fail closed before the executive judge", as
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("repairable critic issue");
 
-    assert.equal(state.status, "failed");
-    assert.equal(state.final, undefined);
-    assert.match(state.error ?? "", /Final critic did not accept/);
+    assert.equal(state.status, "partial", state.error);
+    assert.equal(state.final?.criticResolution.verdict, "revise");
+    assert.ok(state.final?.criticResolution.issueResolutions.some((item) =>
+      item.issue === "mark the final recommendation as conditional" && !item.resolved,
+    ));
     assert.equal(
       backend.calls.filter((call) => ["final", "final_repair"].includes(call.purpose)).length,
       0,
@@ -1506,9 +1709,14 @@ test("unresolved critic issues cannot be relabeled as resolved caveats", async (
     const orchestrator = new SwarmOrchestrator({ gateway, store, config: cfg, workspace });
     const state = await orchestrator.start("unresolved critic issue");
 
-    assert.equal(state.status, "failed");
-    assert.equal(state.final, undefined);
-    assert.match(state.error ?? "", /material unresolved risk/);
+    assert.equal(state.status, "partial", state.error);
+    const resolution = state.final?.criticResolution.issueResolutions.find((item) =>
+      item.issue === "material unresolved risk");
+    assert.ok(resolution);
+    assert.equal(resolution.resolved, false);
+    assert.deepEqual(resolution.supportingClaimIds, []);
+    assert.deepEqual(resolution.supportingEvidenceIds, []);
+    assert.match(state.final?.caveats.join("\n") ?? "", /material unresolved risk/);
     assert.equal(
       backend.calls.filter((call) => ["final", "final_repair"].includes(call.purpose)).length,
       0,

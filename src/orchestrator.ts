@@ -9,7 +9,6 @@ import {
   teamRecordsFromPlan,
 } from "./dag.js";
 import {
-  FINAL_SCHEMA,
   MISSION_PREFLIGHT_INPUT_SCHEMA,
   PLAN_SCHEMA,
   RESULT_SCHEMA,
@@ -27,7 +26,6 @@ import {
   architectPrompt,
   corporatePrompt,
   finalCriticPrompt,
-  finalPrompt,
   managerPrompt,
   missionPreflightCorrectionPrompt,
   missionPreflightPrompt,
@@ -228,6 +226,54 @@ export class PromptAssemblyBudgetExceededError extends Error {
     this.name = "PromptAssemblyBudgetExceededError";
   }
 }
+
+interface EvidenceReferenceRepair {
+  taskId: string;
+  repairs: Array<{
+    claimIndex: number;
+    evidenceRefs: Array<{ kind: "evidence" | "check"; ordinal: number }>;
+  }>;
+}
+
+interface FinalDecision {
+  report: FinalReport;
+  releaseApproved: boolean;
+  blockers: string[];
+}
+
+const EVIDENCE_REFERENCE_REPAIR_SCHEMA: JsonValue = {
+  type: "object",
+  additionalProperties: false,
+  required: ["taskId", "repairs"],
+  properties: {
+    taskId: { type: "string" },
+    repairs: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["claimIndex", "evidenceRefs"],
+        properties: {
+          claimIndex: { type: "integer", minimum: 0 },
+          evidenceRefs: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["kind", "ordinal"],
+              properties: {
+                kind: { type: "string", enum: ["evidence", "check"] },
+                ordinal: { type: "integer", minimum: 0 },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
 
 export class RuntimeCapabilityMismatchError extends Error {
   readonly code = "RUNTIME_CAPABILITY_MISMATCH" as const;
@@ -488,6 +534,16 @@ export class SwarmOrchestrator {
     return structuredClone(this.state);
   }
 
+  /** Persist calls that completed after the last pipeline commit, such as detached Shadow observations. */
+  async flushMetrics(): Promise<RunState | undefined> {
+    if (!this.state) return undefined;
+    const metrics = this.options.gateway.metrics();
+    if (!isDeepStrictEqual(this.state.metrics, metrics)) {
+      await this.commit(() => undefined);
+    }
+    return this.getState();
+  }
+
   async updateTaskPriority(taskId: string, priority: number): Promise<TaskRecord> {
     let updated: TaskRecord | undefined;
     await this.commit((state) => {
@@ -582,7 +638,7 @@ export class SwarmOrchestrator {
       await this.commit((state) => {
         state.status = "judging";
       });
-      let final = await this.judge(synthesis, signal);
+      let finalDecision = await this.judge(synthesis, signal);
       const allAccepted = Object.values(this.state.tasks).every(
         (task) => task.status === "accepted",
       ) && Object.values(this.state.teams).every((team) => team.status === "accepted");
@@ -590,16 +646,16 @@ export class SwarmOrchestrator {
         await this.options.store.closeDirectiveGate();
         if (await this.reloadDirectives()) {
           await this.options.store.openDirectiveGate();
-          final = await this.judge(synthesis, signal);
+          finalDecision = await this.judge(synthesis, signal);
           continue;
         }
         await this.commit((state) => {
-          state.final = final;
-          state.status = allAccepted ? "completed" : "partial";
+          state.final = finalDecision.report;
+          state.status = allAccepted && finalDecision.releaseApproved ? "completed" : "partial";
         });
         break;
       }
-      await this.options.store.writeFinal(final);
+      await this.options.store.writeFinal(finalDecision.report);
       await this.recordLearningProgress();
       await this.event({ type: "run_completed", status: this.state.status });
       return this.getState();
@@ -1482,8 +1538,13 @@ export class SwarmOrchestrator {
         current.evolution.queueMs = response.queueWaitMs ?? null;
         current.evolution.modelTurns = response.modelTurns ?? null;
       });
-      const result = parseJsonResponse<AgentResult>(response.text);
-      assertResult(result, taskId, task.requirementIds);
+      let result = parseJsonResponse<AgentResult>(response.text);
+      try {
+        assertResult(result, taskId, task.requirementIds);
+      } catch (error) {
+        if (!isRepairableEvidenceReferenceFailure(error)) throw error;
+        result = await this.repairTaskEvidenceReferences(task, result, error, signal);
+      }
       const artifact = await this.persistTaskResultArtifact(task, result, workOrderRecord);
       const envelopeFindings = await this.validateEnvelopeArtifact(task, artifact, workOrderRecord);
       const envelopeReceipt = await this.persistGateReceipt(
@@ -1556,6 +1617,78 @@ export class SwarmOrchestrator {
     await this.recordEvolutionTaskAttempt(taskId);
   }
 
+  private async repairTaskEvidenceReferences(
+    task: TaskRecord,
+    original: AgentResult,
+    contractError: unknown,
+    signal?: AbortSignal,
+  ): Promise<AgentResult> {
+    const invalidClaimIndexes = invalidEvidenceReferenceClaimIndexes(original);
+    if (invalidClaimIndexes.length === 0) throw contractError;
+    const prompt = evidenceReferenceRepairPrompt(
+      task,
+      original,
+      invalidClaimIndexes,
+      errorMessage(contractError),
+      this.options.config.maxContextChars,
+    );
+    if (!prompt) throw contractError;
+    try {
+      await this.event({
+        type: "task_result_reference_repair_started",
+        taskId: task.id,
+        corporateRole: task.ownerRole,
+        department: task.department,
+        status: "bounded_schema_repair",
+        message: truncate(errorMessage(contractError), 500),
+      });
+      const response = await this.callAndRemember(
+        {
+          threadKey: `result-reference-repair:${task.id}:${task.attempts}`,
+          role: "worker",
+          corporateRole: task.ownerRole,
+          department: task.department,
+          purpose: "repair_task_result",
+          taskKind: "review",
+          taskRisk: task.risk,
+          schedulerPriority: task.priority,
+          prompt,
+          outputSchema: EVIDENCE_REFERENCE_REPAIR_SCHEMA,
+          reasoningEffort: "low",
+          data: {
+            taskId: task.id,
+            contractError: errorMessage(contractError),
+            claimCount: original.claims.length,
+            evidenceCount: original.evidence.length,
+            checkCount: original.checks.length,
+          },
+        },
+        signal,
+      );
+      const repair = parseJsonResponse<EvidenceReferenceRepair>(response.text);
+      const repaired = applyEvidenceReferenceRepair(
+        original,
+        repair,
+        task.id,
+        invalidClaimIndexes,
+      );
+      assertResult(repaired, task.id, task.requirementIds);
+      await this.event({
+        type: "task_result_reference_repair_completed",
+        taskId: task.id,
+        corporateRole: task.ownerRole,
+        department: task.department,
+        status: "repaired",
+        message: `${repair.repairs.length} claim reference set(s) repaired without re-running task tools`,
+      });
+      return repaired;
+    } catch (repairError) {
+      throw new Error(
+        `${errorMessage(contractError)}; bounded evidence-reference repair failed: ${errorMessage(repairError)}`,
+      );
+    }
+  }
+
   private async validateTask(
     taskId: string,
     leaseId: string,
@@ -1607,7 +1740,7 @@ export class SwarmOrchestrator {
         workOrderId: workOrderRecord.order.id,
         agentSlotId: validationBindings.manager.agentId,
         roleContract: validationBindings.manager,
-        effectiveToolPolicy: effectiveToolPolicy(validationBindings.manager, workOrderRecord.order, "review"),
+        effectiveToolPolicy: effectiveToolPolicy(validationBindings.manager, workOrderRecord.order, "artifact-review"),
         inputArtifactRefs: [toRef(outputArtifact)],
         taskKind: task.kind,
         taskRisk: task.risk,
@@ -1639,6 +1772,7 @@ export class SwarmOrchestrator {
       const validatorSlot = validationBindings.auditors[index];
       if (!validatorSlot) throw new Error(`No registered reviewer slot is bound to ${validatorId}`);
       const auditLens = VALIDATION_LENSES[index % VALIDATION_LENSES.length]!;
+      const workspaceEvidenceAccess = validatorNeedsWorkspaceEvidence(index);
       const response = await this.callAndRemember(
         {
           threadKey: `validator:${taskId}:${task.validationRound}:${validatorId}`,
@@ -1650,7 +1784,11 @@ export class SwarmOrchestrator {
           workOrderId: workOrderRecord.order.id,
           agentSlotId: validatorSlot.agentId,
           roleContract: validatorSlot,
-          effectiveToolPolicy: effectiveToolPolicy(validatorSlot, workOrderRecord.order, "review"),
+          effectiveToolPolicy: effectiveToolPolicy(
+            validatorSlot,
+            workOrderRecord.order,
+            workspaceEvidenceAccess ? "evidence-review" : "artifact-review",
+          ),
           inputArtifactRefs: [toRef(outputArtifact)],
           taskKind: task.kind,
           taskRisk: task.risk,
@@ -1659,7 +1797,14 @@ export class SwarmOrchestrator {
           prompt: truncate(
             corporatePrompt(
               "quality_auditor",
-              validatorPrompt(this.state.goal, task, result, validatorId, auditLens) + oracleReviewContract,
+              validatorPrompt(
+                this.state.goal,
+                task,
+                result,
+                validatorId,
+                auditLens,
+                workspaceEvidenceAccess,
+              ) + oracleReviewContract,
             ),
             this.options.config.maxContextChars,
           ),
@@ -1667,6 +1812,7 @@ export class SwarmOrchestrator {
           reasoningEffort: this.options.config.reasoning.validator,
           data: {
             goal: this.state.goal, task, result, validatorId, auditLens,
+            reviewEvidenceMode: workspaceEvidenceAccess ? "workspace-verified" : "artifact-only",
             oracleSuiteId: oracleSuite.id,
             oracleIds: oracleSuite.oracles.map((oracle) => oracle.id),
           },
@@ -2263,41 +2409,53 @@ export class SwarmOrchestrator {
       });
 
       try {
-        let candidateSummary: string | undefined;
-        try {
-          const response = await this.callAndRemember(
-            {
-              threadKey: `team-lead:${current.id}`,
-              role: "reducer",
-              corporateRole: `project-lead:${current.id}:${current.leadRank}`,
-              department: current.department,
-              purpose: "team_synthesis",
-              taskKind: "synthesize",
-              schedulerPriority: current.priority,
-              specialistHint: "provenance-synthesizer",
-              prompt: truncate(
-                teamCorporatePrompt(current, teamLeadPrompt(current, packets, sources, unsuccessful)),
-                this.options.config.maxContextChars,
-              ),
-              outputSchema: SYNTHESIS_SCHEMA,
-              reasoningEffort: this.options.config.reasoning.reducer,
-              data: { team: current, packets, sourceTaskIds: sources, unsuccessful, attempt: 0 },
-            },
-            signal,
-          );
-          const candidate = parseJsonResponse<SynthesisPacket>(response.text);
-          if (typeof candidate.summary === "string" && candidate.summary.trim().length > 0) {
-            candidateSummary = candidate.summary.trim();
-          }
-        } catch (error) {
-          if (signal?.aborted) throw error;
+        let candidateSummary = packets.length === 1
+          ? deterministicSynthesisSummary(current, packets, unsuccessful)
+          : undefined;
+        if (packets.length === 1) {
           await this.event({
-            type: "team_synthesis_fallback",
+            type: "team_synthesis_elided",
             corporateRole: `project-lead:${current.id}:${current.leadRank}`,
             department: current.department,
-            status: "deterministic_fallback",
-            message: truncate(errorMessage(error), 300),
+            status: "deterministic_single_input",
+            message: `${current.name} · 1 immutable packet · 0 model calls`,
           });
+        } else {
+          try {
+            const response = await this.callAndRemember(
+              {
+                threadKey: `team-lead:${current.id}`,
+                role: "reducer",
+                corporateRole: `project-lead:${current.id}:${current.leadRank}`,
+                department: current.department,
+                purpose: "team_synthesis",
+                taskKind: "synthesize",
+                schedulerPriority: current.priority,
+                specialistHint: "provenance-synthesizer",
+                prompt: truncate(
+                  teamCorporatePrompt(current, teamLeadPrompt(current, packets, sources, unsuccessful)),
+                  this.options.config.maxContextChars,
+                ),
+                outputSchema: SYNTHESIS_SCHEMA,
+                reasoningEffort: this.options.config.reasoning.reducer,
+                data: { team: current, packets, sourceTaskIds: sources, unsuccessful, attempt: 0 },
+              },
+              signal,
+            );
+            const candidate = parseJsonResponse<SynthesisPacket>(response.text);
+            if (typeof candidate.summary === "string" && candidate.summary.trim().length > 0) {
+              candidateSummary = candidate.summary.trim();
+            }
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            await this.event({
+              type: "team_synthesis_fallback",
+              corporateRole: `project-lead:${current.id}:${current.leadRank}`,
+              department: current.department,
+              status: "deterministic_fallback",
+              message: truncate(errorMessage(error), 300),
+            });
+          }
         }
         const packet = deterministicSynthesisPacket(
           packets,
@@ -2425,7 +2583,7 @@ export class SwarmOrchestrator {
     }, null);
   }
 
-  private async judge(root: SynthesisPacket, signal?: AbortSignal): Promise<FinalReport> {
+  private async judge(root: SynthesisPacket, signal?: AbortSignal): Promise<FinalDecision> {
     const plan = this.state.plan!;
     const failedTasks = Object.values(this.state.tasks)
       .filter((task) => task.status !== "accepted")
@@ -2434,95 +2592,70 @@ export class SwarmOrchestrator {
         status: task.status,
         ...(task.error ? { error: task.error } : {}),
       }));
-    await this.reloadDirectives();
     const criticId = "FINAL-CRITIC";
-    const criticResponse = await this.callAndRemember(
-      {
-        threadKey: "critic:final",
-        role: "validator",
-        corporateRole: "quality_auditor",
-        department: "quality",
-        purpose: "critic_review",
-        taskKind: "decision",
-        specialistHint: "failure-mode-critic",
-        prompt: truncate(
-          corporatePrompt(
-            "quality_auditor",
-            finalCriticPrompt(
-              this.state.goal,
-              plan.requirements,
-              root,
-              failedTasks,
-              criticId,
-            ),
-          ),
-          this.options.config.maxContextChars,
-        ),
-        outputSchema: VOTE_SCHEMA,
-        reasoningEffort: this.options.config.reasoning.validator,
-        data: { goal: this.state.goal, plan, root, failedTasks, validatorId: criticId },
-      },
-      signal,
-    );
-    const critic = parseJsonResponse<ValidationVote>(criticResponse.text);
-    assertVote(critic, criticId);
-    const criticIssues = criticMaterialIssues(critic);
-    if (critic.verdict !== "accept" || criticIssues.length > 0) {
-      throw new Error(
-        `Final critic did not accept the verified synthesis: ${criticIssues.join("; ") || critic.verdict}`,
-      );
-    }
-    let prior: FinalReport | undefined;
-    let violations: string[] = [];
-    let attempt = 0;
-    while (attempt <= this.options.config.maxRepairRounds) {
+    let critic: ValidationVote;
+    while (true) {
       await this.reloadDirectives();
-      const response = await this.callAndRemember(
+      const criticResponse = await this.callAndRemember(
         {
-          threadKey: "judge",
-          role: "judge",
-          corporateRole: "executive_judge",
-          department: "executive",
-          purpose: prior ? "final_repair" : "final",
+          threadKey: "critic:final",
+          role: "validator",
+          corporateRole: "quality_auditor",
+          department: "quality",
+          purpose: "critic_review",
           taskKind: "decision",
-          specialistHint: "executive-judge",
+          specialistHint: "failure-mode-critic",
           prompt: truncate(
             corporatePrompt(
-              "executive_judge",
-              finalPrompt(
+              "quality_auditor",
+              finalCriticPrompt(
                 this.state.goal,
                 plan.requirements,
                 root,
                 failedTasks,
-                plan.finalInstructions,
-                critic,
-                prior,
-                violations,
+                criticId,
               ),
             ),
             this.options.config.maxContextChars,
           ),
-          outputSchema: FINAL_SCHEMA,
-          reasoningEffort: this.options.config.reasoning.judge,
-          data: { goal: this.state.goal, plan, root, failedTasks, critic, prior, violations },
+          outputSchema: VOTE_SCHEMA,
+          reasoningEffort: this.options.config.reasoning.validator,
+          data: { goal: this.state.goal, plan, root, failedTasks, validatorId: criticId },
         },
         signal,
       );
-      const parsedReport = parseJsonResponse<FinalReport>(response.text);
-      assertFinal(parsedReport);
-      const report = normalizeFinalStructure(parsedReport, plan, root, critic);
-      violations = finalViolations(report, plan, root, critic);
-      if (await this.reloadDirectives()) {
-        prior = report;
-        continue;
-      }
-      if (violations.length === 0) {
-        return renderVerifiedFinal(report, plan, root, failedTasks, critic);
-      }
-      prior = report;
-      attempt += 1;
+      critic = parseJsonResponse<ValidationVote>(criticResponse.text);
+      assertVote(critic, criticId);
+      if (await this.reloadDirectives() === 0) break;
     }
-    throw new Error(`Final coverage gate failed: ${violations.join("; ")}`);
+    const report = renderVerifiedFinal(
+      normalizeFinalStructure(emptyFinalReport(plan.goal), plan, root, critic),
+      plan,
+      root,
+      failedTasks,
+      critic,
+    );
+    assertFinal(report);
+    const violations = finalIntegrityViolations(report, plan, root, critic);
+    if (violations.length > 0) {
+      throw new Error(`Final integrity gate failed: ${violations.join("; ")}`);
+    }
+    const blockers = finalDecisionBlockers(report);
+    const releaseApproved = blockers.length === 0;
+    await this.event(releaseApproved ? {
+      type: "final_judge_elided",
+      corporateRole: "executive_judge",
+      department: "executive",
+      status: "host_canonical",
+      message: `${report.supportedClaims.length} immutable claims · 0 model calls`,
+    } : {
+      type: "final_decision_blocked",
+      corporateRole: "executive_judge",
+      department: "executive",
+      status: "partial",
+      message: truncate(blockers.join("; "), 1_000),
+    });
+    return { report, releaseApproved, blockers };
   }
 
   private async callAndRemember(request: AgentRequest, signal?: AbortSignal) {
@@ -4106,7 +4239,7 @@ function staffingCapabilityDemand(
     .sort((a, b) => a.capabilityId.localeCompare(b.capabilityId));
 }
 
-function finalViolations(
+function finalIntegrityViolations(
   report: FinalReport,
   plan: SwarmPlan,
   root: SynthesisPacket,
@@ -4124,20 +4257,20 @@ function finalViolations(
   const claimById = new Map(root.claimLineage.map((item) => [item.id, item]));
   const evidenceById = new Map(root.evidenceLineage.map((item) => [item.id, item]));
   for (const coverage of report.requirementsCoverage) {
-    if (!coverage.covered) {
-      violations.push(`requirement ${coverage.requirementId} is not covered`);
-    }
     if (!isMeaningful(coverage.explanation)) {
       violations.push(`requirement ${coverage.requirementId} lacks a meaningful explanation`);
     }
-    if (!validTrace(
-      coverage.requirementId,
-      coverage.supportingClaimIds,
-      coverage.supportingEvidenceIds,
-      claimById,
-      evidenceById,
-    )) {
+    if (coverage.covered && !validTrace(
+        coverage.requirementId,
+        coverage.supportingClaimIds,
+        coverage.supportingEvidenceIds,
+        claimById,
+        evidenceById,
+      )) {
       violations.push(`requirement ${coverage.requirementId} lacks valid claim/evidence traceability`);
+    } else if (!coverage.covered &&
+      (coverage.supportingClaimIds.length > 0 || coverage.supportingEvidenceIds.length > 0)) {
+      violations.push(`uncovered requirement ${coverage.requirementId} must not assert supporting trace IDs`);
     }
   }
 
@@ -4163,21 +4296,30 @@ function finalViolations(
     violations.push("criticResolution is missing or duplicating material issues");
   }
   for (const resolution of report.criticResolution.issueResolutions) {
-    if (!resolution.resolved || !isMeaningful(resolution.explanation)) {
-      violations.push(`critic issue remains unresolved: ${resolution.issue}`);
-      continue;
+    if (resolution.resolved) {
+      violations.push(`critic issue was relabeled as resolved without independent re-review: ${resolution.issue}`);
     }
-    if (!validTrace(
-      undefined,
-      resolution.supportingClaimIds,
-      resolution.supportingEvidenceIds,
-      claimById,
-      evidenceById,
-    )) {
-      violations.push(`critic issue lacks valid claim/evidence resolution trace: ${resolution.issue}`);
+    if (!isMeaningful(resolution.explanation)) {
+      violations.push(`critic issue lacks a meaningful unresolved explanation: ${resolution.issue}`);
+    }
+    if (resolution.supportingClaimIds.length > 0 || resolution.supportingEvidenceIds.length > 0) {
+      violations.push(`unresolved critic issue must not assert resolution trace: ${resolution.issue}`);
     }
   }
   return violations;
+}
+
+function finalDecisionBlockers(report: FinalReport): string[] {
+  return uniqueSorted([
+    ...report.requirementsCoverage
+      .filter((coverage) => !coverage.covered)
+      .map((coverage) => `Uncovered requirement: ${coverage.requirementId}`),
+    ...(report.criticResolution.verdict === "accept"
+      ? []
+      : [`Final critic verdict: ${report.criticResolution.verdict}`]),
+    ...report.criticResolution.issueResolutions.map((resolution) =>
+      `Unresolved final critic issue: ${resolution.issue}`),
+  ]);
 }
 
 function emptyHarnessV2State(
@@ -4427,9 +4569,19 @@ function deploymentToolPolicy(
 function effectiveToolPolicy(
   contract: AgentRoleContract,
   order: WorkOrder,
-  purpose: "execute" | "review",
+  purpose: "execute" | "evidence-review" | "artifact-review",
 ): NormalizedToolPolicy {
   if (purpose === "execute") return assertToolPolicySubset(contract, order.toolPolicy);
+
+  if (purpose === "artifact-review") {
+    return assertToolPolicySubset(contract, {
+      allowedTools: [],
+      network: "off",
+      allowedDomains: [],
+      readScopes: [],
+      writeScopes: [],
+    });
+  }
 
   const roleTools = new Set(contract.tools.allow);
   const allowedTools = order.toolPolicy.allowedTools
@@ -4710,19 +4862,45 @@ function normalizeFinalStructure(
         explanation: supportingClaims.length > 0 && supportingEvidenceIds.length > 0
           ? `Host-bound to ${supportingClaims.length} immutable claim(s) and ${supportingEvidenceIds.length} linked evidence item(s).`
           : "No accepted immutable claim/evidence trace covers this requirement.",
-        supportingClaimIds: supportingClaims.map((claim) => claim.id),
-        supportingEvidenceIds,
+        supportingClaimIds: supportingClaims.length > 0 && supportingEvidenceIds.length > 0
+          ? supportingClaims.map((claim) => claim.id)
+          : [],
+        supportingEvidenceIds: supportingClaims.length > 0 && supportingEvidenceIds.length > 0
+          ? supportingEvidenceIds
+          : [],
       };
     });
+  const materialIssues = criticMaterialIssues(critic);
   return {
     ...report,
     supportedClaims: claims.map((claim) => ({ claimId: claim.id, statement: claim.statement })),
     requirementsCoverage,
     criticResolution: {
       verdict: critic.verdict,
-      issueResolutions: [],
+      issueResolutions: materialIssues.map((issue) => ({
+        issue,
+        resolved: false,
+        explanation: "Independent final critic left this issue unresolved; release authority remains blocked.",
+        supportingClaimIds: [],
+        supportingEvidenceIds: [],
+      })),
     },
     sourceTaskIds: uniqueSorted(root.sourceTaskIds),
+  };
+}
+
+function emptyFinalReport(goal: string): FinalReport {
+  return {
+    goal,
+    executiveSummary: "",
+    answer: "",
+    supportedClaims: [],
+    requirementsCoverage: [],
+    criticResolution: { verdict: "accept", issueResolutions: [] },
+    conflicts: [],
+    caveats: [],
+    nextActions: [],
+    sourceTaskIds: [],
   };
 }
 
@@ -4751,37 +4929,63 @@ function renderVerifiedFinal(
       ...coverage,
       supportingClaimIds: uniqueSorted(coverage.supportingClaimIds),
       supportingEvidenceIds: uniqueSorted(coverage.supportingEvidenceIds),
-      explanation: `Verified by ${coverage.supportingClaimIds.length} immutable claim(s) and ${coverage.supportingEvidenceIds.length} linked evidence item(s).`,
+      explanation: coverage.covered
+        ? `Verified by ${coverage.supportingClaimIds.length} immutable claim(s) and ${coverage.supportingEvidenceIds.length} linked evidence item(s).`
+        : "No accepted immutable claim/evidence trace covers this requirement; release remains blocked.",
     }));
   const requirementLines = requirementsCoverage.map((coverage) => {
     const requirement = plan.requirements.find((item) => item.id === coverage.requirementId);
     const statements = coverage.supportingClaimIds
       .map((id) => claimById.get(id)?.statement)
       .filter((item): item is string => Boolean(item));
-    return `- ${coverage.requirementId}: ${requirement?.text ?? "Verified requirement"}\n  - ${statements.join("; ")}`;
+    return `- ${coverage.requirementId}: ${requirement?.text ?? "Verified requirement"}\n  - ${
+      statements.length > 0 ? statements.join("; ") : "No verified supporting claim."
+    }`;
   });
   const failedTaskCaveats = failedTasks
     .slice()
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((task) => `${task.id}: ${task.status}`);
+  const unresolvedIssues = report.criticResolution.issueResolutions.map((item) => item.issue);
+  const uncoveredRequirements = requirementsCoverage
+    .filter((coverage) => !coverage.covered)
+    .map((coverage) => coverage.requirementId);
+  const releaseApproved = critic.verdict === "accept" &&
+    unresolvedIssues.length === 0 && uncoveredRequirements.length === 0;
   return {
     goal: plan.goal,
-    executiveSummary: `${claims.length} immutable leaf claim(s) passed evidence-lineage validation with no unresolved final critic issue.`,
+    executiveSummary: releaseApproved
+      ? `${claims.length} immutable leaf claim(s) passed evidence-lineage validation with no unresolved final critic issue.`
+      : `${claims.length} immutable leaf claim(s) remain available as a verified partial result; release is blocked by ${uncoveredRequirements.length} uncovered requirement(s) and ${unresolvedIssues.length} unresolved final critic issue(s).`,
     answer: [
       "## Verified claims",
-      claimSections.join("\n"),
+      claimSections.join("\n") || "- No accepted immutable claim was produced.",
       "## Requirement coverage",
       requirementLines.join("\n"),
+      "## Release decision",
+      releaseApproved
+        ? "APPROVED — all requirements have immutable claim/evidence traces and the independent final critic accepted the synthesis."
+        : [
+            "BLOCKED — this is a partial evidence report, not release approval.",
+            ...uncoveredRequirements.map((id) => `- Uncovered requirement: ${id}`),
+            ...unresolvedIssues.map((issue) => `- Unresolved final critic issue: ${issue}`),
+          ].join("\n"),
     ].join("\n\n"),
     supportedClaims: claims.map((claim) => ({ claimId: claim.id, statement: claim.statement })),
     requirementsCoverage,
-    criticResolution: { verdict: critic.verdict, issueResolutions: [] },
+    criticResolution: structuredClone(report.criticResolution),
     conflicts: [...root.conflicts],
     caveats: uniqueSorted([
       ...root.gaps,
       ...failedTaskCaveats,
+      ...uncoveredRequirements.map((id) => `Uncovered requirement: ${id}`),
+      ...unresolvedIssues.map((issue) => `Unresolved final critic issue: ${issue}`),
     ]),
-    nextActions: [...root.recommendations],
+    nextActions: uniqueSorted([
+      ...root.recommendations,
+      ...uncoveredRequirements.map((id) => `Produce independently validated evidence for ${id}.`),
+      ...unresolvedIssues.map((issue) => `Resolve and independently re-review: ${issue}`),
+    ]),
     sourceTaskIds: [...root.sourceTaskIds],
   };
 }
@@ -5058,6 +5262,110 @@ function criticMaterialIssues(critic: ValidationVote): string[] {
   ]);
 }
 
+function isRepairableEvidenceReferenceFailure(error: unknown): boolean {
+  return error instanceof Error && /has invalid evidence references/u.test(error.message);
+}
+
+function evidenceReferenceRepairPrompt(
+  task: TaskRecord,
+  result: AgentResult,
+  invalidClaimIndexes: number[],
+  contractError: string,
+  maxCharacters: number,
+): string | undefined {
+  const render = (contentLimit: number): string => {
+    const bounded = (value: string): string => contentLimit > 0
+      ? truncate(value, contentLimit)
+      : "[content omitted; kind and ordinal remain authoritative]";
+    return [
+      "Repair only invalid claims[].evidenceRefs in an already completed worker result.",
+      "Do not redo research, use tools, add claims, alter prose, or change requirement IDs.",
+      `Return exactly one repair for each invalid claim index: ${invalidClaimIndexes.join(", ")}.`,
+      "Return only taskId plus repairs. Use zero-based ordinals from the candidate lists below.",
+      `Host contract error: ${truncate(contractError, 500)}`,
+      JSON.stringify({
+        taskId: task.id,
+        invalidClaims: invalidClaimIndexes.map((claimIndex) => {
+          const claim = result.claims[claimIndex]!;
+          return {
+            claimIndex,
+            statement: bounded(claim.statement),
+            support: bounded(claim.support),
+            requirementIds: claim.requirementIds,
+            currentEvidenceRefs: claim.evidenceRefs,
+          };
+        }),
+        evidenceCandidates: result.evidence.map((content, ordinal) => ({
+          kind: "evidence",
+          ordinal,
+          content: bounded(content),
+        })),
+        checkCandidates: result.checks.map((content, ordinal) => ({
+          kind: "check",
+          ordinal,
+          content: bounded(content),
+        })),
+      }),
+    ].join("\n\n");
+  };
+  for (const contentLimit of [800, 320, 120, 0]) {
+    const prompt = render(contentLimit);
+    if (prompt.length <= maxCharacters) return prompt;
+  }
+  return undefined;
+}
+
+function applyEvidenceReferenceRepair(
+  original: AgentResult,
+  repair: EvidenceReferenceRepair,
+  taskId: string,
+  expectedClaimIndexes: number[],
+): AgentResult {
+  if (!repair || repair.taskId !== taskId || !Array.isArray(repair.repairs) || repair.repairs.length === 0) {
+    throw new Error(`Invalid evidence-reference repair for ${taskId}`);
+  }
+  const repaired = structuredClone(original);
+  const seen = new Set<number>();
+  for (const item of repair.repairs) {
+    if (!Number.isInteger(item.claimIndex) || item.claimIndex < 0 || item.claimIndex >= repaired.claims.length) {
+      throw new Error(`Evidence-reference repair has an invalid claim index for ${taskId}`);
+    }
+    if (seen.has(item.claimIndex)) {
+      throw new Error(`Evidence-reference repair duplicates claim ${item.claimIndex} for ${taskId}`);
+    }
+    seen.add(item.claimIndex);
+    if (!Array.isArray(item.evidenceRefs) || item.evidenceRefs.length === 0) {
+      throw new Error(`Evidence-reference repair leaves claim ${item.claimIndex} unreferenced for ${taskId}`);
+    }
+    repaired.claims[item.claimIndex]!.evidenceRefs = item.evidenceRefs.map((ref) => ({
+      kind: ref.kind,
+      ordinal: ref.ordinal,
+    }));
+  }
+  const expected = [...expectedClaimIndexes].sort((left, right) => left - right);
+  const actual = [...seen].sort((left, right) => left - right);
+  if (actual.length !== expected.length || actual.some((claimIndex, index) => claimIndex !== expected[index])) {
+    throw new Error(
+      `Evidence-reference repair for ${taskId} must cover exactly invalid claims: ${expected.join(", ")}`,
+    );
+  }
+  return repaired;
+}
+
+function invalidEvidenceReferenceClaimIndexes(result: AgentResult): number[] {
+  const invalid: number[] = [];
+  for (const [claimIndex, claim] of result.claims.entries()) {
+    const refs = claim.evidenceRefs.map((ref) => `${ref.kind}:${ref.ordinal}`);
+    if (new Set(refs).size !== refs.length || claim.evidenceRefs.some((ref) =>
+      !Number.isInteger(ref.ordinal) || ref.ordinal < 0 ||
+      ref.ordinal >= (ref.kind === "evidence" ? result.evidence.length : result.checks.length),
+    )) {
+      invalid.push(claimIndex);
+    }
+  }
+  return invalid;
+}
+
 function isExactSortedUnion(actual: string[], expected: string[]): boolean {
   const sortedExpected = uniqueSorted(expected);
   return actual.length === sortedExpected.length &&
@@ -5195,6 +5503,14 @@ function truncateToExactLength(value: string, maxChars: number): string {
   const marker = "\n…[truncated for chairman directives]";
   if (marker.length >= maxChars) return value.slice(0, maxChars);
   return `${value.slice(0, maxChars - marker.length)}${marker}`;
+}
+
+function validatorNeedsWorkspaceEvidence(index: number): boolean {
+  // V1 is the dedicated source/evidence verifier. Requirements coverage is
+  // intentionally artifact-only, while a deciding V3 may reopen evidence when
+  // the initial votes split. This preserves independent source verification
+  // without making every reviewer repeat the worker's workspace reads.
+  return index % VALIDATION_LENSES.length !== 1;
 }
 
 function isCompiledContextPrompt(prompt: string): boolean {

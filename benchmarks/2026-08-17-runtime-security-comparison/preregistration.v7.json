@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "supersedes": "preregistration.v6.json",
+  "reason": "Fixed informational matrix/checklist output false positive after Luna v6 stopped before task execution; frozen mission/rubric/scorer/evidence/config remain unchanged",
+  "createdAt": "2026-08-17T06:44:08.4633763Z",
+  "protocol": "post-improvement-single-pair-diagnostic-v7",
+  "executionOrder": ["gpt-5.6-luna", "gpt-5.6-sol"],
+  "runIds": {
+    "gpt-5.6-luna": "runtime-security-luna-v7-20260817",
+    "gpt-5.6-sol": "runtime-security-sol-v7-20260817"
+  },
+  "qualityRule": {
+    "passScore": 80,
+    "criticalFailuresAllowed": 0,
+    "qualityNonInferiorityPoints": 5,
+    "efficiencyComparedOnlyAfterQualityNonInferiority": true
+  },
+  "budgets": {
+    "maxBackendCallsPerModel": 96,
+    "maxHostToolCallsPerModelTurn": 64,
+    "maxGatewayAttempts": 2,
+    "maxWallMinutesPerModel": 70,
+    "network": false,
+    "workspaceWrites": false
+  },
+  "excludedInfrastructureRun": "runtime-security-luna-v6-20260817",
+  "validBaselinePair": {
+    "gpt-5.6-luna": "runtime-security-luna-v5-20260817",
+    "gpt-5.6-sol": "runtime-security-sol-v5-20260817",
+    "result": "both_failed_with_distinct_contract_boundaries"
+  },
+  "source": {
+    "gitHead": "ef100b819eb7dbe0e6c7f25fb783942c74e43add",
+    "dirtyTrackedDiffSha256": "sha256:32394cb981599d4bd0c3a60e13ba85cef1cbef09cbd57d550c952a7ad9aee9d0",
+    "distCliSha256": "sha256:1ec9ddd7ccba152666fb959020f9a947634abf31e9a39229dee505dfeea4b5b4",
+    "distDagSha256": "sha256:9483b7d5ce2a74f38704fd8960d491c57d38472f9e6c34203e689c2b63103858",
+    "distOrchestratorSha256": "sha256:eb0968d10a957652cd78f775e5967f42182a512c76c52916c83b24b6991785eb",
+    "distAppServerClientSha256": "sha256:fc9e74f067d6c2653afc088ae77a7f2af3bacb76b101e3c3c5acd04bf287942d",
+    "distToolBrokerRuntimeSha256": "sha256:41fedb997da5ee769464ec4d970b94a4071968653ca118845d630975112654c7"
+  },
+  "files": {
+    "mission.v2.txt": "sha256:e92c1a8dd4e1701cd274717c34343c88f23d106a8fe538fe7280790cc544fbb6",
+    "config.luna.json": "sha256:81903348feed0aebdb24fafe998607ea054c8890efa0126423a124ae0c10b0fb",
+    "config.sol.json": "sha256:423f948f459ab1e590539f419b724b11d4c88a1945ca4949debd94d319fd8106",
+    "rubric.json": "sha256:ad6691db6d0b7e46e9d4d58628693adad770761ce9c9fa6b00987ba3b1712967",
+    "score-report.mjs": "sha256:faf94ee81f69f04f210cd34c95a319e2708fd3318faa0d96a564d6746c8ba4d8",
+    "evidence/README.md": "sha256:e27d5fe66f867d2e50194b327e8f66fc53c621b8c024ae5d43809f1e5539c876",
+    "evidence/SECURITY.md": "sha256:9f7818a73a5786f48a2d0faeda43df82b955a1d8bdf789f989aa5c1d20be0cc7",
+    "evidence/HARNESS_V2.ko.md": "sha256:d3ee8300e4e0ad22f1a5adfdb29416c431775b499d0ffb596f6205c849b41837",
+    "evidence/EVOLUTION_HARNESS_V2.ko.md": "sha256:2cb61c668b36d4e3fdb5ca06a1c5e4848510af8e57d714cac2078be0180890c5"
+  },
+  "interpretation": "v7 is a transparent post-v5 engineering follow-up. Do not claim an independent model winner from one pair or hide v5/v6 failures."
+}

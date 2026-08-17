@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
+import { ToolBrokerError } from "../tool-broker/types.js";
 import { errorMessage } from "../util.js";
 
 type RpcId = number | string;
@@ -491,9 +492,12 @@ export class AppServerClient {
           (result) => {
             if (!this.closed && this.child === child) this.write({ id, result });
           },
-          () => {
+          (error) => {
             if (!this.closed && this.child === child) {
-              this.write({ id, error: { code: -32000, message: "Host request rejected" } });
+              const message = error instanceof ToolBrokerError
+                ? `Host request rejected (${error.code})`
+                : "Host request rejected";
+              this.write({ id, error: { code: -32000, message } });
             }
           },
         )

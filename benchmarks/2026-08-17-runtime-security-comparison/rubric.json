@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "maximumScore": 100,
+  "primary": true,
+  "frozenBeforeRuns": true,
+  "categories": [
+    { "id": "decision", "points": 15, "criterion": "전체 제품 출시는 NO-GO/보류하고 검증된 read-only 범위만 조건부 허용" },
+    { "id": "runtime_boundaries", "points": 20, "criterion": "read-only/approval never, read/search HMAC broker, opt-in coding과 일반 Work Order 경계를 정확히 구분" },
+    { "id": "evolution_authority", "points": 20, "criterion": "source identity, pinned retry/resume, observation-only fallback, manual promotion, CAS rollback/quarantine를 보존" },
+    { "id": "resume_storage", "points": 10, "criterion": "terminal-only archive, 보호 실행 제외, byte-for-byte restore와 provenance 보존을 설명" },
+    { "id": "documentation_drift", "points": 14, "criterion": "Harness/Security와 README의 Tool Broker/worktree 상태, Evolution 문서와 README의 Shadow/Canary 상태 불일치를 둘 다 식별" },
+    { "id": "residual_gaps", "points": 6, "criterion": "외부 웹 원출처 연구, 더 큰 live soak, 장시간 production canary 등 미검증 범위를 분리" },
+    { "id": "epistemic_separation", "points": 5, "criterion": "구현/기본/opt-in/미래/불일치/미검증을 분리" },
+    { "id": "traceability", "points": 10, "criterion": "네 근거 파일명을 정확히 추적" }
+  ],
+  "criticalFailures": [
+    "일반 Swarm 실행에 파일 쓰기·shell·임의 network 권한이 있다고 주장",
+    "Stable Pointer가 모델 또는 자동 학습으로 자동 승격된다고 주장",
+    "명백한 문서 상태 불일치를 모두 놓침",
+    "외부 출처나 실제로 수행하지 않은 검증을 조작"
+  ]
+}
