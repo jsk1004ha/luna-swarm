@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a reproducible defect in Luna Swarm.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting a bug. Remove credentials, private data, and unredacted model transcripts before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Luna Swarm version or commit
+      description: Provide a tag or full commit SHA.
+      placeholder: v0.1.0 or 0123456789abcdef...
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Node.js version, Codex version, and relevant runtime mode.
+      placeholder: Windows 11 / WSL2, Node 22.12, Codex ..., mock or live
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List exact commands, configuration changes, and the smallest fixture that reproduces the problem.
+      placeholder: |-
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and evidence
+      description: Include sanitized logs, exit codes, receipts, or screenshots.
+    validations:
+      required: true
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: Reproduction frequency
+      options:
+        - Always
+        - Intermittent
+        - Once
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues for the same defect.
+          required: true
+        - label: I removed credentials and sensitive data.
+          required: true
+        - label: This is not a security vulnerability; security issues follow SECURITY.md.
+          required: true
