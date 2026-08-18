@@ -2,17 +2,41 @@
   "name": "luna-swarm",
   "version": "0.1.0",
   "description": "Adaptive vertical organizations of ChatGPT-authenticated Codex Luna agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jsk1004ha/luna-swarm.git"
+  },
+  "homepage": "https://github.com/jsk1004ha/luna-swarm#readme",
+  "bugs": {
+    "url": "https://github.com/jsk1004ha/luna-swarm/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "codex",
+    "github-actions",
+    "multi-agent-system",
+    "orchestration",
+    "oss-maintenance"
+  ],
   "type": "module",
-  "private": true,
   "workspaces": [
     "ui"
   ],
   "bin": {
-    "luna-swarm": "./dist/src/cli.js"
+    "luna-swarm": "./dist/src/cli.js",
+    "luna-oss-readiness": "./scripts/oss-readiness.mjs"
   },
   "files": [
     "dist/",
     "ui/dist/",
+    "scripts/oss-readiness.mjs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "GOVERNANCE.md",
+    "CODE_OF_CONDUCT.md",
     "DESIGN.md",
     "SECURITY.md",
     "docs/",
@@ -25,12 +49,17 @@
     "dashboard": "tsx src/cli.ts dashboard",
     "dev": "tsx src/cli.ts",
     "dev:ui": "npm run dev --workspace=luna-swarm-ui",
+    "oss-readiness": "node scripts/oss-readiness.mjs --root .",
     "start": "node dist/src/cli.js",
-    "test": "npm run test:server && npm run test:ui",
+    "test": "npm run test:server && npm run test:ui && npm run test:oss",
     "test:server": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
     "test:ui": "npm test --workspace=luna-swarm-ui",
+    "test:oss": "node --test scripts/oss-readiness.test.mjs",
     "check": "tsc -p tsconfig.json --noEmit && npm run check --workspace=luna-swarm-ui",
     "ui": "tsx src/cli.ts ui"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
