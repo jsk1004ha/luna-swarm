@@ -1,11 +1,16 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstat, open, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import { immutable, type Sha256 } from "../domain/canonical.js";
-import { pinAttemptIdentity, type AttemptIdentity, type ExecutionBundle } from "../domain/bundle.js";
+import { pinAttemptIdentity, type AttemptIdentity, type ExecutionBundle, type RunBundlePin } from "../domain/bundle.js";
 import { PairedEvaluationReceiptStore, type PairedEvaluationReceipt } from "../evaluation/receipt.js";
+import { withEvolutionActivationLock } from "./activation-lock.js";
 import { assertNoLinks, ExecutionBundleStore } from "./bundle-store.js";
+import { OrganizationGenomeStore } from "./genome-store.js";
+import { GenomeQuarantineStore } from "./quarantine-store.js";
 
 export interface StablePointer {
   workloadClass: string;
@@ -65,13 +70,20 @@ export class QuarantinedBundleError extends Error {}
 export interface StablePointerStoreOptions {
   bundleStore?: ExecutionBundleStore;
   evaluationStore?: PromotionEvaluationReader;
+  quarantineStore?: PromotionQuarantineReader;
   bootstrapAuthority?: { bundleId: string; bundleHash: Sha256 };
   lockTimeoutMs?: number;
   now?: () => Date;
+  /** Runs inside the global activation lock before a Stable Pointer mutation. */
+  assertPromotionAllowed?: (request: Readonly<PromotionRequest>) => Promise<void>;
 }
 
 export interface PromotionEvaluationReader {
   read(receiptId: string): Promise<Readonly<PairedEvaluationReceipt>>;
+}
+
+export interface PromotionQuarantineReader {
+  assertPinAllowed(input: { genomeId: string; genomeHash: Sha256; workloadClass: string }): Promise<void>;
 }
 
 export class StablePointerStore {
@@ -79,18 +91,25 @@ export class StablePointerStore {
   readonly lockPath: string;
   readonly bundleStore: ExecutionBundleStore;
   readonly evaluationStore: PromotionEvaluationReader;
+  readonly quarantineStore: PromotionQuarantineReader;
   private readonly lockTimeoutMs: number;
   private readonly now: () => Date;
   private readonly bootstrapAuthority: Readonly<{ bundleId: string; bundleHash: Sha256 }> | undefined;
+  private readonly assertPromotionAllowed: ((request: Readonly<PromotionRequest>) => Promise<void>) | undefined;
 
   constructor(readonly workspaceDirectory: string, options: StablePointerStoreOptions = {}) {
     this.bundleStore = options.bundleStore ?? new ExecutionBundleStore(workspaceDirectory);
     this.evaluationStore = options.evaluationStore ?? new PairedEvaluationReceiptStore(workspaceDirectory);
+    this.quarantineStore = options.quarantineStore ?? new GenomeQuarantineStore(
+      workspaceDirectory,
+      new OrganizationGenomeStore(workspaceDirectory, this.bundleStore),
+    );
     this.statePath = join(this.bundleStore.rootDirectory, "stable-pointers.json");
     this.lockPath = join(this.bundleStore.rootDirectory, "stable-pointers.lock");
     this.lockTimeoutMs = options.lockTimeoutMs ?? 5_000;
     this.now = options.now ?? (() => new Date());
     this.bootstrapAuthority = options.bootstrapAuthority ? immutable(options.bootstrapAuthority) : undefined;
+    this.assertPromotionAllowed = options.assertPromotionAllowed;
   }
 
   async get(workloadClass: string): Promise<Readonly<StablePointer> | null> {
@@ -102,7 +121,7 @@ export class StablePointerStore {
     requireWorkload(request.workloadClass);
     requireAuditText(request.actor, "actor");
     requireAuditText(request.reason, "reason");
-    return this.withLock(async () => {
+    return withEvolutionActivationLock(this.bundleStore, () => this.withLock(async () => {
       const state = await this.loadUnlocked();
       const current = state.pointers[request.workloadClass];
       const actualGeneration = current?.generation ?? null;
@@ -111,6 +130,7 @@ export class StablePointerStore {
       );
       const bundle = await this.bundleStore.read(request.bundleId);
       if (!bundle.workloadClasses.includes(request.workloadClass)) throw new Error(`Bundle ${bundle.bundleId} does not support ${request.workloadClass}`);
+      await this.assertBundleGenomeAllowed(bundle, request.workloadClass);
       if (bundle.status === "quarantined" || state.quarantinedBundleIds[bundle.bundleId]) {
         throw new QuarantinedBundleError(`Bundle ${bundle.bundleId} is quarantined and cannot be promoted`);
       }
@@ -129,6 +149,7 @@ export class StablePointerStore {
         }
       } else {
         if (!current) throw new Error("The first workload pointer requires explicit baseline bootstrap authorization");
+        assertCandidatePromotionStatus(bundle);
         if (!request.evaluationReceipt) throw new Error("Manual promotion requires a paired evaluation receipt");
         const receipt = await this.evaluationStore.read(request.evaluationReceipt.receiptId);
         if (receipt.recordHash !== request.evaluationReceipt.contentHash) throw new Error("Paired evaluation receipt hash mismatch");
@@ -142,6 +163,10 @@ export class StablePointerStore {
         }
         evaluationReceiptId = receipt.receiptId;
       }
+      // This callback is assertion-only. It runs after every fallible bundle,
+      // quarantine, and evaluation check but before the pointer mutation while
+      // the shared activation lock excludes rollout/quarantine transitions.
+      await this.assertPromotionAllowed?.(request);
       if (current) (state.history[request.workloadClass] ??= []).push(current);
       const pointer: StablePointer = {
         workloadClass: request.workloadClass,
@@ -164,7 +189,7 @@ export class StablePointerStore {
       });
       await this.write(state);
       return immutable(pointer);
-    });
+    }));
   }
 
   /**
@@ -176,7 +201,7 @@ export class StablePointerStore {
     request: ShippedBaselineUpgradeRequest,
   ): Promise<Readonly<StablePointer>> {
     requireWorkload(request.workloadClass);
-    return this.withLock(async () => {
+    return withEvolutionActivationLock(this.bundleStore, () => this.withLock(async () => {
       const state = await this.loadUnlocked();
       const current = state.pointers[request.workloadClass];
       if (!current || current.generation !== request.expectedGeneration) {
@@ -188,7 +213,6 @@ export class StablePointerStore {
       if (current.bundleId === this.bootstrapAuthority.bundleId && current.bundleHash === this.bootstrapAuthority.bundleHash) {
         return immutable(current);
       }
-
       const currentBundle = await this.bundleStore.read(current.bundleId);
       if (currentBundle.bundleHash !== current.bundleHash) throw new Error("Evolution Stable Pointer hash mismatch");
       const currentAudit = [...state.audit].reverse().find((entry) =>
@@ -216,9 +240,21 @@ export class StablePointerStore {
       if (nextBundle.status !== "stable" || nextBundle.parentBundleIds.length !== 0) {
         throw new Error("Shipped baseline upgrade requires a root bundle with stable status");
       }
+      const currentReleaseEpoch = currentBundle.schemaVersions.shippedBaselineReleaseEpoch ?? 0;
+      const nextReleaseEpoch = nextBundle.schemaVersions.shippedBaselineReleaseEpoch;
+      if (!Number.isSafeInteger(currentReleaseEpoch) || currentReleaseEpoch < 0 ||
+          !Number.isSafeInteger(nextReleaseEpoch) || nextReleaseEpoch! < 1) {
+        throw new Error("Shipped baseline release epoch metadata is invalid");
+      }
+      await assertCleanGitBaselineAdvance(
+        this.bundleStore.workspaceDirectory,
+        currentBundle.sourceCommit,
+        nextBundle.sourceCommit,
+      );
       if (state.quarantinedBundleIds[nextBundle.bundleId]) {
         throw new QuarantinedBundleError(`Bundle ${nextBundle.bundleId} is quarantined and cannot be activated`);
       }
+      await this.assertBundleGenomeAllowed(nextBundle, request.workloadClass);
 
       const activatedAt = request.activatedAt ?? this.now().toISOString();
       const pointer: StablePointer = {
@@ -242,7 +278,7 @@ export class StablePointerStore {
       });
       await this.write(state);
       return immutable(pointer);
-    });
+    }));
   }
 
   async rollback(
@@ -253,7 +289,7 @@ export class StablePointerStore {
     requireWorkload(workloadClass);
     requireAuditText(request.actor, "actor");
     requireAuditText(request.reason, "reason");
-    return this.withLock(async () => {
+    return withEvolutionActivationLock(this.bundleStore, () => this.withLock(async () => {
       const state = await this.loadUnlocked();
       const current = state.pointers[workloadClass];
       if (!current || current.generation !== expectedGeneration) throw new StablePointerConflictError(
@@ -262,6 +298,13 @@ export class StablePointerStore {
       const history = state.history[workloadClass] ?? [];
       const prior = history.pop();
       if (!prior) throw new StablePointerConflictError(`No prior stable bundle exists for ${workloadClass}`);
+      if (state.quarantinedBundleIds[prior.bundleId]) {
+        throw new QuarantinedBundleError(`Rollback target ${prior.bundleId} is quarantined and cannot be activated`);
+      }
+      const priorBundle = await this.bundleStore.read(prior.bundleId);
+      if (priorBundle.bundleHash !== prior.bundleHash) throw new Error("Rollback bundle hash mismatch");
+      assertRunnableBundleStatus(priorBundle);
+      await this.assertBundleGenomeAllowed(priorBundle, workloadClass);
       const activatedAt = request.activatedAt ?? this.now().toISOString();
       state.quarantinedBundleIds[current.bundleId] = { quarantinedAt: activatedAt, reason: request.reason };
       const pointer: StablePointer = {
@@ -284,18 +327,90 @@ export class StablePointerStore {
       });
       await this.write(state);
       return immutable(pointer);
-    });
+    }));
   }
 
   async pinAttempt(
     workloadClass: string,
     input: Omit<AttemptIdentity, "bundleId" | "bundleHash">,
   ): Promise<Readonly<AttemptIdentity>> {
-    const pointer = await this.get(workloadClass);
-    if (!pointer) throw new Error(`No stable bundle exists for ${workloadClass}`);
-    const bundle = await this.bundleStore.read(pointer.bundleId);
-    if (bundle.bundleHash !== pointer.bundleHash) throw new Error("Stable pointer bundle hash mismatch");
-    return pinAttemptIdentity(bundle, input);
+    return withEvolutionActivationLock(this.bundleStore, async () => {
+      const state = await this.load();
+      const pointer = state.pointers[workloadClass];
+      if (!pointer) throw new Error(`No stable bundle exists for ${workloadClass}`);
+      if (state.quarantinedBundleIds[pointer.bundleId]) {
+        throw new QuarantinedBundleError(`Bundle ${pointer.bundleId} is quarantined and cannot be pinned`);
+      }
+      const bundle = await this.bundleStore.read(pointer.bundleId);
+      if (bundle.bundleHash !== pointer.bundleHash) throw new Error("Stable pointer bundle hash mismatch");
+      assertRunnableBundleStatus(bundle);
+      await this.assertBundleGenomeAllowed(bundle, workloadClass);
+      return pinAttemptIdentity(bundle, input);
+    });
+  }
+
+  /** Single authority boundary for a new run's Stable Pointer and quarantine checks. */
+  async pinRunBundle(input: {
+    workloadClass: string;
+    environmentDigest: Sha256;
+    pinnedAt: string;
+  }): Promise<Readonly<{
+    pointer: StablePointer;
+    bundle: ExecutionBundle;
+    pin: RunBundlePin;
+  }>> {
+    requireWorkload(input.workloadClass);
+    if (!/^sha256:[a-f0-9]{64}$/.test(input.environmentDigest)) throw new Error("Run environment digest is invalid");
+    if (!Number.isFinite(Date.parse(input.pinnedAt)) || new Date(input.pinnedAt).toISOString() !== input.pinnedAt) {
+      throw new Error("Run pin timestamp is invalid");
+    }
+    return withEvolutionActivationLock(this.bundleStore, async () => {
+      const state = await this.load();
+      const pointer = state.pointers[input.workloadClass];
+      if (!pointer) throw new Error(`No stable bundle exists for ${input.workloadClass}`);
+      if (state.quarantinedBundleIds[pointer.bundleId]) {
+        throw new QuarantinedBundleError(`Bundle ${pointer.bundleId} is quarantined and cannot be pinned`);
+      }
+      const bundle = await this.bundleStore.read(pointer.bundleId);
+      if (bundle.bundleHash !== pointer.bundleHash) throw new Error("Stable pointer bundle hash mismatch");
+      assertRunnableBundleStatus(bundle);
+      await this.assertBundleGenomeAllowed(bundle, input.workloadClass);
+      return immutable({
+        pointer,
+        bundle,
+        pin: {
+          workloadClass: input.workloadClass,
+          bundleId: bundle.bundleId,
+          bundleHash: bundle.bundleHash,
+          pointerGeneration: pointer.generation,
+          environmentDigest: input.environmentDigest,
+          pinnedAt: input.pinnedAt,
+        },
+      });
+    });
+  }
+
+  /** Revalidates a persisted run pin without requiring it to remain current. */
+  async assertPinnedRunBundleAllowed(input: {
+    workloadClass: string;
+    bundleId: string;
+    bundleHash: Sha256;
+  }): Promise<Readonly<ExecutionBundle>> {
+    requireWorkload(input.workloadClass);
+    return withEvolutionActivationLock(this.bundleStore, async () => {
+      const state = await this.load();
+      if (state.quarantinedBundleIds[input.bundleId]) {
+        throw new QuarantinedBundleError(`Bundle ${input.bundleId} is quarantined and cannot be resumed`);
+      }
+      const bundle = await this.bundleStore.read(input.bundleId);
+      if (bundle.bundleHash !== input.bundleHash) throw new Error("Persisted run Bundle pin hash mismatch");
+      if (!bundle.workloadClasses.includes(input.workloadClass)) {
+        throw new Error(`Persisted Bundle does not support ${input.workloadClass}`);
+      }
+      assertRunnableBundleStatus(bundle);
+      await this.assertBundleGenomeAllowed(bundle, input.workloadClass);
+      return immutable(bundle);
+    });
   }
 
   async isQuarantined(bundleId: string): Promise<boolean> {
@@ -304,6 +419,20 @@ export class StablePointerStore {
 
   async getAudit(): Promise<ReadonlyArray<Readonly<StablePointerAuditEntry>>> {
     return immutable((await this.load()).audit);
+  }
+
+  private async assertBundleGenomeAllowed(bundle: Readonly<ExecutionBundle>, workloadClass: string): Promise<void> {
+    const genomeHash = bundle.componentHashes.genome;
+    // Legacy bundles remain readable for audit, but they are never executable
+    // or activatable without an immutable genome binding.
+    if (genomeHash === undefined || !/^sha256:[a-f0-9]{64}$/.test(genomeHash)) {
+      throw new Error(`Bundle ${bundle.bundleId} is missing a canonical immutable genome hash`);
+    }
+    await this.quarantineStore.assertPinAllowed({
+      genomeId: bundle.genomeId,
+      genomeHash: genomeHash as Sha256,
+      workloadClass,
+    });
   }
 
   private async load(): Promise<PointerState> {
@@ -518,6 +647,59 @@ async function readRegularStateFile(path: string): Promise<string> {
     await delay(Math.min(attempt + 1, 4));
   }
   throw new StablePointerConflictError(`Stable Pointer state could not be read consistently: ${path}`);
+}
+
+const execFileAsync = promisify(execFile);
+
+async function assertCleanGitBaselineAdvance(
+  workspace: string,
+  currentSource: string,
+  nextSource: string,
+): Promise<void> {
+  const current = parseGitSource(currentSource);
+  const next = parseGitSource(nextSource);
+  if (!next || next.kind !== "clean") {
+    throw new Error("Authoritative shipped baseline upgrades require a clean Git source identity");
+  }
+  if (!current) {
+    throw new Error("Non-Git shipped baselines cannot auto-upgrade without signed release lineage");
+  }
+  if (current.kind === "clean" && current.head === next.head) {
+    throw new Error("Shipped baseline source must advance to a strict Git descendant");
+  }
+  try {
+    await execFileAsync("git", ["-C", workspace, "merge-base", "--is-ancestor", current.head, next.head], {
+      windowsHide: true,
+      maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    if (isNodeError(error) && Number((error as NodeJS.ErrnoException & { code?: number }).code) === 1) {
+      throw new Error("Shipped baseline source is not a descendant of the current authoritative Git source");
+    }
+    const exitCode = (error as { code?: unknown }).code;
+    if (exitCode === 1) {
+      throw new Error("Shipped baseline source is not a descendant of the current authoritative Git source");
+    }
+    throw new Error("Unable to verify shipped baseline Git ancestry");
+  }
+}
+
+function parseGitSource(value: string): { head: string; kind: "clean" | "dirty" } | undefined {
+  const match = /^git:([a-f0-9]{40,64}):(clean|dirty)(?::[a-f0-9]{64})?$/.exec(value);
+  if (!match) return undefined;
+  return { head: match[1]!, kind: match[2] as "clean" | "dirty" };
+}
+
+function assertCandidatePromotionStatus(bundle: Readonly<ExecutionBundle>): void {
+  if (!["challenger", "shadow", "canary"].includes(bundle.status)) {
+    throw new Error(`Bundle status ${bundle.status} is not eligible for evaluated Stable promotion`);
+  }
+}
+
+function assertRunnableBundleStatus(bundle: Readonly<ExecutionBundle>): void {
+  if (!["stable", "challenger", "shadow", "canary"].includes(bundle.status)) {
+    throw new Error(`Bundle status ${bundle.status} is not runnable`);
+  }
 }
 
 function isTransientStateReadError(error: unknown): boolean {

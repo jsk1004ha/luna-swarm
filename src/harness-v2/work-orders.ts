@@ -50,6 +50,16 @@ export interface WorkOrderAdapterOptions {
   missionId?: string;
   registry?: OrganizationRegistryV2;
   revision?: number;
+  /** Host pipeline applies an accepted manifest; the model remains read/search-only. */
+  hostAuthorizedWorkspaceChange?: boolean;
+  /** Optional host-owned narrowing for read/search tools during a coding run. */
+  hostReadScopes?: readonly string[];
+  /** Host-owned Web Research Broker is available for this exact task mode. */
+  hostAuthorizedExternalResearch?: boolean;
+  /** Host-owned renderer is available; the model receives no file, command, or raw rendering tool. */
+  hostAuthorizedArtifactProduction?: boolean;
+  /** Exact hostnames enforced by the Web Research Broker. */
+  hostResearchDomains?: readonly string[];
 }
 
 function requireText(value: string, name: string): void {
@@ -155,6 +165,11 @@ function stableIndex(value: string, modulo: number): number {
 }
 
 function headquartersForTask(task: TaskSpec): "command" | "research" | "engineering" | "quality" | "integration" {
+  // Closed execution authority outranks a planner's descriptive department.
+  // This keeps a risk-labelled research task on a role that can actually hold
+  // the host-mediated web-fetch policy without widening a Quality contract.
+  if (task.executionMode === "external-research") return "research";
+  if (task.executionMode === "workspace-change") return "engineering";
   if (task.department === "research") return "research";
   if (task.department === "engineering") return "engineering";
   if (task.department === "quality" || task.department === "risk") return "quality";
@@ -166,11 +181,18 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
   const registry = options.registry ?? organizationRegistryV2();
   const headquartersId = headquartersForTask(task);
   const ownerTeams = [...new Set(registry.agents.filter((agent) => agent.headquartersId === headquartersId).map((agent) => agent.teamId))].sort();
-  const reviewTeams = [...new Set(registry.agents.filter((agent) => agent.headquartersId === "quality").map((agent) => agent.teamId))].sort();
-  const ownerTeam = ownerTeams[stableIndex(task.id, ownerTeams.length)];
-  const independentReviewTeams = reviewTeams.filter((teamId) => teamId !== ownerTeam);
+  const reviewTeams = [...new Set(registry.agents
+    .filter((agent) => agent.headquartersId === "quality" || agent.headquartersId === "integration")
+    .map((agent) => agent.teamId))].sort();
+  const redTeam = reviewTeams.find((teamId) => teamId.endsWith("/team:security-attack"));
+  if (!redTeam) throw new Error("Harness v2 registry has no dedicated security-attack Red Team");
+  const blueOwnerTeams = ownerTeams.filter((teamId) => teamId !== redTeam);
+  const eligibleOwnerTeams = blueOwnerTeams.length > 0 ? blueOwnerTeams : ownerTeams;
+  const ownerTeam = eligibleOwnerTeams[stableIndex(task.id, eligibleOwnerTeams.length)];
+  const independentReviewTeams = reviewTeams.filter((teamId) => teamId !== ownerTeam && teamId !== redTeam);
   const reviewerTeam = independentReviewTeams[stableIndex(`${task.id}:review`, independentReviewTeams.length)];
   if (!ownerTeam || !reviewerTeam) throw new Error("Harness v2 registry has no eligible owner/reviewer teams");
+  const reviewerPool = [redTeam, reviewerTeam];
   // Legacy plans are readable for migration as workspace inspection only.
   // New plans derive authority from a closed host-owned execution mode, never
   // from a free-form or model-under-declared capability array.
@@ -189,8 +211,16 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
       );
     }
   }
+  const hostAuthorizedWorkspaceChange = options.hostAuthorizedWorkspaceChange === true &&
+    executionMode === "workspace-change";
+  const hostAuthorizedExternalResearch = options.hostAuthorizedExternalResearch === true &&
+    executionMode === "external-research";
+  const hostAuthorizedArtifactProduction = options.hostAuthorizedArtifactProduction === true &&
+    executionMode === "artifact-production";
   const unsupported = requiredCapabilities.filter((capability) =>
-    capability === "external-network" || capability === "workspace-write" || capability === "command-execution");
+    (!hostAuthorizedExternalResearch && capability === "external-network") ||
+    (!hostAuthorizedArtifactProduction && capability === "artifact-render") ||
+    (!hostAuthorizedWorkspaceChange && (capability === "workspace-write" || capability === "command-execution")));
   if (unsupported.length > 0) {
     throw new Error(
       `Work order ${task.id} requires unsupported runtime capabilities: ${[...new Set(unsupported)].sort().join(", ")}`,
@@ -199,7 +229,14 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
   const allowedTools = [
     ...(requiredCapabilities.includes("workspace-read") ? ["read"] : []),
     ...(requiredCapabilities.includes("workspace-search") ? ["search"] : []),
+    ...(hostAuthorizedExternalResearch ? ["search-discover", "web-fetch"] : []),
   ];
+  const hostResearchDomains = hostAuthorizedExternalResearch
+    ? [...new Set(options.hostResearchDomains ?? [])].sort()
+    : [];
+  if (hostAuthorizedExternalResearch && hostResearchDomains.length === 0) {
+    throw new Error(`Work order ${task.id} requires a host research domain policy`);
+  }
   const workOrder: WorkOrder = {
     id: task.id,
     revision: options.revision ?? 1,
@@ -209,7 +246,7 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
     constraints: [],
     nonGoals: [],
     ownerTeam,
-    reviewerPool: [reviewerTeam],
+    reviewerPool,
     risk: task.risk === "medium" ? "standard" : task.risk,
     dependencies: [...task.dependencies],
     inputArtifactIds: task.dependencies.map(taskResultArtifactId),
@@ -225,9 +262,11 @@ export function workOrderFromTask(task: TaskSpec, options: WorkOrderAdapterOptio
       // contracts describe the maximum future authority, while each Work Order
       // requests only capabilities the active runtime can actually enforce.
       allowedTools,
-      network: "off",
-      allowedDomains: [],
-      readScopes: allowedTools.length > 0 ? ["workspace/**"] : [],
+      network: hostAuthorizedExternalResearch ? "allowlist" : "off",
+      allowedDomains: hostResearchDomains,
+      readScopes: allowedTools.some((tool) => tool === "read" || tool === "search")
+        ? [...(options.hostReadScopes ?? ["workspace/**"])]
+        : [],
       writeScopes: [],
     },
     maxExecutionAttempts: task.maxAttempts,
@@ -250,11 +289,18 @@ export interface WorkOrderSlotAssignment {
   reviewerAgentIds: string[];
 }
 
-export function assignWorkOrderSlots(order: WorkOrder, registry: OrganizationRegistryV2 = organizationRegistryV2()): WorkOrderSlotAssignment {
+export function assignWorkOrderSlots(
+  order: WorkOrder,
+  registry: OrganizationRegistryV2 = organizationRegistryV2(),
+  reviewerSlotCount = 3,
+): WorkOrderSlotAssignment {
+  if (!Number.isInteger(reviewerSlotCount) || reviewerSlotCount < 1 || reviewerSlotCount > 7) {
+    throw new Error("reviewerSlotCount must be an integer between 1 and 7");
+  }
   const owners = registry.agents.filter((agent) => agent.teamId === order.ownerTeam).sort((left, right) => left.agentId.localeCompare(right.agentId));
   if (owners.length === 0) throw new Error(`No agents belong to owner team ${order.ownerTeam}`);
   const assigned = owners[stableIndex(`${order.id}:${order.revision}`, owners.length)]!;
-  const reviewers = order.reviewerPool.map((teamId) => {
+  const reviewerCandidates = order.reviewerPool.map((teamId) => {
     const candidates = registry.agents
       .filter((agent) =>
         agent.teamId === teamId &&
@@ -262,16 +308,59 @@ export function assignWorkOrderSlots(order: WorkOrder, registry: OrganizationReg
         agent.teamId !== assigned.teamId &&
         (agent.headquartersId === "quality" || agent.headquartersId === "integration"))
       .sort((left, right) => left.agentId.localeCompare(right.agentId));
-    const reviewer = candidates[stableIndex(`${order.id}:${teamId}:review`, candidates.length)];
-    if (!reviewer) throw new Error(`Reviewer team ${teamId} has no independent quality/integration agent`);
-    return reviewer.agentId;
+    if (candidates.length === 0) throw new Error(`Reviewer team ${teamId} has no independent quality/integration agent`);
+    const offset = stableIndex(`${order.id}:${teamId}:review`, candidates.length);
+    return {
+      teamId,
+      candidates: [...candidates.slice(offset), ...candidates.slice(0, offset)],
+    };
   });
+  // Persist one exact bounded quorum for the Work Order. Capacity is a property
+  // of the complete reviewer pool, not of every individual team: a small
+  // Integration team can contribute two independent reviewers while the Red
+  // Team supplies the protected adversarial slot and any remaining capacity.
+  const uniqueReviewerCandidates = new Set(
+    reviewerCandidates.flatMap((entry) => entry.candidates.map((candidate) => candidate.agentId)),
+  );
+  if (uniqueReviewerCandidates.size < reviewerSlotCount) {
+    throw new Error(
+      `Work Order ${order.id} requires ${reviewerSlotCount} independent reviewers but its reviewer pool has ${uniqueReviewerCandidates.size}`,
+    );
+  }
+  const redTeam = reviewerCandidates.find((entry) => entry.teamId.endsWith("/team:security-attack"));
+  const independentTeams = reviewerCandidates.filter((entry) => entry !== redTeam);
+  const reviewers: string[] = [];
+  if (redTeam?.candidates[0]) reviewers.push(redTeam.candidates[0].agentId);
+  for (let index = 0; reviewers.length < reviewerSlotCount; index += 1) {
+    let added = false;
+    for (const entry of independentTeams) {
+      const candidate = entry.candidates[index];
+      if (!candidate || reviewers.includes(candidate.agentId)) continue;
+      reviewers.push(candidate.agentId);
+      added = true;
+      if (reviewers.length === reviewerSlotCount) break;
+    }
+    if (!added) break;
+  }
+  for (const candidate of redTeam?.candidates.slice(1) ?? []) {
+    if (reviewers.length === reviewerSlotCount) break;
+    if (!reviewers.includes(candidate.agentId)) reviewers.push(candidate.agentId);
+  }
+  if (reviewers.length !== reviewerSlotCount) {
+    throw new Error(`Work Order ${order.id} cannot persist its ${reviewerSlotCount}-slot independent reviewer roster`);
+  }
   return { assignedAgentId: assigned.agentId, reviewerAgentIds: [...new Set(reviewers)] };
 }
 
-export function createWorkOrderRecord(order: WorkOrder, state: "BLOCKED" | "READY" = order.dependencies.length > 0 ? "BLOCKED" : "READY", at = new Date().toISOString(), registry: OrganizationRegistryV2 = organizationRegistryV2()): WorkOrderRecordV2 {
+export function createWorkOrderRecord(
+  order: WorkOrder,
+  state: "BLOCKED" | "READY" = order.dependencies.length > 0 ? "BLOCKED" : "READY",
+  at = new Date().toISOString(),
+  registry: OrganizationRegistryV2 = organizationRegistryV2(),
+  reviewerSlotCount = 3,
+): WorkOrderRecordV2 {
   validateWorkOrder(order);
-  const assignment = assignWorkOrderSlots(order, registry);
+  const assignment = assignWorkOrderSlots(order, registry, reviewerSlotCount);
   return {
     order: structuredClone(order),
     state,
@@ -348,6 +437,10 @@ export function transitionWorkOrder(record: WorkOrderRecordV2, nextState: WorkOr
   if (nextState === "REWORK_REQUIRED") {
     next.executionRevision += 1;
     next.validationAttempts = 0;
+  }
+  if (TERMINAL_STATES.has(nextState)) {
+    if (next.lease) next.completedExecution = structuredClone(next.lease);
+    delete next.lease;
   }
   return next;
 }

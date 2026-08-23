@@ -9,6 +9,7 @@ import test from "node:test";
 import { DEFAULT_CONFIG } from "../../src/config.js";
 import { createDemoSnapshot, getDashboardSnapshot } from "../../src/dashboard/data.js";
 import { createDashboardServer } from "../../src/dashboard/server.js";
+import { ImmutableBlackboard } from "../../src/harness-v2/blackboard.js";
 import { companySnapshot } from "../../src/organization.js";
 import type { RunState, TaskRecord, TeamRecord } from "../../src/types.js";
 
@@ -171,7 +172,7 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
         artifactIds: ["artifact-api"], updatedAt: "2026-08-11T00:00:02.000Z",
       },
     },
-    artifactHeads: {},
+    artifactHeads: { "artifact-api": { artifactId: "artifact-api", revision: 2, contentHash: "f".repeat(64) } },
     councils: {
       "council-sealed": {
         agenda: {
@@ -202,7 +203,19 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
         },
       },
     },
-    missionCells: {},
+    missionCells: {
+      "cell-api": {
+        id: "cell-api", missionId: "mission-1", ownerAgentId: "luna-001", workOrderIds: ["task-1"],
+        members: [
+          { agentId: "luna-001", responsibility: "implement", authority: "execute" },
+          { agentId: "luna-105", responsibility: "verify", authority: "verify" },
+          { agentId: "luna-121", responsibility: "integrate", authority: "advise" },
+        ],
+        createdAt: "2026-08-11T00:00:01.000Z", status: "ACTIVE",
+      },
+    },
+    activeAssignments: 1,
+    inflightModelCalls: 2,
     messages: [],
     missionPreflight: {
       schemaVersion: 1, missionId: "mission-1", objective: "검증 가능한 API 구현", assumptions: [], findings: [],
@@ -247,15 +260,15 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
     assert.equal(snapshot.organizationV2?.totalAgents, 128);
     assert.equal(snapshot.logicalAgents.length, 128);
     assert.equal(new Set(snapshot.logicalAgents.map((agent) => agent.name)).size, 128);
-    assert.ok(snapshot.logicalAgents.every((agent) => agent.name === agent.id));
+    assert.ok(snapshot.logicalAgents.every((agent) => /^[가-힣]{3}$/.test(agent.name) && agent.name !== agent.id));
     assert.ok(snapshot.logicalAgents.every((agent) => agent.lineage.map(({ kind }) => kind).join("/") === "headquarters/division/team/cell"));
     const assigned = snapshot.logicalAgents.find((agent) => agent.id === "luna-001");
-    assert.equal(assigned?.name, "luna-001");
+    assert.equal(assigned?.name, "임승현");
     assert.equal(snapshot.agents[0]?.id, "agent-task-1");
     assert.equal(snapshot.agents[0]?.principalAgentId, "luna-001");
-    assert.equal(snapshot.agents[0]?.name, "luna-001");
+    assert.equal(snapshot.agents[0]?.name, assigned?.name);
     assert.equal(snapshot.events[0]?.agentId, "luna-001");
-    assert.equal(snapshot.events[0]?.title, "업무 시작 · luna-001");
+    assert.equal(snapshot.events[0]?.title, `업무 시작 · ${assigned?.name}`);
     assert.equal(assigned?.workOrderId, "task-1");
     assert.equal(assigned?.runtime?.taskStatus, "running");
     assert.equal(snapshot.logicalAgents.find((agent) => agent.id === "luna-105")?.logicalStatus, "reviewing");
@@ -300,6 +313,18 @@ test("real snapshot projects Harness v2 organization, work orders, and council o
       experiments: { preregistered: 1, observing: 0, decided: 0, observations: 0 },
       capsules: { total: 1, candidate: 1, verified: 0, stale: 0, revoked: 0, negative: 0 },
     });
+    assert.deepEqual(snapshot.reportCenter?.staffing && {
+      logical: snapshot.reportCenter.staffing.logical,
+      active: snapshot.reportCenter.staffing.active,
+      inflight: snapshot.reportCenter.staffing.inflight,
+    }, { logical: 128, active: 1, inflight: 2 });
+    assert.equal(snapshot.reportCenter?.missionCells[0]?.id, "cell-api");
+    assert.equal(snapshot.reportCenter?.missionCells[0]?.owner.agentId, "luna-001");
+    assert.equal(snapshot.reportCenter?.missionCells[0]?.owner.displayName, assigned?.name);
+    assert.equal(snapshot.reportCenter?.departmentBoard[0]?.status, "needs-review");
+    assert.equal(snapshot.reportCenter?.evidenceLedger[0]?.revision, 2);
+    assert.equal(snapshot.reportCenter?.meetings.find((meeting) => meeting.id === "council-1")?.minorityCount, 1);
+    assert.doesNotMatch(JSON.stringify(snapshot.reportCenter), /SEALED POSITION MUST NOT LEAK|sealedMemos|"falsification"|chain.of.thought/iu);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -466,7 +491,10 @@ test("real roster keeps task rows unique and surfaces the highest-attention Work
   try {
     const snapshot = await getDashboardSnapshot({ workspace, stateDirectory: ".state", runId });
     assert.equal(new Set(snapshot.agents.map((agent) => agent.id)).size, snapshot.agents.length);
-    assert.deepEqual(snapshot.agents.filter((agent) => agent.taskId).map((agent) => agent.name), ["luna-001", "luna-001", "luna-002", "luna-003"]);
+    const displayNames = new Map(snapshot.logicalAgents.map((agent) => [agent.id, agent.name]));
+    assert.deepEqual(snapshot.agents.filter((agent) => agent.taskId).map((agent) => agent.name), [
+      displayNames.get("luna-001"), displayNames.get("luna-001"), displayNames.get("luna-002"), displayNames.get("luna-003"),
+    ]);
     const principal = snapshot.logicalAgents.find((agent) => agent.id === "luna-001");
     assert.equal(principal?.logicalStatus, "blocked");
     assert.equal(principal?.taskId, "task-2");
@@ -524,7 +552,9 @@ test("events and outputs beyond the 256 visible task rows retain authoritative a
     assert.equal(snapshot.agents.length, 256);
     assert.equal(snapshot.agents.some((agent) => agent.taskId === "task-257"), false);
     assert.equal(snapshot.events[0]?.agentId, "luna-007");
-    assert.equal(snapshot.events[0]?.title, "Task Completed · luna-007");
+    const assignedName = snapshot.logicalAgents.find((agent) => agent.id === "luna-007")?.name;
+    assert.match(assignedName ?? "", /^[가-힣]{3}$/);
+    assert.equal(snapshot.events[0]?.title, `Task Completed · ${assignedName}`);
     assert.equal(snapshot.outputs.find((output) => output.taskId === "task-257")?.agentId, "luna-007");
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -740,6 +770,10 @@ test("events use chronological ordering, stable ids, and preserve operational de
       runId,
       type: "task_started",
       taskId: "task-1",
+      workOrderId: "task-1",
+      councilId: "council-release",
+      messageType: "GATE_RECEIPT",
+      artifactIds: ["artifact-gate-1"],
       message: "시간상 가장 오래됨",
     }),
     JSON.stringify({
@@ -785,6 +819,11 @@ test("events use chronological ordering, stable ids, and preserve operational de
     assert.deepEqual(failed.skillIds, ["adversarial-risk-review", "operational-debugging"]);
     assert.deepEqual(failed.memoryIds, ["exp-a", "exp-b"]);
     assert.equal(failed.learnedExperiences, 12);
+    const linked = first.events[2]!;
+    assert.equal(linked.workOrderId, "task-1");
+    assert.equal(linked.councilId, "council-release");
+    assert.equal(linked.messageType, "GATE_RECEIPT");
+    assert.deepEqual(linked.artifactIds, ["artifact-gate-1"]);
 
     const legacyId = first.events.find((event) => event.message === "같은 시각 먼저 기록")?.id;
     assert.match(legacyId ?? "", /^legacy-[0-9a-f]{24}$/);
@@ -931,7 +970,7 @@ test("real employee identity remains stable when task ordering changes", async (
     );
     assert.equal(reordered.agents.length, 256);
     assert.equal(new Set(reordered.agents.map((agent) => agent.name)).size, 256);
-    assert.ok(reordered.agents.every((agent) => agent.name === agent.id));
+    assert.ok(reordered.agents.every((agent) => /^[가-힣]{3}$/.test(agent.name) && agent.name !== agent.id));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1057,6 +1096,186 @@ test("command-enabled dashboards refuse non-loopback binds", () => {
     }),
     /loopback host/i,
   );
+});
+
+test("artifact-production reports expose receipt-bound files and the UI downloads only the verified CAS bytes", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-artifact-download-"));
+  const runId = "run-artifact-download";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  const bytes = Buffer.from("verified artifact bytes\n", "utf8");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const relativePath = `cas/${hash.slice(0, 2)}/${hash}.pdf`;
+  await mkdir(join(runDirectory, "artifact-files", "cas", hash.slice(0, 2)), { recursive: true });
+  await writeFile(join(runDirectory, "artifact-files", ...relativePath.split("/")), bytes);
+  const state = realState(workspace, runId);
+  const task = state.tasks["task-1"]!;
+  task.status = "accepted";
+  task.executionMode = "artifact-production";
+  task.requiredCapabilities = ["artifact-render"];
+  task.result = {
+    taskId: task.id,
+    summary: "검증된 PDF를 제작했습니다.",
+    claims: [],
+    evidence: ["host renderer receipt"],
+    deliverables: ["report.pdf"],
+    checks: ["render verified"],
+    uncertainties: [],
+    confidence: 0.99,
+  };
+  task.artifactProduction = {
+    schemaVersion: 1,
+    manifestArtifact: { artifactId: "manifest", revision: 1, contentHash: "a".repeat(64) },
+    deliverableArtifacts: [{ artifactId: "deliverable", revision: 1, contentHash: "b".repeat(64) }],
+    validationArtifacts: [{ artifactId: "validation", revision: 1, contentHash: "c".repeat(64) }],
+    files: [{
+      id: `file:${hash}`,
+      format: "pdf",
+      fileName: "report.pdf",
+      mimeType: "application/pdf",
+      bytes: bytes.length,
+      sha256: hash,
+      relativePath,
+    }],
+    manifestHash: "d".repeat(64),
+    receiptHash: "e".repeat(64),
+    integrationHash: "f".repeat(64),
+    integratedAt: "2026-08-18T00:00:00.000Z",
+  };
+  await writeStateEnvelope(runDirectory, state);
+
+  const dashboard = createDashboardServer({ workspace, stateDirectory: ".state", runId, port: 0 });
+  try {
+    const address = await dashboard.listen();
+    const snapshot = await fetch(`${address.url}/api/ui/snapshot?runId=${runId}`).then((response) => response.json()) as {
+      reports: Array<{ taskId?: string; generatedFiles?: Array<{ fileName: string; sha256: string; kind: string }> }>;
+    };
+    const generated = snapshot.reports.find((report) => report.taskId === "task-1")?.generatedFiles;
+    assert.deepEqual(generated, [{
+      id: `output:${hash}:report.pdf`,
+      kind: "output",
+      fileName: "report.pdf",
+      format: "pdf",
+      mimeType: "application/pdf",
+      bytes: bytes.length,
+      sha256: hash,
+    }]);
+
+    const url = `${address.url}/api/ui/artifacts/download?runId=${runId}&sha256=${hash}&kind=output`;
+    const download = await fetch(url);
+    assert.equal(download.status, 200, download.status === 200 ? undefined : await download.text());
+    assert.equal(download.headers.get("content-type"), "application/pdf");
+    assert.match(download.headers.get("content-disposition") ?? "", /attachment; filename="report\.pdf"/u);
+    assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
+
+    const head = await fetch(url, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+    assert.equal(head.headers.get("content-length"), String(bytes.length));
+
+    const unknown = await fetch(`${address.url}/api/ui/artifacts/download?runId=${runId}&sha256=${"0".repeat(64)}&kind=output`);
+    assert.equal(unknown.status, 404);
+    const malformed = await fetch(`${address.url}/api/ui/artifacts/download?runId=${runId}&sha256=..%2Fstate.json&kind=output`);
+    assert.equal(malformed.status, 400);
+    await writeFile(join(runDirectory, "artifact-files", ...relativePath.split("/")), "tampered\n", "utf8");
+    const corrupted = await fetch(url);
+    assert.equal(corrupted.status, 409);
+    assert.deepEqual(await corrupted.json(), { error: "Generated artifact failed integrity verification" });
+  } finally {
+    await dashboard.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("evidence endpoint exposes only exact accepted research lineage and never raw or private artifact content", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-evidence-lineage-"));
+  const runId = "run-evidence-lineage";
+  const runDirectory = join(workspace, ".state", "runs", runId);
+  await mkdir(runDirectory, { recursive: true });
+  const state = realState(workspace, runId);
+  const task = state.tasks["task-1"]!;
+  state.harnessV2 = {
+    orgVersion: "company-os@3", organizationHeadcount: 31, organizationReviewerSlots: 3,
+    workOrders: { [task.id]: dashboardWorkOrder(task, "INTEGRATED", "luna-001") },
+    artifactHeads: {}, councils: {}, missionCells: {}, messages: [],
+  };
+  const order = state.harnessV2!.workOrders[task.id]!;
+  task.status = "accepted";
+  order.state = "INTEGRATED";
+  const hash = (character: string) => `sha256:${character.repeat(64)}`;
+  const content = {
+    schemaVersion: 1,
+    status: "accepted",
+    envelopeHash: hash("1"),
+    candidateSets: [],
+    sources: [{
+      schemaVersion: 1, cellId: "official", lane: "official", candidate: {},
+      snapshot: {
+        schemaVersion: 1, snapshotHash: hash("2"), sourceUrl: "https://official.test/report",
+        finalUrl: "https://official.test/report", redirectChain: [], fetchedAt: "2026-08-23T00:00:00.000Z",
+        status: 200, mimeType: "text/plain", bodyByteLength: 18, contentHash: hash("3"),
+        trust: "untrusted_external_content",
+      },
+      sourceIdentity: { schemaVersion: 1, sourceFamilyId: hash("4"), identityHash: hash("5") },
+      evaluation: {}, receipt: { secret: "HOST RECEIPT MUST NOT LEAK" },
+    }],
+    sourceIsolation: {}, contradictionReport: {},
+    claimGraph: { schemaVersion: 1, graphHash: hash("6"), claims: [{
+      schemaVersion: 1, claimId: "claim-quality", claimText: "Quality reached 94 points", normalizedClaimText: "quality reached 94 points",
+      modality: "fact", status: "supported", assumptions: [], falsifier: "A newer report differs.", claimHash: hash("7"),
+      citations: [{ artifactRef: { artifactId: "citation-1", revision: 1, contentHash: hash("8") },
+        citation: { schemaVersion: 1, snapshotHash: hash("2"), citationHash: hash("8"), spans: [{ startByte: 0, endByte: 18, quoteHash: hash("9") }] },
+        sourceIdentityHash: hash("5") }],
+    }] },
+    citationReplay: [{ citation: { schemaVersion: 1, snapshotHash: hash("2"), citationHash: hash("8"),
+      spans: [{ startByte: 0, endByte: 18, quoteHash: hash("9") }] }, quotes: ["Quality was 94."] }],
+    bodyUtf8: "RAW BODY MUST NOT LEAK",
+    sealedMemos: ["SEALED POSITION MUST NOT LEAK"],
+  };
+  const blackboard = new ImmutableBlackboard(runDirectory, runId);
+  const artifact = await blackboard.put({
+    artifactId: "research-envelope-task-1", kind: "research", verificationStatus: "accepted",
+    createdBy: { agentId: "luna-001", teamId: "team-1", workOrderId: task.id, runId },
+    requirementIds: [...task.requirementIds], inputs: [], tools: ["web-fetch"], commands: [], content,
+  }, null);
+  const ref = { artifactId: artifact.artifactId, revision: artifact.revision, contentHash: artifact.contentHash };
+  task.researchEnvelopeRef = ref;
+  task.hostToolReceiptArtifactIds = ["research-receipt-search", "research-receipt-fetch"];
+  order.artifactIds.push(artifact.artifactId);
+  state.harnessV2!.artifactHeads[artifact.artifactId] = ref;
+  await writeStateEnvelope(runDirectory, state);
+
+  const dashboard = createDashboardServer({ workspace, stateDirectory: ".state", runId, port: 0 });
+  try {
+    const address = await dashboard.listen();
+    const exact = `${address.url}/api/ui/evidence/artifact?runId=${runId}&artifactId=${artifact.artifactId}&revision=1&contentHash=${artifact.contentHash}`;
+    const response = await fetch(exact);
+    assert.equal(response.status, 200, response.status === 200 ? undefined : await response.text());
+    const result = await response.json() as { claims: Array<{ citations: Array<{ spans: Array<{ quote: string }> }> }> };
+    assert.equal(result.claims[0]?.citations[0]?.spans[0]?.quote, "Quality was 94.");
+    assert.doesNotMatch(JSON.stringify(result), /bodyUtf8|RAW BODY|sealedMemos|SEALED POSITION|HOST RECEIPT|chain.of.thought/iu);
+
+    const snapshot = await fetch(`${address.url}/api/ui/snapshot?runId=${runId}`).then((item) => item.json()) as {
+      reportCenter: { evidenceLedger: Array<Record<string, unknown>> };
+    };
+    const ledger = snapshot.reportCenter.evidenceLedger.find((item) => item.artifactId === artifact.artifactId)!;
+    assert.deepEqual(ledger.artifactRef, ref);
+    assert.deepEqual(ledger.hostToolReceiptArtifactIds, [...task.hostToolReceiptArtifactIds].sort());
+    assert.equal(ledger.taskId, task.id);
+    assert.equal(ledger.workOrderId, task.id);
+    assert.equal(ledger.publiclyInspectable, true);
+
+    const mismatchRevision = await fetch(exact.replace("revision=1", "revision=2"));
+    assert.equal(mismatchRevision.status, 409);
+    const mismatchHash = await fetch(exact.replace(artifact.contentHash, "0".repeat(64)));
+    assert.equal(mismatchHash.status, 409);
+    const arbitrary = await fetch(exact.replace(artifact.artifactId, "sealed-council-memo"));
+    assert.equal(arbitrary.status, 404);
+    const traversal = await fetch(exact.replace(artifact.artifactId, "..%2Fstate.json"));
+    assert.equal(traversal.status, 400);
+  } finally {
+    await dashboard.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
 });
 
 function dashboardWorkOrder(

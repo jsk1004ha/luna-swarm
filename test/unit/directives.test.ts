@@ -9,6 +9,7 @@ import {
   demoHandler,
   demoPlan,
 } from "../../src/backend/mock-backend.js";
+import { HARNESS_POLICY_VERSION } from "../../src/capabilities.js";
 import { DEFAULT_CONFIG, validateConfig } from "../../src/config.js";
 import { recordsFromPlan, teamRecordsFromPlan } from "../../src/dag.js";
 import { SwarmOrchestrator } from "../../src/orchestrator.js";
@@ -191,7 +192,6 @@ test("a directive added during an active call affects only later role calls and 
       "execute_task",
       "manager_review",
       "validate_task",
-      "team_synthesis",
       "critic_review",
     ];
     for (const purpose of laterPurposes) {
@@ -201,6 +201,11 @@ test("a directive added during an active call affects only later role calls and 
       assert.ok(calls.every((call) => call.prompt.includes("strictly conforms to the existing JSON schema")));
       assert.ok(calls.every((call) => call.prompt.length <= cfg.maxContextChars));
     }
+    assert.equal(
+      backend.calls.filter((call) => call.purpose === "team_synthesis").length,
+      0,
+      "conflict-free team synthesis remains host-canonical",
+    );
     assert.equal(
       (await events(store)).filter((event) => event.type === "directive_applied").length,
       1,
@@ -238,6 +243,21 @@ test("resume keeps acknowledged directives active without duplicating applied ev
       tasks: recordsFromPlan(plan),
       threadIds: {},
       metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
+      harness: {
+        enabled: cfg.harnessEnabled,
+        learningEnabled: cfg.learningEnabled,
+        catalogSkills: 0,
+        selections: 0,
+        specialistIds: [],
+        skillIds: [],
+        skillUses: 0,
+        memoriesRecalled: 0,
+        learnedExperiences: 0,
+        policyVersion: HARNESS_POLICY_VERSION,
+        skillPortfolios: [],
+        skillPortfolioCount: 0,
+        rawSkillInstructionCharsAvoided: 0,
+      },
     };
     const registry = organizationRegistryV2();
     initial.harnessV2 = {

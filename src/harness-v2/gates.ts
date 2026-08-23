@@ -9,13 +9,22 @@ import type {
   WorkOrder,
 } from "./contracts.js";
 import type { ImmutableBlackboard } from "./blackboard.js";
+import {
+  assessVerificationDiversity,
+  createVerificationExecutionEvidence,
+  type VerificationDiversityArtifactContent,
+} from "./verification-diversity.js";
+import { canonicalSha256 } from "../evolution/domain/canonical.js";
 import { organizationRegistryV2 } from "./organization-registry.js";
 import {
+  validatePersistedOracleObservationReceipt,
+  validatePersistedOracleReceipt,
   validateOracleObservationReceipt,
   validateOracleReceipt,
   type HiddenOracleReveal,
   type OracleObservationReceipt,
   type OracleReceipt,
+  type PersistedOracleSuiteCommitment,
   type OracleSuite,
 } from "./oracle-forge.js";
 
@@ -33,7 +42,9 @@ export interface GateSetEvaluationInput {
   receipts: GateReceiptArtifact[];
   overrides?: CouncilOverride[];
   blackboard?: ImmutableBlackboard;
-  oracle?: { suite: OracleSuite; reveal?: HiddenOracleReveal };
+  oracle?: { suite: OracleSuite; reveal?: HiddenOracleReveal } | { commitment: PersistedOracleSuiteCommitment };
+  /** Historical immutable revisions remain evidence even after a retry advances the current Blackboard heads. */
+  allowHistoricalRevisions?: boolean;
   /** Registry pinned to the run; defaults to the backward-compatible 128-slot roster. */
   registry?: OrganizationRegistryV2;
 }
@@ -148,13 +159,12 @@ export async function evaluateGateSet(input: GateSetEvaluationInput): Promise<Ga
           input.outputArtifacts,
           receipt,
           input.blackboard,
-          input.oracle.suite,
-          input.oracle.reveal,
+          input.oracle,
         );
         blockers.push(...oracleBlockers.map((reason) => `G2: ${reason}`));
       }
     }
-    if (input.blackboard) {
+    if (input.blackboard && !input.allowHistoricalRevisions) {
       if (await input.blackboard.isStale(toRef(receipt))) blockers.push(`${gateId}: receipt is stale`);
       for (const artifact of input.outputArtifacts) {
         if (await input.blackboard.isStale(toRef(artifact))) {
@@ -190,14 +200,16 @@ async function validateG2OracleProvenance(
   outputArtifacts: ArtifactRevision[],
   receipt: GateReceiptArtifact,
   blackboard: ImmutableBlackboard,
-  suite: OracleSuite,
-  reveal?: HiddenOracleReveal,
+  oracle: { suite: OracleSuite; reveal?: HiddenOracleReveal } | { commitment: PersistedOracleSuiteCommitment },
 ): Promise<string[]> {
   const blockers: string[] = [];
   const binding = receipt.content.oracle;
+  const suiteIdentity = "suite" in oracle
+    ? { suiteId: oracle.suite.id, suiteHash: oracle.suite.suiteHash }
+    : { suiteId: oracle.commitment.suiteId, suiteHash: oracle.commitment.suiteHash };
   if (!receipt.content.deterministic) blockers.push("Oracle gate must be deterministic");
   if (!binding) return [...blockers, "Oracle receipt binding is missing"];
-  if (binding.suiteId !== suite.id || binding.suiteHash !== suite.suiteHash) {
+  if (binding.suiteId !== suiteIdentity.suiteId || binding.suiteHash !== suiteIdentity.suiteHash) {
     blockers.push("Oracle suite binding does not match the sealed suite");
   }
   if (!sameRefSet(receipt.inputs, [binding.observationArtifact, binding.receiptArtifact])) {
@@ -229,18 +241,19 @@ async function validateG2OracleProvenance(
       blockers.push("Oracle receipt artifact metadata does not match its gate binding");
     }
     const output = outputArtifacts[0]!;
-    validateOracleObservationReceipt(observationReceipt, suite, {
+    const oracleOutput = {
       artifactId: output.artifactId,
       revision: output.revision,
       contentHash: output.contentHash,
       content: output.content,
-    });
-    validateOracleReceipt(oracleReceipt, suite, {
-      artifactId: output.artifactId,
-      revision: output.revision,
-      contentHash: output.contentHash,
-      content: output.content,
-    }, observationReceipt, reveal);
+    };
+    if ("suite" in oracle) {
+      validateOracleObservationReceipt(observationReceipt, oracle.suite, oracleOutput);
+      validateOracleReceipt(oracleReceipt, oracle.suite, oracleOutput, observationReceipt, oracle.reveal);
+    } else {
+      validatePersistedOracleObservationReceipt(observationReceipt, oracle.commitment, oracleOutput);
+      validatePersistedOracleReceipt(oracleReceipt, oracle.commitment, oracleOutput, observationReceipt);
+    }
     if (!oracleReceipt.passed) blockers.push("one or more required Oracles failed or were not executable");
     if (receipt.content.passed !== oracleReceipt.passed) {
       blockers.push("gate verdict does not match the deterministic Oracle receipt");
@@ -260,11 +273,15 @@ async function validateG3VoteProvenance(
 ): Promise<string[]> {
   const blockers: string[] = [];
   const quorum = receipt.content.quorum;
+  const diversity = receipt.content.diversity;
   if (receipt.content.deterministic) blockers.push("semantic quorum receipt cannot be deterministic");
   if (!quorum) return [...blockers, "semantic quorum metadata is missing"];
   const declaredVoteRefs = [quorum.managerVoteArtifact, ...quorum.blindVoteArtifacts];
-  if (!sameRefSet(receipt.inputs, declaredVoteRefs)) {
-    blockers.push("receipt inputs do not exactly match its declared vote artifacts");
+  const expectedReceiptInputs = diversity
+    ? [...declaredVoteRefs, diversity.assessmentArtifact]
+    : declaredVoteRefs;
+  if (!sameRefSet(receipt.inputs, expectedReceiptInputs)) {
+    blockers.push("receipt inputs do not exactly match its declared vote and diversity artifacts");
   }
   if (new Set(declaredVoteRefs.map(refKey)).size !== declaredVoteRefs.length) {
     blockers.push("vote artifact references must be distinct");
@@ -323,7 +340,11 @@ async function validateG3VoteProvenance(
   }
   const blind = records.filter(({ ref }) => quorum.blindVoteArtifacts.some((item) => sameRef(item, ref)));
   for (const record of blind) {
-    if (record.content.reviewerKind !== "blind-validator" || !/^V[1-9][0-9]*$/.test(record.content.vote.validatorId)) {
+    const isRedTeam = record.content.reviewerKind === "red-team";
+    const validRole = isRedTeam
+      ? record.content.vote.validatorId === "V1" && record.artifact.createdBy.teamId.endsWith("/team:security-attack")
+      : record.content.reviewerKind === "blind-validator" && /^V[2-9][0-9]*$/.test(record.content.vote.validatorId);
+    if (!validRole) {
       blockers.push(`blind vote ${refKey(record.ref)} has an invalid reviewer role or validator ID`);
     }
     if (!workOrder.reviewerPool.includes(record.artifact.createdBy.teamId)) {
@@ -335,11 +356,103 @@ async function validateG3VoteProvenance(
       blockers.push(`blind vote ${refKey(record.ref)} violates reviewer independence/cannotReview boundaries`);
     }
   }
+  const redTeam = blind.filter(({ content }) => content.reviewerKind === "red-team");
+  if (redTeam.length !== 1) blockers.push("semantic quorum requires exactly one dedicated Red Team vote");
   const blindAccepts = blind.filter(({ content }) => content.vote.verdict === "accept").length;
+  let diversityPassed = receipt.content.policyVersion !== "harness-v2-gates@3";
+  if (receipt.content.policyVersion === "harness-v2-gates@3") {
+    if (!diversity) {
+      blockers.push("verification diversity metadata is missing");
+      diversityPassed = false;
+    } else {
+      const diversityResult = await validateVerificationDiversityProvenance(
+        workOrder,
+        outputArtifacts,
+        diversity,
+        records,
+        blackboard,
+      );
+      blockers.push(...diversityResult.blockers);
+      diversityPassed = diversityResult.passed;
+    }
+  }
   const recomputedPassed = Boolean(manager?.content.vote.verdict === "accept") &&
-    blindAccepts >= quorum.blindAcceptThreshold;
+    redTeam[0]?.content.vote.verdict === "accept" &&
+    blindAccepts >= quorum.blindAcceptThreshold &&
+    diversityPassed;
   if (receipt.content.passed !== recomputedPassed) blockers.push("receipt verdict does not match the persisted manager/blind quorum");
   return blockers;
+}
+
+async function validateVerificationDiversityProvenance(
+  workOrder: WorkOrder,
+  outputArtifacts: ArtifactRevision[],
+  binding: NonNullable<GateReceiptContent["diversity"]>,
+  voteRecords: Array<{ ref: ArtifactRef; artifact: ArtifactRevision; content: ValidationVoteArtifactContent }>,
+  blackboard: ImmutableBlackboard,
+): Promise<{ blockers: string[]; passed: boolean }> {
+  const blockers: string[] = [];
+  try {
+    const artifact = await blackboard.read(binding.assessmentArtifact);
+    const content = artifact.content as unknown as VerificationDiversityArtifactContent;
+    const outputRefs = outputArtifacts.map(toRef);
+    if (artifact.kind !== "finding" || artifact.createdBy.agentId !== "system-gate:verification-diversity" ||
+        artifact.createdBy.workOrderId !== workOrder.id) {
+      blockers.push("verification diversity artifact has an invalid producer or kind");
+    }
+    if (!content || content.schemaVersion !== 1 || !sameRefSet([content.reviewedArtifact], outputRefs)) {
+      blockers.push("verification diversity artifact does not bind the submitted output");
+      return { blockers, passed: false };
+    }
+    const expectedInputs = [
+      ...outputRefs,
+      content.bindings.oracleGateArtifact,
+      content.bindings.redTeamVoteArtifact,
+      ...(content.bindings.workspaceVoteArtifact ? [content.bindings.workspaceVoteArtifact] : []),
+    ];
+    if (!sameRefSet(artifact.inputs, expectedInputs)) {
+      blockers.push("verification diversity artifact inputs do not match its declared evidence bindings");
+    }
+    const redVote = voteRecords.find(({ ref }) => sameRef(ref, content.bindings.redTeamVoteArtifact));
+    if (!redVote || redVote.content.reviewerKind !== "red-team") {
+      blockers.push("verification diversity Red Team binding is not a persisted Red Team vote");
+    }
+    const workspaceVoteRef = content.bindings.workspaceVoteArtifact;
+    const workspaceVote = workspaceVoteRef
+      ? voteRecords.find(({ ref }) => sameRef(ref, workspaceVoteRef))
+      : undefined;
+    if (workspaceVoteRef && (!workspaceVote || workspaceVote.content.reviewerKind !== "blind-validator")) {
+      blockers.push("verification diversity workspace binding is not a persisted blind-validator vote");
+    }
+    const oracleGate = await blackboard.read(content.bindings.oracleGateArtifact);
+    const oracleGateContent = oracleGate.content as unknown as GateReceiptContent;
+    if (oracleGate.kind !== "gate-receipt" || oracleGateContent.gateId !== "G2" ||
+        oracleGateContent.workOrderId !== workOrder.id || !sameRefSet(oracleGateContent.inputArtifacts, outputRefs)) {
+      blockers.push("verification diversity Oracle binding is not the exact G2 receipt");
+    }
+    const rebuiltExecutions = content.executions.map((execution) => createVerificationExecutionEvidence(execution));
+    if (rebuiltExecutions.some((execution, index) => execution.executionHash !== content.executions[index]?.executionHash)) {
+      blockers.push("verification diversity execution evidence hash mismatch");
+    }
+    const recomputed = assessVerificationDiversity({
+      risk: workOrder.risk,
+      artifactRevisionHash: canonicalSha256(outputRefs[0]!),
+      executions: content.executions,
+    });
+    if (canonicalSha256(recomputed) !== canonicalSha256(content.assessment) ||
+        recomputed.assessmentHash !== binding.assessmentHash ||
+        !sameStringSet([...recomputed.executionHashes], binding.executionHashes) ||
+        !sameStringSet([...recomputed.requiredMethods], binding.requiredMethods)) {
+      blockers.push("verification diversity assessment does not match its gate binding");
+    }
+    if (!recomputed.passed || artifact.verificationStatus !== "accepted") {
+      blockers.push("required verification diversity did not pass");
+    }
+    return { blockers, passed: blockers.length === 0 && recomputed.passed };
+  } catch (error) {
+    blockers.push(`verification diversity provenance failed: ${error instanceof Error ? error.message : String(error)}`);
+    return { blockers, passed: false };
+  }
 }
 
 function parseVoteArtifact(artifact: ArtifactRevision): ValidationVoteArtifactContent | undefined {
@@ -347,7 +460,7 @@ function parseVoteArtifact(artifact: ArtifactRevision): ValidationVoteArtifactCo
   const vote = value.vote;
   if (!Number.isInteger(value.validationRound) || (value.validationRound ?? 0) < 1 ||
       typeof value.boundAgentId !== "string" || value.boundAgentId.length === 0 ||
-      !["manager", "blind-validator"].includes(value.reviewerKind ?? "") ||
+      !["manager", "blind-validator", "red-team"].includes(value.reviewerKind ?? "") ||
       !value.reviewedArtifact || typeof value.reviewedArtifact.artifactId !== "string" ||
       !vote || typeof vote.validatorId !== "string" ||
       !["accept", "revise", "reject"].includes(vote.verdict ?? "") ||

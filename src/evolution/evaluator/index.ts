@@ -3,3 +3,4 @@ export * from "./process-protocol.js";
 export * from "./process-client.js";
 export * from "./process-child.js";
 export * from "./runner-materialization.js";
+export * from "./execution-receipt-store.js";

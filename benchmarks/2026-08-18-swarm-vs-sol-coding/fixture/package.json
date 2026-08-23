@@ -1,0 +1,11 @@
+{
+  "name": "async-task-pool-benchmark",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/public/*.test.mjs",
+    "check": "node --check src/task-pool.mjs"
+  }
+}
+

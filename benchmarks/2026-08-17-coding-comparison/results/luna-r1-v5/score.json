@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runId": "luna-r1-v5",
+  "score": 100,
+  "criticalPass": true,
+  "gates": {
+    "hiddenPass": true,
+    "focusedPass": true,
+    "typecheckPass": true,
+    "scopePass": true
+  },
+  "candidatePaths": [
+    "src/backend/codex-app-server.ts",
+    "test/fixtures/fake-codex.mjs",
+    "test/unit/app-server.test.ts"
+  ],
+  "diffStat": "17\t7\tsrc/backend/codex-app-server.ts\n36\t0\ttest/fixtures/fake-codex.mjs\n18\t0\ttest/unit/app-server.test.ts",
+  "focusedDurationMs": 22126,
+  "hiddenDurationMs": 2428,
+  "typecheckDurationMs": 9307
+}

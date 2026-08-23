@@ -147,11 +147,14 @@ export class DeploymentRuntimeRouter {
 
     if (active.rollout.state === "shadow") {
       const detached = Promise.resolve()
-        .then(() => this.observeExecution(
-          input,
-          executionContext(active, "shadow", "detached", "read_only_or_isolated", keys.candidate, candidate),
-          true,
-        ))
+        .then(async () => {
+          if (!await this.options.bindings.admitCandidate(active)) return;
+          await this.observeExecution(
+            input,
+            executionContext(active, "shadow", "detached", "read_only_or_isolated", keys.candidate, candidate),
+            true,
+          );
+        })
         .then(() => undefined)
         .catch((error: unknown) => input.onDetachedError?.(error));
       this.track(detached);
@@ -179,6 +182,9 @@ export class DeploymentRuntimeRouter {
       const selectedPin = selection === "canary" ? candidate : champion;
       const normalizedSelection = selection === "canary" ? "candidate" as const : "champion" as const;
       const threadKey = selection === "canary" ? keys.candidate : keys.champion;
+      if (normalizedSelection === "candidate" && !await this.options.bindings.admitCandidate(active)) {
+        return this.executeStableOnly(input, championPin(input.championPin), input.baseThreadKey);
+      }
       await this.options.journal.recordAssignment({
         requestId: input.requestId,
         rolloutId: active.binding.rolloutId,

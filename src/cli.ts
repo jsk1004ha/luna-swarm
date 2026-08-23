@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, open, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -42,7 +43,18 @@ import {
 import { UiRuntimeRegistry, type ManagedRunRuntime } from "./ui-server/runtime-registry.js";
 import { UiObservationCoordinator } from "./ui-server/observation-coordinator.js";
 import { MockUiRuntime } from "./ui-server/mock-runtime.js";
+import {
+  reserveUiStartRequest,
+  uiStartRequestHash,
+  UiRequestConflictError,
+} from "./ui-server/request-ledger.js";
 import type { UiControlCommand, UiControlResult } from "./ui-server/control-schema.js";
+import {
+  activatePreparedUiExecution,
+  prepareUiExecution,
+  UiAutoExecutionError,
+  type PreparedUiExecution,
+} from "./ui-server/auto-execution.js";
 import {
   UiEventHub,
   attachUiEventWebSocketServer,
@@ -51,20 +63,24 @@ import { HARNESS_V2_ORG_VERSION } from "./harness-v2/contracts.js";
 import {
   EVOLUTION_WORKLOAD_CLASSES,
   initializeEvolutionRuntime,
-  resolveLocalSourceIdentity,
+  resolveEvolutionSourceIdentity,
+  SourceIdentityUnavailableError,
   verifyRunnableEvolutionBundle,
   type ExplicitSourceIdentity,
   type EvolutionRuntimeFingerprintInput,
 } from "./evolution/runtime.js";
 import { ExecutionBundleStore } from "./evolution/registry/bundle-store.js";
 import { OrganizationGenomeStore } from "./evolution/registry/genome-store.js";
+import { GenomeQuarantineStore } from "./evolution/registry/quarantine-store.js";
 import { StablePointerStore } from "./evolution/registry/stable-pointer-store.js";
 import { PairedEvaluationReceiptStore } from "./evolution/evaluation/receipt.js";
 import type { TrustedBenchmarkAuthority } from "./evolution/evaluation/quality-receipt.js";
+import type { TrustedProtectedProcessAuthority } from "./evolution/evaluator/index.js";
 import { DecisionTraceStore, ObjectiveOutcomeReceiptStore } from "./evolution/trace/index.js";
 import { FailureCapsuleStore } from "./evolution/failure/index.js";
 import {
   createDeploymentControlPlane,
+  ActiveRolloutBindingStore,
   DeploymentRuntimeRouter,
   loadEd25519OperationsReceiptSigner,
   RolloutStore,
@@ -77,7 +93,33 @@ import {
   type SoakShardStage,
 } from "./soak/index.js";
 import { RunHostToolRuntime } from "./tool-broker/index.js";
+import {
+  RunResearchToolRuntime,
+  RunSearchDiscoveryToolRuntime,
+  createHostControlledLiveSearchDiscoveryProvider,
+} from "./research/index.js";
 import { RunStorageCollisionError, StorageManager } from "./storage/index.js";
+import {
+  loadSwarmCodingPolicy,
+  parseSwarmCodingPolicy,
+  SwarmCodingRuntime,
+  type SwarmCodingPolicy,
+} from "./coding/swarm-runtime.js";
+import { canonicalJson, sha256 } from "./coding/integrity.js";
+import { durableCreateText } from "./evolution/registry/durable-file.js";
+import {
+  VerifiedArtifactCache,
+  type VerifiedArtifactCacheKeyInput,
+} from "./harness-v2/verified-artifact-cache.js";
+import {
+  ARTIFACT_RENDERER_IDENTITY,
+  ARTIFACT_RENDERER_IDENTITY_HASH,
+  ArtifactProductionRuntime,
+  loadArtifactProductionPolicy,
+  parseArtifactProductionPolicy,
+  verifyArtifactProductionPolicyFiles,
+  type ArtifactProductionPolicy,
+} from "./artifact-production/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -92,10 +134,13 @@ async function main(): Promise<void> {
   if (command === "evolve") return evolve(args);
   if (command === "soak") return soak(args);
   if (command === "storage") return storage(args);
+  if (command === "cache") return verifiedCache(args);
   if (command === "status") return status(args);
   if (command === "dashboard") return dashboard(args);
   if (command === "ui") return ui(args);
   if (command === "run") return runNew(args);
+  if (command === "code") return runCode(args);
+  if (command === "artifact") return runArtifact(args);
   if (command === "resume") return resume(args);
   throw new Error(`Unknown command: ${command}`);
 }
@@ -136,8 +181,9 @@ async function ui(args: string[]): Promise<void> {
 
   const startReservedRun = async (
     command: Extract<UiControlCommand, { action: "start" }>,
+    reservedRunId?: string,
   ): Promise<UiControlResult> => {
-    const runId = makeRunId();
+    const runId = reservedRunId ?? makeRunId();
     const maxConcurrency = command.maxConcurrency ?? config.maxConcurrency;
     const runConfig: SwarmConfig = {
       ...config,
@@ -154,9 +200,28 @@ async function ui(args: string[]): Promise<void> {
       }
       throw error;
     }
+    let prepared: Readonly<PreparedUiExecution>;
+    try {
+      prepared = await prepareUiExecution({
+        goal: command.goal,
+        workspace,
+        runId,
+        model: runConfig.model,
+      });
+    } catch (error) {
+      const code = error instanceof UiAutoExecutionError ? error.code : "AUTO_EXECUTION_PREPARE_FAILED";
+      return {
+        accepted: false,
+        runId,
+        code,
+        message: `자연어 실행 경로를 준비하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
     const store = new AtomicRunStore(workspace, runConfig.stateDirectory, runId);
     try {
       await store.create();
+      await persistUiAutoRunMarkers(store, command.goal, runConfig.model, command.mock === true, prepared);
+      await activatePreparedUiExecution(workspace, prepared);
     } catch (error) {
       if (error instanceof RunIdExistsError) {
         return { accepted: false, runId, code: error.code, message: error.message };
@@ -177,6 +242,8 @@ async function ui(args: string[]): Promise<void> {
       config: runConfig,
       store,
       mock: command.mock === true,
+      ...(prepared.codingPolicy ? { codingPolicy: prepared.codingPolicy } : {}),
+      ...(prepared.artifactPolicy ? { artifactPolicy: prepared.artifactPolicy } : {}),
       releaseExecutionLease,
       onRuntimeReady: async (runtime) => {
         const goalSummary = command.goal.length > 240
@@ -188,7 +255,7 @@ async function ui(args: string[]): Promise<void> {
           runId,
           type: "command_start_accepted",
           status: "accepted",
-          message: `운영자가 UI에서 새 실행을 승인했습니다: ${goalSummary}`,
+          message: `운영자가 UI에서 새 실행을 승인했습니다 (${prepared.intent.profile} 자동 분류): ${goalSummary}`,
         });
         printEvent(startEvent);
         registry.register(runtime);
@@ -218,18 +285,168 @@ async function ui(args: string[]): Promise<void> {
         message: `실행을 준비하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
-    return { accepted: true, runId, message: command.mock ? "Mock Luna 실행을 시작했습니다." : "Luna 실행을 시작했습니다." };
+    return {
+      accepted: true,
+      runId,
+      message: command.mock
+        ? "Mock Luna 실행을 시작했습니다."
+        : `Luna 실행을 시작했습니다. 자연어 실행 유형: ${uiExecutionProfileLabel(prepared.intent.profile)}.`,
+    };
   };
   const startRun = (
     command: Extract<UiControlCommand, { action: "start" }>,
-  ): Promise<UiControlResult> => startGate.start(
-    command.requestId,
+  ): Promise<UiControlResult> => {
+    const maxConcurrency = command.maxConcurrency ?? config.maxConcurrency;
+    const requestHash = uiStartRequestHash({
+      goal: command.goal,
+      mock: command.mock === true,
+      maxConcurrency,
+      model: config.model,
+    });
+    const reserve = async (): Promise<UiControlResult> => {
+      let runId: string | undefined;
+      if (command.requestId) {
+        try {
+          const reservation = await reserveUiStartRequest({
+            workspace,
+            requestId: command.requestId,
+            requestHash,
+            proposedRunId: makeRunId(),
+          });
+          runId = reservation.record.runId;
+          if (reservation.replay) {
+            const replayStore = new AtomicRunStore(workspace, config.stateDirectory, runId);
+            try {
+              await access(replayStore.runDirectory);
+              return {
+                accepted: true,
+                runId,
+                code: "REQUEST_REPLAY",
+                message: "동일한 시작 요청의 기존 Luna 실행을 반환했습니다.",
+              };
+            } catch {
+              // A durable reservation without a run directory is a recoverable
+              // pre-start crash; continue with the original runId.
+            }
+          }
+        } catch (error) {
+          if (error instanceof UiRequestConflictError) {
+            return { accepted: false, code: error.code, message: error.message };
+          }
+          throw error;
+        }
+      }
+      return startReservedRun(command, runId);
+    };
+    return startGate.start(
+      command.requestId,
+      () => ({
+        accepted: false,
+        code: "RUN_ALREADY_ACTIVE",
+        message: "이 UI 서버가 이미 실행 하나를 소유하고 있습니다.",
+      }),
+      reserve,
+      requestHash,
+      () => ({
+        accepted: false,
+        code: "IDEMPOTENCY_CONFLICT",
+        message: "같은 requestId가 다른 UI 시작 요청에 이미 사용되었습니다.",
+      }),
+    );
+  };
+
+  const recoverRun = (runId: string): Promise<UiControlResult> => startGate.start(
+    undefined,
     () => ({
       accepted: false,
+      runId,
       code: "RUN_ALREADY_ACTIVE",
       message: "이 UI 서버가 이미 실행 하나를 소유하고 있습니다.",
     }),
-    () => startReservedRun(command),
+    async () => {
+      let restored: Readonly<ResumeContext>;
+      try {
+        restored = await loadResumeContext(workspace, config.stateDirectory, runId);
+      } catch (error) {
+        return {
+          accepted: false,
+          runId,
+          code: "RUN_RECOVERY_REJECTED",
+          message: `실행을 안전하게 복구하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      if (!restored.autoSnapshot) {
+        return {
+          accepted: false,
+          runId,
+          code: "EXTERNAL_READ_ONLY",
+          message: "Web UI 자동 실행 marker가 없는 실행은 이 UI에서 인수할 수 없습니다.",
+        };
+      }
+      if (!await isStaleRun(restored.state, restored.store)) {
+        return {
+          accepted: false,
+          runId,
+          code: "RUN_STILL_ACTIVE",
+          message: "이 실행은 아직 최신 heartbeat를 가지고 있어 인수할 수 없습니다.",
+        };
+      }
+      let releaseExecutionLease: () => Promise<void>;
+      try {
+        releaseExecutionLease = await restored.store.acquireExecutionLease();
+      } catch (error) {
+        if (error instanceof RunExecutionLockedError) {
+          return { accepted: false, runId, code: "RUN_EXECUTION_LOCKED", message: error.message };
+        }
+        throw error;
+      }
+      let resolveReady!: () => void;
+      let rejectReady!: (error: unknown) => void;
+      const ready = new Promise<void>((resolveRuntime, rejectRuntime) => {
+        resolveReady = resolveRuntime;
+        rejectReady = rejectRuntime;
+      });
+      let runtimeRegistered = false;
+      const execution = launch({
+        goal: restored.state.goal,
+        workspace,
+        config: restored.config,
+        store: restored.store,
+        mock: restored.autoSnapshot.mock === true,
+        loaded: restored.state,
+        releaseExecutionLease,
+        ...(restored.codingSnapshot ? { codingPolicy: restored.codingSnapshot.policy, allowPreparedCodingRecovery: true } : {}),
+        ...(restored.artifactSnapshot ? { artifactPolicy: restored.artifactSnapshot.policy } : {}),
+        onRuntimeReady: (runtime) => {
+          registry.register(runtime);
+          runtimeRegistered = true;
+          resolveReady();
+        },
+        onRuntimeDisposed: (runtime) => registry.unregister(runtime.runId, runtime),
+      });
+      activeRun = execution;
+      void execution
+        .catch((error: unknown) => {
+          if (!runtimeRegistered) rejectReady(error);
+          process.stderr.write(`[ui-recover ${runId}] ${error instanceof Error ? error.message : String(error)}\n`);
+        })
+        .finally(() => {
+          if (activeRun === execution) activeRun = null;
+          startGate.release();
+          void observer?.poll().catch(() => undefined);
+        });
+      try {
+        await ready;
+      } catch (error) {
+        return {
+          accepted: false,
+          runId,
+          code: "RUN_RECOVERY_FAILED",
+          message: `실행 복구를 시작하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      return { accepted: true, runId, message: "중단된 Web UI 자동 실행을 immutable marker에서 복구했습니다." };
+    },
   );
 
   const server = createDashboardServer({
@@ -266,6 +483,7 @@ async function ui(args: string[]): Promise<void> {
         return result;
       }
       if (command.action === "start") return startRun(command);
+      if (command.action === "recover") return recoverRun(command.runId);
       return registry.control(command);
     },
   });
@@ -346,6 +564,14 @@ async function dashboard(args: string[]): Promise<void> {
           storageMaintenance: {
             ...DEFAULT_CONFIG.storageMaintenance,
             ...(state.config.storageMaintenance ?? {}),
+          },
+          webResearch: {
+            ...DEFAULT_CONFIG.webResearch,
+            ...(state.config.webResearch ?? {}),
+          },
+          skillPortfolio: {
+            ...DEFAULT_CONFIG.skillPortfolio,
+            ...(state.config.skillPortfolio ?? {}),
           },
           reasoning: {
             ...DEFAULT_CONFIG.reasoning,
@@ -605,23 +831,534 @@ async function runNew(args: string[]): Promise<void> {
   await launch({ goal, workspace, config, store, mock: args.includes("--mock") });
 }
 
+interface CodingRunMarkerV3 {
+  schemaVersion: 3;
+  command: "code";
+  model: "gpt-5.6-luna";
+  policyHash: `sha256:${string}`;
+  strategyHash: `sha256:${string}`;
+  policy: Readonly<SwarmCodingPolicy>;
+}
+
+function codingRunMarker(policy: Readonly<SwarmCodingPolicy>): Readonly<CodingRunMarkerV3> {
+  return Object.freeze({
+    schemaVersion: 3,
+    command: "code",
+    model: "gpt-5.6-luna",
+    policyHash: `sha256:${sha256(canonicalJson(policy))}`,
+    strategyHash: `sha256:${sha256(canonicalJson(policy.strategy))}`,
+    policy,
+  });
+}
+
+interface CodingRunSnapshot {
+  policy: Readonly<SwarmCodingPolicy>;
+  model: "gpt-5.6-luna";
+}
+
+async function readCodingRunPolicy(path: string): Promise<Readonly<CodingRunSnapshot>> {
+  const info = await stat(path);
+  if (!info.isFile() || info.size > 1024 * 1024) {
+    throw new Error("Coding run marker must be a bounded regular file");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    throw new Error(`Coding run marker is unreadable: ${(error as Error).message}`);
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Coding run marker schema is invalid");
+  }
+  const marker = value as Record<string, unknown>;
+  if ((marker.schemaVersion !== 2 && marker.schemaVersion !== 3) || marker.command !== "code") {
+    throw new Error(
+      "Legacy coding run has no immutable policy snapshot and cannot be resumed safely",
+    );
+  }
+  const keys = Object.keys(marker).sort().join(",");
+  const legacy = marker.schemaVersion === 2;
+  if ((legacy && keys !== "command,policy,policyHash,schemaVersion") ||
+      (!legacy && keys !== "command,model,policy,policyHash,schemaVersion,strategyHash") ||
+      typeof marker.policyHash !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(marker.policyHash) ||
+      (!legacy && (marker.model !== "gpt-5.6-luna" || typeof marker.strategyHash !== "string" ||
+        !/^sha256:[a-f0-9]{64}$/u.test(marker.strategyHash)))) {
+    throw new Error("Coding run marker schema is invalid");
+  }
+  const expectedHash = `sha256:${sha256(canonicalJson(marker.policy))}`;
+  if (marker.policyHash !== expectedHash) {
+    throw new Error("Coding run policy snapshot hash does not match its marker");
+  }
+  const policy = parseSwarmCodingPolicy(marker.policy);
+  if (!legacy && marker.strategyHash !== `sha256:${sha256(canonicalJson(policy.strategy))}`) {
+    throw new Error("Coding run strategy snapshot hash does not match its marker");
+  }
+  return Object.freeze({ policy, model: "gpt-5.6-luna" });
+}
+
+async function runCode(args: string[]): Promise<void> {
+  const goal = option(args, "--goal") ?? positional(args)[0];
+  if (!goal) throw new Error("Provide a coding goal with --goal \"...\"");
+  const policyPath = option(args, "--coding-policy");
+  if (!policyPath) {
+    throw new Error("Usage: luna-swarm code --goal \"작업\" --coding-policy <policy.json> [--workspace .]");
+  }
+  const workspace = resolve(option(args, "--workspace") ?? process.cwd());
+  const overrides = concurrencyOverrides(args);
+  const config = await loadConfig(option(args, "--config"), overrides);
+  if (config.model !== "gpt-5.6-luna") {
+    throw new Error("Luna Swarm coding strategies require config.model to be exactly gpt-5.6-luna");
+  }
+  const codingPolicy = await loadSwarmCodingPolicy(resolve(workspace, policyPath), workspace);
+  const runId = option(args, "--run-id") ?? makeRunId();
+  const storage = storageManager(workspace, config);
+  await storage.assertRunIdAvailable(runId);
+  const store = new AtomicRunStore(workspace, config.stateDirectory, runId);
+  await store.create();
+  await durableCreateText(
+    resolve(store.runDirectory, "coding-run.json"),
+    `${canonicalJson(codingRunMarker(codingPolicy))}\n`,
+  );
+  await launch({
+    goal,
+    workspace,
+    config,
+    store,
+    mock: args.includes("--mock"),
+    codingPolicy,
+  });
+}
+
+interface ArtifactRunMarkerV1 {
+  schemaVersion: 1;
+  command: "artifact";
+  model: "gpt-5.6-luna";
+  policyHash: `sha256:${string}`;
+  rendererIdentity: typeof ARTIFACT_RENDERER_IDENTITY;
+  rendererIdentityHash: `sha256:${string}`;
+  policy: Readonly<ArtifactProductionPolicy>;
+}
+
+interface ArtifactRunKindV1 {
+  schemaVersion: 1;
+  command: "artifact";
+  markerFile: "artifact-run.json";
+  markerHash: `sha256:${string}`;
+}
+
+interface UiAutoRunKindV2 {
+  schemaVersion: 2;
+  command: "ui-auto";
+  markerFile: "auto-run.json";
+  markerHash: `sha256:${string}`;
+  expectedMarkers: readonly ("coding-run.json" | "artifact-run.json")[];
+}
+
+type RunKindAnchor = ArtifactRunKindV1 | UiAutoRunKindV2;
+
+interface ArtifactRunSnapshot {
+  policy: Readonly<ArtifactProductionPolicy>;
+  model: "gpt-5.6-luna";
+}
+
+function artifactRunMarker(policy: Readonly<ArtifactProductionPolicy>): Readonly<ArtifactRunMarkerV1> {
+  return Object.freeze({
+    schemaVersion: 1,
+    command: "artifact",
+    model: "gpt-5.6-luna",
+    policyHash: `sha256:${sha256(canonicalJson(policy))}`,
+    rendererIdentity: ARTIFACT_RENDERER_IDENTITY,
+    rendererIdentityHash: `sha256:${ARTIFACT_RENDERER_IDENTITY_HASH}`,
+    policy,
+  });
+}
+
+interface UiAutoRunMarkerV1 {
+  schemaVersion: 1 | 2;
+  command: "ui-auto";
+  classifierVersion: "semantic-capability-v1";
+  profile: "standard" | "coding" | "artifact" | "combined";
+  goalHash: `sha256:${string}`;
+  model: string;
+  codingPolicyHash: `sha256:${string}` | null;
+  artifactPolicyHash: `sha256:${string}` | null;
+  policySources: Readonly<{ coding?: "workspace" | "automatic"; artifact?: "workspace" | "automatic" }>;
+  mock?: boolean;
+}
+
+async function persistUiAutoRunMarkers(
+  store: AtomicRunStore,
+  goal: string,
+  model: string,
+  mock: boolean,
+  prepared: Readonly<PreparedUiExecution>,
+): Promise<void> {
+  if (prepared.codingPolicy) {
+    await durableCreateText(
+      resolve(store.runDirectory, "coding-run.json"),
+      `${canonicalJson(codingRunMarker(prepared.codingPolicy))}\n`,
+    );
+  }
+  if (prepared.artifactPolicy) {
+    const marker = artifactRunMarker(prepared.artifactPolicy);
+    await durableCreateText(
+      resolve(store.runDirectory, "artifact-run.json"),
+      `${canonicalJson(marker)}\n`,
+    );
+  }
+  const autoMarker: UiAutoRunMarkerV1 = {
+    schemaVersion: 2,
+    command: "ui-auto",
+    classifierVersion: "semantic-capability-v1",
+    profile: prepared.intent.profile,
+    goalHash: `sha256:${sha256(goal.normalize("NFKC"))}`,
+    model,
+    codingPolicyHash: prepared.codingPolicy
+      ? `sha256:${sha256(canonicalJson(prepared.codingPolicy))}`
+      : null,
+    artifactPolicyHash: prepared.artifactPolicy
+      ? `sha256:${sha256(canonicalJson(prepared.artifactPolicy))}`
+      : null,
+    policySources: prepared.policySources,
+    mock,
+  };
+  const autoText = canonicalJson(autoMarker);
+  await durableCreateText(
+    resolve(store.runDirectory, "auto-run.json"),
+    `${autoText}\n`,
+  );
+  const expectedMarkers: UiAutoRunKindV2["expectedMarkers"] = Object.freeze([
+    ...(prepared.codingPolicy ? ["coding-run.json" as const] : []),
+    ...(prepared.artifactPolicy ? ["artifact-run.json" as const] : []),
+  ]);
+  const runKind: UiAutoRunKindV2 = {
+    schemaVersion: 2,
+    command: "ui-auto",
+    markerFile: "auto-run.json",
+    markerHash: `sha256:${sha256(autoText)}`,
+    expectedMarkers,
+  };
+  await durableCreateText(
+    resolve(store.runDirectory, "run-kind.json"),
+    `${canonicalJson(runKind)}\n`,
+  );
+}
+
+function uiExecutionProfileLabel(profile: PreparedUiExecution["intent"]["profile"]): string {
+  if (profile === "coding") return "코딩";
+  if (profile === "artifact") return "파일 제작";
+  if (profile === "combined") return "코딩 + 파일 제작";
+  return "분석·조사";
+}
+
+async function readBoundedRunMarker(path: string, maxBytes: number, label: string): Promise<string> {
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > maxBytes) {
+    throw new Error(`${label} must be a bounded regular non-linked file`);
+  }
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.nlink !== 1 || opened.size > maxBytes) {
+      throw new Error(`${label} changed or is unsafe`);
+    }
+    const text = await handle.readFile("utf8");
+    const after = await handle.stat();
+    if (opened.size !== after.size || opened.mtimeMs !== after.mtimeMs || opened.ino !== after.ino || opened.dev !== after.dev) {
+      throw new Error(`${label} changed while reading`);
+    }
+    return text;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readUiAutoRunMarker(
+  path: string,
+  expectedMarkerHash?: string,
+): Promise<Readonly<UiAutoRunMarkerV1> | undefined> {
+  let text: string;
+  try {
+    text = await readBoundedRunMarker(path, 64 * 1024, "UI auto-run marker");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let value: unknown;
+  try { value = JSON.parse(text); }
+  catch (error) { throw new Error(`UI auto-run marker is unreadable: ${(error as Error).message}`); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("UI auto-run marker schema is invalid");
+  }
+  const marker = value as Record<string, unknown>;
+  const keys = Object.keys(marker).sort().join(",");
+  const v1Keys = "artifactPolicyHash,classifierVersion,codingPolicyHash,command,goalHash,model,policySources,profile,schemaVersion";
+  const v2Keys = "artifactPolicyHash,classifierVersion,codingPolicyHash,command,goalHash,mock,model,policySources,profile,schemaVersion";
+  if (
+    !((marker.schemaVersion === 1 && keys === v1Keys) || (marker.schemaVersion === 2 && keys === v2Keys)) ||
+    marker.command !== "ui-auto" ||
+    marker.classifierVersion !== "semantic-capability-v1" ||
+    !["standard", "coding", "artifact", "combined"].includes(String(marker.profile)) ||
+    typeof marker.goalHash !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(marker.goalHash) ||
+    typeof marker.model !== "string" || marker.model.length === 0 || marker.model.length > 128 ||
+    !nullableHash(marker.codingPolicyHash) || !nullableHash(marker.artifactPolicyHash) ||
+    !validUiPolicySources(marker.policySources) ||
+    (marker.schemaVersion === 2 && typeof marker.mock !== "boolean")
+  ) {
+    throw new Error("UI auto-run marker schema is invalid");
+  }
+  if (expectedMarkerHash && expectedMarkerHash !== `sha256:${sha256(canonicalJson(value))}`) {
+    throw new Error("UI auto-run marker hash does not match its run-kind anchor");
+  }
+  return marker as unknown as Readonly<UiAutoRunMarkerV1>;
+}
+
+function nullableHash(value: unknown): boolean {
+  return value === null || (typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value));
+}
+
+function validUiPolicySources(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "coding" && key !== "artifact")) return false;
+  return Object.values(record).every((source) => source === "workspace" || source === "automatic");
+}
+
+async function readArtifactRunPolicy(
+  path: string,
+  workspace: string,
+  expectedMarkerHash?: string,
+): Promise<Readonly<ArtifactRunSnapshot>> {
+  let text: string;
+  try {
+    text = await readBoundedRunMarker(path, 1024 * 1024, "Artifact run marker");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw error;
+    throw new Error(`Artifact run marker is unreadable: ${(error as Error).message}`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Artifact run marker is unreadable: ${(error as Error).message}`);
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Artifact run marker schema is invalid");
+  }
+  const marker = value as Record<string, unknown>;
+  const keys = Object.keys(marker).sort().join(",");
+  if (
+    keys !== "command,model,policy,policyHash,rendererIdentity,rendererIdentityHash,schemaVersion" ||
+    marker.schemaVersion !== 1 || marker.command !== "artifact" || marker.model !== "gpt-5.6-luna" ||
+    typeof marker.policyHash !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(marker.policyHash) ||
+    marker.rendererIdentityHash !== `sha256:${ARTIFACT_RENDERER_IDENTITY_HASH}` ||
+    canonicalJson(marker.rendererIdentity) !== canonicalJson(ARTIFACT_RENDERER_IDENTITY)
+  ) {
+    throw new Error("Artifact run marker schema or renderer identity is invalid");
+  }
+  if (expectedMarkerHash && expectedMarkerHash !== `sha256:${sha256(canonicalJson(value))}`) {
+    throw new Error("Artifact run marker hash does not match its run-kind anchor");
+  }
+  const expectedPolicyHash = `sha256:${sha256(canonicalJson(marker.policy))}`;
+  if (marker.policyHash !== expectedPolicyHash) {
+    throw new Error("Artifact run policy snapshot hash does not match its marker");
+  }
+  const policy = parseArtifactProductionPolicy(marker.policy);
+  await verifyArtifactProductionPolicyFiles(policy, workspace);
+  return Object.freeze({ policy, model: "gpt-5.6-luna" });
+}
+
+async function readArtifactRunKind(path: string): Promise<Readonly<RunKindAnchor> | undefined> {
+  let text: string;
+  try {
+    text = await readBoundedRunMarker(path, 4096, "Run-kind anchor");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let value: unknown;
+  try { value = JSON.parse(text); }
+  catch (error) { throw new Error(`Run-kind anchor is unreadable: ${(error as Error).message}`); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Run-kind anchor schema is invalid");
+  const marker = value as Record<string, unknown>;
+  if (marker.schemaVersion === 2 && marker.command === "ui-auto") {
+    if (
+      Object.keys(marker).sort().join(",") !== "command,expectedMarkers,markerFile,markerHash,schemaVersion" ||
+      marker.markerFile !== "auto-run.json" ||
+      typeof marker.markerHash !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(marker.markerHash) ||
+      !Array.isArray(marker.expectedMarkers) || marker.expectedMarkers.length > 2 ||
+      marker.expectedMarkers.some((entry) => entry !== "coding-run.json" && entry !== "artifact-run.json") ||
+      new Set(marker.expectedMarkers).size !== marker.expectedMarkers.length
+    ) throw new Error("Run-kind anchor schema is invalid");
+    return marker as unknown as Readonly<UiAutoRunKindV2>;
+  }
+  if (
+    Object.keys(marker).sort().join(",") !== "command,markerFile,markerHash,schemaVersion" ||
+    marker.schemaVersion !== 1 || marker.command !== "artifact" || marker.markerFile !== "artifact-run.json" ||
+    typeof marker.markerHash !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(marker.markerHash)
+  ) throw new Error("Run-kind anchor schema is invalid");
+  return marker as unknown as Readonly<ArtifactRunKindV1>;
+}
+
+async function runArtifact(args: string[]): Promise<void> {
+  const goal = option(args, "--goal") ?? positional(args)[0];
+  if (!goal) throw new Error("Provide an artifact production goal with --goal \"...\"");
+  const policyPath = option(args, "--artifact-policy");
+  if (!policyPath) {
+    throw new Error("Usage: luna-swarm artifact --goal \"작업\" --artifact-policy <policy.json> [--workspace .]");
+  }
+  const workspace = resolve(option(args, "--workspace") ?? process.cwd());
+  const config = await loadConfig(option(args, "--config"), concurrencyOverrides(args));
+  if (config.model !== "gpt-5.6-luna") {
+    throw new Error("Luna Swarm artifact production requires config.model to be exactly gpt-5.6-luna");
+  }
+  const artifactPolicy = await loadArtifactProductionPolicy(policyPath, workspace);
+  const runId = option(args, "--run-id") ?? makeRunId();
+  const storage = storageManager(workspace, config);
+  await storage.assertRunIdAvailable(runId);
+  const store = new AtomicRunStore(workspace, config.stateDirectory, runId);
+  await store.create();
+  const marker = artifactRunMarker(artifactPolicy);
+  const markerText = `${canonicalJson(marker)}\n`;
+  const runKind: ArtifactRunKindV1 = {
+    schemaVersion: 1,
+    command: "artifact",
+    markerFile: "artifact-run.json",
+    markerHash: `sha256:${sha256(canonicalJson(marker))}`,
+  };
+  await durableCreateText(resolve(store.runDirectory, "run-kind.json"), `${canonicalJson(runKind)}\n`);
+  await durableCreateText(resolve(store.runDirectory, "artifact-run.json"), markerText);
+  await launch({
+    goal,
+    workspace,
+    config,
+    store,
+    mock: args.includes("--mock"),
+    artifactPolicy,
+  });
+}
+
 async function resume(args: string[]): Promise<void> {
   const runId = positional(args)[0];
   if (!runId) throw new Error("Usage: luna-swarm resume <run-id>");
   const workspace = resolve(option(args, "--workspace") ?? process.cwd());
   const bootstrap = await loadConfig(option(args, "--config"), concurrencyOverrides(args));
-  const store = new AtomicRunStore(workspace, bootstrap.stateDirectory, runId);
+  const restored = await loadResumeContext(workspace, bootstrap.stateDirectory, runId, concurrencyOverrides(args));
+  await launch({
+    goal: restored.state.goal,
+    workspace,
+    config: restored.config,
+    store: restored.store,
+    mock: args.includes("--mock"),
+    loaded: restored.state,
+    ...(restored.codingSnapshot ? { codingPolicy: restored.codingSnapshot.policy, allowPreparedCodingRecovery: true } : {}),
+    ...(restored.artifactSnapshot ? { artifactPolicy: restored.artifactSnapshot.policy } : {}),
+  });
+}
+
+interface ResumeContext {
+  store: AtomicRunStore;
+  state: RunState;
+  config: SwarmConfig;
+  codingSnapshot?: Readonly<CodingRunSnapshot>;
+  artifactSnapshot?: Readonly<ArtifactRunSnapshot>;
+  autoSnapshot?: Readonly<UiAutoRunMarkerV1>;
+}
+
+async function loadResumeContext(
+  workspace: string,
+  stateDirectory: string,
+  runId: string,
+  overrides: Partial<SwarmConfig> = {},
+): Promise<Readonly<ResumeContext>> {
+  const store = new AtomicRunStore(workspace, stateDirectory, runId);
+  let codingSnapshot: Readonly<CodingRunSnapshot> | undefined;
+  let artifactSnapshot: Readonly<ArtifactRunSnapshot> | undefined;
+  const runKind = await readArtifactRunKind(resolve(store.runDirectory, "run-kind.json"));
+  const autoSnapshot = await readUiAutoRunMarker(
+    resolve(store.runDirectory, "auto-run.json"),
+    runKind?.command === "ui-auto" ? runKind.markerHash : undefined,
+  );
+  if (runKind?.command === "ui-auto" && !autoSnapshot) {
+    throw new Error("UI auto-run marker is missing; the run cannot be resumed safely");
+  }
+  try {
+    codingSnapshot = await readCodingRunPolicy(resolve(store.runDirectory, "coding-run.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  try {
+    artifactSnapshot = await readArtifactRunPolicy(
+      resolve(store.runDirectory, "artifact-run.json"),
+      workspace,
+      runKind?.command === "artifact" ? runKind.markerHash : undefined,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (runKind?.command === "artifact" ||
+        (runKind?.command === "ui-auto" && runKind.expectedMarkers.includes("artifact-run.json"))) {
+      throw new Error("Artifact run marker is missing; the run cannot be resumed safely");
+    }
+  }
+  if (runKind?.command === "artifact" && !artifactSnapshot) {
+    throw new Error("Run-kind anchor requires an artifact production marker");
+  }
+  if (runKind?.command === "ui-auto") {
+    const hasCoding = codingSnapshot !== undefined;
+    const hasArtifact = artifactSnapshot !== undefined;
+    if (runKind.expectedMarkers.includes("coding-run.json") !== hasCoding ||
+        runKind.expectedMarkers.includes("artifact-run.json") !== hasArtifact) {
+      throw new Error("UI auto-run required marker set does not match its run-kind anchor");
+    }
+  }
+  if (autoSnapshot) {
+    const codingHash = codingSnapshot
+      ? `sha256:${sha256(canonicalJson(codingSnapshot.policy))}`
+      : null;
+    const artifactHash = artifactSnapshot
+      ? `sha256:${sha256(canonicalJson(artifactSnapshot.policy))}`
+      : null;
+    if (autoSnapshot.codingPolicyHash !== codingHash || autoSnapshot.artifactPolicyHash !== artifactHash) {
+      throw new Error("UI auto-run policy markers do not match their immutable profile");
+    }
+    const expectedProfile = codingSnapshot && artifactSnapshot
+      ? "combined"
+      : codingSnapshot
+        ? "coding"
+        : artifactSnapshot
+          ? "artifact"
+          : "standard";
+    if (autoSnapshot.profile !== expectedProfile) {
+      throw new Error("UI auto-run execution profile does not match its policy markers");
+    }
+  }
   const state = await store.load();
+  if (autoSnapshot) {
+    if (autoSnapshot.goalHash !== `sha256:${sha256(state.goal.normalize("NFKC"))}`) {
+      throw new Error("UI auto-run goal hash does not match persisted state");
+    }
+    if (autoSnapshot.model !== state.config.model) {
+      throw new Error("UI auto-run model pin does not match persisted state");
+    }
+  }
   if (["completed", "partial", "failed", "cancelled"].includes(state.status)) {
     throw new Error(`Run ${runId} is already ${state.status} and cannot be resumed`);
   }
   const config: SwarmConfig = {
     ...DEFAULT_CONFIG,
     ...state.config,
-    ...concurrencyOverrides(args),
+    ...overrides,
     storageMaintenance: {
       ...DEFAULT_CONFIG.storageMaintenance,
       ...(state.config.storageMaintenance ?? {}),
+    },
+    webResearch: {
+      ...DEFAULT_CONFIG.webResearch,
+      ...(state.config.webResearch ?? {}),
+    },
+    skillPortfolio: {
+      ...DEFAULT_CONFIG.skillPortfolio,
+      ...(state.config.skillPortfolio ?? {}),
     },
     reasoning: {
       ...DEFAULT_CONFIG.reasoning,
@@ -629,13 +1366,19 @@ async function resume(args: string[]): Promise<void> {
     },
   };
   validateConfig(config);
-  await launch({
-    goal: state.goal,
-    workspace,
-    config,
+  if (codingSnapshot && config.model !== codingSnapshot.model) {
+    throw new Error(`Coding run is pinned to ${codingSnapshot.model}; persisted config uses ${config.model}`);
+  }
+  if (artifactSnapshot && config.model !== artifactSnapshot.model) {
+    throw new Error(`Artifact run is pinned to ${artifactSnapshot.model}; persisted config uses ${config.model}`);
+  }
+  return Object.freeze({
     store,
-    mock: args.includes("--mock"),
-    loaded: state,
+    state,
+    config,
+    ...(codingSnapshot ? { codingSnapshot } : {}),
+    ...(artifactSnapshot ? { artifactSnapshot } : {}),
+    ...(autoSnapshot ? { autoSnapshot } : {}),
   });
 }
 
@@ -650,6 +1393,9 @@ async function launch(options: {
   abortController?: AbortController;
   onRuntimeReady?: (runtime: ManagedRunRuntime) => void | Promise<void>;
   onRuntimeDisposed?: (runtime: ManagedRunRuntime) => void;
+  codingPolicy?: SwarmCodingPolicy;
+  allowPreparedCodingRecovery?: boolean;
+  artifactPolicy?: ArtifactProductionPolicy;
 }): Promise<void> {
   const releaseExecutionLease = options.releaseExecutionLease
     ?? await options.store.acquireExecutionLease();
@@ -663,10 +1409,37 @@ async function launch(options: {
   const controls = new ExecutionController(controlStore, { abortController: controller });
   let hostToolRuntime: RunHostToolRuntime | undefined;
   let deploymentRuntime: DeploymentRuntimeRouter | undefined;
+  let codingRuntime: SwarmCodingRuntime | undefined;
+  let artifactRuntime: ArtifactProductionRuntime | undefined;
+  let researchRuntime: RunResearchToolRuntime | undefined;
+  let researchDiscoveryRuntime: RunSearchDiscoveryToolRuntime | undefined;
   try {
     await controls.init();
     if (options.loaded) await controls.resume();
     const generation = await options.store.generationAuthority().capture();
+    if (options.codingPolicy && options.config.model !== "gpt-5.6-luna") {
+      throw new Error("Host coding runtime is pinned to gpt-5.6-luna");
+    }
+    codingRuntime = options.codingPolicy
+      ? await SwarmCodingRuntime.create({
+          workspace: options.workspace,
+          runDirectory: options.store.runDirectory,
+          runId: options.store.runId,
+          policy: options.codingPolicy,
+          ...(options.allowPreparedCodingRecovery ? { allowPreparedRecovery: true } : {}),
+        })
+      : undefined;
+    if (options.artifactPolicy && options.config.model !== "gpt-5.6-luna") {
+      throw new Error("Host artifact production runtime is pinned to gpt-5.6-luna");
+    }
+    artifactRuntime = options.artifactPolicy
+      ? await ArtifactProductionRuntime.create({
+          workspace: options.workspace,
+          runDirectory: options.store.runDirectory,
+          runId: options.store.runId,
+          policy: options.artifactPolicy,
+        })
+      : undefined;
     hostToolRuntime = options.mock
       ? undefined
       : await RunHostToolRuntime.create({
@@ -676,6 +1449,39 @@ async function launch(options: {
           generation: generation.generation,
           stateDirectory: options.config.stateDirectory,
         });
+    researchRuntime = !options.mock && options.config.webResearch.enabled
+      ? await RunResearchToolRuntime.create({
+          workspaceRoot: options.workspace,
+          runDirectory: options.store.runDirectory,
+          runId: options.store.runId,
+          generation: generation.generation,
+          stateDirectory: options.config.stateDirectory,
+          policy: options.config.webResearch,
+        })
+      : undefined;
+    if (researchRuntime) {
+      const publicInternet = options.config.webResearch.allowedOrigins.length === 1 &&
+        options.config.webResearch.allowedOrigins[0] === "*";
+      researchDiscoveryRuntime = await RunSearchDiscoveryToolRuntime.create({
+        runId: options.store.runId,
+        runDirectory: options.store.runDirectory,
+        provider: createHostControlledLiveSearchDiscoveryProvider({
+          limits: {
+            timeoutMs: Math.min(10_000, options.config.webResearch.maxDeadlineMs),
+            maxResponseBytes: Math.min(512 * 1_024, options.config.webResearch.maxResponseBytes),
+            maxRedirects: Math.min(2, options.config.webResearch.maxRedirects),
+          },
+        }),
+        policy: {
+          ...(publicInternet ? { publicInternet: true } : {}),
+          allowedDomains: publicInternet
+            ? []
+            : options.config.webResearch.allowedOrigins.map((origin) => new URL(origin).hostname),
+          maxCandidatesPerQuery: 20,
+          maxQueryLength: 500,
+        },
+      });
+    }
     const rolloutAuthorities = evolutionRolloutAuthorities(options.config);
     const operationsSignerKeyId = process.env.LUNA_SWARM_OPERATIONS_SIGNER_KEY_ID;
     const operationsSignerPrivateKeyFile = process.env.LUNA_SWARM_OPERATIONS_SIGNER_PRIVATE_KEY_FILE;
@@ -699,7 +1505,12 @@ async function launch(options: {
       deploymentRuntime = undefined;
     }
   } catch (error) {
-    const cleanup = await Promise.allSettled([backend.close(), releaseExecutionLease()]);
+    const cleanup = await Promise.allSettled([
+      codingRuntime?.close(),
+      artifactRuntime?.close(),
+      backend.close(),
+      releaseExecutionLease(),
+    ]);
     const cleanupErrors = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (cleanupErrors.length > 0) {
       throw new AggregateError([error, ...cleanupErrors.map((result) => result.reason)], "Run initialization and cleanup failed");
@@ -736,6 +1547,8 @@ async function launch(options: {
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
   let managedRuntime: ManagedRunRuntime | undefined;
+  let runStateInitialized = options.loaded !== undefined;
+  let primaryFailure: unknown;
   try {
     printBanner(options.store.runId, backend.info(), options.config);
     const orchestrator = new SwarmOrchestrator({
@@ -746,6 +1559,10 @@ async function launch(options: {
       onProgress: printEvent,
       ...(hostToolRuntime ? { hostToolRuntime } : {}),
       ...(deploymentRuntime ? { deploymentRuntime } : {}),
+      ...(codingRuntime ? { codingRuntime } : {}),
+      ...(artifactRuntime ? { artifactRuntime } : {}),
+      ...(researchRuntime ? { researchRuntime } : {}),
+      ...(researchDiscoveryRuntime ? { researchDiscoveryRuntime } : {}),
     });
     managedRuntime = {
       runId: options.store.runId,
@@ -755,26 +1572,62 @@ async function launch(options: {
       store: options.store,
       configuredMaximum: options.config.maxConcurrency,
     };
+    const markRuntimeReady = async (): Promise<void> => {
+      runStateInitialized = true;
+      await options.onRuntimeReady?.(managedRuntime!);
+    };
     const state = options.loaded
-      ? (await options.onRuntimeReady?.(managedRuntime), await orchestrator.resume(options.loaded, controller.signal))
+      ? (await markRuntimeReady(), await orchestrator.resume(options.loaded, controller.signal))
       : await orchestrator.start(
           options.goal,
           controller.signal,
-          () => options.onRuntimeReady?.(managedRuntime!),
+          markRuntimeReady,
         );
     printResult(state, options.store.finalPath, options.store.organizationPath);
+    if (artifactRuntime) printArtifactOutputs(artifactRuntime);
     if (state.status === "failed") process.exitCode = 1;
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
   } finally {
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
+    const cleanupFailures: unknown[] = [];
+    try { await deploymentRuntime?.drain(); }
+    catch (error) { cleanupFailures.push(error); }
+    try { await managedRuntime?.orchestrator.flushMetrics(); }
+    catch (error) { cleanupFailures.push(error); }
+    if (managedRuntime && runStateInitialized) {
+      try { await options.store.compactTransitions(); }
+      catch (error) { cleanupFailures.push(error); }
+    }
+    const runtimeCleanup = await Promise.allSettled([
+      codingRuntime?.close(),
+      artifactRuntime?.close(),
+      backend.close(),
+    ]);
+    cleanupFailures.push(...runtimeCleanup
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason));
+    if (managedRuntime) {
+      try { options.onRuntimeDisposed?.(managedRuntime); }
+      catch (error) { cleanupFailures.push(error); }
+    }
+    try { await releaseExecutionLease(); }
+    catch (error) { cleanupFailures.push(error); }
     try {
-      await deploymentRuntime?.drain();
-      await managedRuntime?.orchestrator.flushMetrics();
-      await backend.close();
-    } finally {
-      if (managedRuntime) options.onRuntimeDisposed?.(managedRuntime);
-      await releaseExecutionLease();
       await runAutomaticStorageMaintenance(storageManager(options.workspace, options.config), "after-run");
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    if (cleanupFailures.length > 0) {
+      if (primaryFailure !== undefined) {
+        throw new AggregateError(
+          [primaryFailure, ...cleanupFailures],
+          `Run failed: ${primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)}; cleanup also failed`,
+        );
+      }
+      throw new AggregateError(cleanupFailures, "Run cleanup failed");
     }
   }
 }
@@ -858,7 +1711,6 @@ function codexBackend(workspace: string, config: SwarmConfig): AgentBackend {
       if (/error|warn/i.test(line)) process.stderr.write(`[codex:${shard}] ${line}\n`);
     },
   });
-  if (shardCount === 1) return factory(0);
   return new AppServerSupervisor(factory, {
     shardCount,
     maxInflightPerShard,
@@ -1000,8 +1852,30 @@ async function evolve(args: string[]): Promise<void> {
   const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
   const evaluationStore = new PairedEvaluationReceiptStore(workspace, {
     trustedBenchmarkAuthorities: evolutionBenchmarkAuthorities(config),
+    trustedProtectedProcessAuthorities: evolutionProtectedProcessAuthorities(config),
   });
-  const pointers = new StablePointerStore(workspace, { bundleStore, evaluationStore });
+  const quarantineStore = new GenomeQuarantineStore(workspace, genomeStore);
+  const rolloutBindings = new ActiveRolloutBindingStore(workspace, {
+    bundleStore,
+    quarantineStore,
+    rolloutStore: new RolloutStore(workspace),
+  });
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore,
+    evaluationStore,
+    quarantineStore,
+    assertPromotionAllowed: async (request) => {
+      const bundle = await bundleStore.read(request.bundleId);
+      await rolloutBindings.prepareStablePromotion({
+        workloadClass: request.workloadClass,
+        bundleId: request.bundleId,
+        bundleHash: bundle.bundleHash,
+        expectedPointerGeneration: request.expectedGeneration,
+        actor: request.actor,
+        reason: request.reason,
+      });
+    },
+  });
   if (action === "promote") {
     const fingerprint = await evolutionCliFingerprint(config, workspace);
     const bundleId = positional(args)[1];
@@ -1022,7 +1896,16 @@ async function evolve(args: string[]): Promise<void> {
         contentHash: canonicalEvolutionHashOption(args, "--evaluation-hash"),
       },
     });
-    process.stdout.write(`${JSON.stringify({ pointer }, null, 2)}\n`);
+    let rolloutCleanupWarning: string | undefined;
+    try {
+      await rolloutBindings.reconcileAfterStablePromotion(workloadClass);
+    } catch {
+      // The pointer CAS is already authoritative. Candidate admission also
+      // self-heals this stale binding on the next read, so never report the
+      // committed promotion as failed solely because cleanup must be retried.
+      rolloutCleanupWarning = "Stable Pointer committed; active rollout cleanup will retry on the next control-plane read";
+    }
+    process.stdout.write(`${JSON.stringify({ pointer, ...(rolloutCleanupWarning ? { warning: rolloutCleanupWarning } : {}) }, null, 2)}\n`);
     return;
   }
   if (action === "rollback") {
@@ -1038,19 +1921,102 @@ async function evolve(args: string[]): Promise<void> {
   if (action !== "status") throw new Error(`Unknown evolve command: ${action}`);
 
   const stable = Object.fromEntries(await Promise.all(EVOLUTION_WORKLOAD_CLASSES.map(async (workload) => [workload, await pointers.get(workload)])));
-  const [traces, outcomes, failures, evaluations, audit] = await Promise.all([
+  const [traces, outcomeInspection, failures, evaluations, audit] = await Promise.all([
     new DecisionTraceStore(workspace).list(),
-    new ObjectiveOutcomeReceiptStore(workspace).list(),
+    new ObjectiveOutcomeReceiptStore(workspace).inspect(),
     new FailureCapsuleStore(workspace).listHeads(),
     evaluationStore.list(),
     pointers.getAudit(),
   ]);
+  const outcomes = outcomeInspection.valid;
+  const auditCounts = Object.fromEntries(["promote", "baseline_upgrade", "rollback"].map((action) => [
+    action,
+    audit.filter((entry) => entry.action === action).length,
+  ]));
+  const failureLifecycleCounts = Object.fromEntries(["observed", "reproduced", "oracle-locked", "resolved"].map((lifecycle) => [
+    lifecycle,
+    failures.filter((failure) => failure.lifecycle === lifecycle).length,
+  ]));
+  const evaluatedPromotions = audit.filter((entry) => entry.action === "promote" && entry.evaluationReceiptId !== null).length;
+  const promotableEvaluations = evaluations.filter((evaluation) => evaluation.scorecard.outcome === "PROMOTABLE").length;
+  const stage = evaluatedPromotions > 0
+    ? "promoted-challengers"
+    : evaluations.length > 0
+      ? "evaluated-challengers"
+      : outcomes.length > 0
+        ? "collecting-outcomes"
+        : "baseline-only";
+  const warnings = [
+    ...(outcomeInspection.invalid.length > 0
+      ? [`${outcomeInspection.invalid.length} historical outcome receipt(s) failed authoritative verification and are excluded from evolution evidence.`]
+      : []),
+    ...(evaluations.length === 0 ? ["No authoritative paired challenger evaluation has been recorded."] : []),
+    ...(failures.length > 0 && failureLifecycleCounts["oracle-locked"] === 0
+      ? ["Failure capsules exist, but none has reached an oracle-locked regression state."]
+      : []),
+  ];
   process.stdout.write(`${JSON.stringify({
     mode: "observation-only/manual-promotion",
     stable,
-    counts: { traces: traces.length, outcomes: outcomes.length, failures: failures.length, evaluations: evaluations.length },
+    counts: {
+      traces: traces.length,
+      outcomes: outcomes.length,
+      invalidOutcomes: outcomeInspection.invalid.length,
+      failures: failures.length,
+      evaluations: evaluations.length,
+    },
+    health: {
+      stage,
+      promotableEvaluations,
+      evaluatedPromotions,
+      audit: auditCounts,
+      failureLifecycles: failureLifecycleCounts,
+      warnings,
+    },
     audit,
   }, null, 2)}\n`);
+}
+
+async function verifiedCache(args: string[]): Promise<void> {
+  const [action = "status"] = positional(args);
+  const workspace = resolve(option(args, "--workspace") ?? process.cwd());
+  const config = await loadConfig(option(args, "--config"));
+  const cache = new VerifiedArtifactCache(resolve(
+    workspace,
+    config.stateDirectory,
+    "cache",
+    "verified-artifacts",
+  ), { boundaryRoot: workspace });
+  if (action === "status") {
+    process.stdout.write(`${JSON.stringify(await cache.status(), null, 2)}\n`);
+    return;
+  }
+  if (action === "invalidate" && option(args, "--source")) {
+    const sourceIdentity = requiredOption(args, "--source");
+    process.stdout.write(`${JSON.stringify({
+      sourceIdentity,
+      invalidated: await cache.invalidateSource(sourceIdentity),
+    }, null, 2)}\n`);
+    return;
+  }
+  const keyFile = option(args, "--key-file");
+  if (!keyFile) {
+    throw new Error(`cache ${action} requires --key-file <verified-cache-key.json>`);
+  }
+  const key = JSON.parse(await readFile(resolve(workspace, keyFile), "utf8")) as VerifiedArtifactCacheKeyInput;
+  if (action === "explain") {
+    process.stdout.write(`${JSON.stringify(await cache.explain(key), null, 2)}\n`);
+    return;
+  }
+  if (action === "verify") {
+    process.stdout.write(`${JSON.stringify(await cache.verify(key), null, 2)}\n`);
+    return;
+  }
+  if (action === "invalidate") {
+    process.stdout.write(`${JSON.stringify({ invalidated: await cache.invalidate(key) }, null, 2)}\n`);
+    return;
+  }
+  throw new Error("Usage: luna-swarm cache status|explain|verify|invalidate [--key-file file | --source id]");
 }
 
 async function soak(args: string[]): Promise<void> {
@@ -1221,6 +2187,8 @@ async function evolutionCliFingerprint(
     : process.env.LUNA_SOURCE_COMMIT
       ? { kind: "luna_environment", value: process.env.LUNA_SOURCE_COMMIT }
       : undefined;
+  const source = await resolveEvolutionSourceIdentity(workspace, explicitSource);
+  if (source.mode === "observation_only") throw new SourceIdentityUnavailableError(source.reason);
   return {
     model: config.model,
     reasoning: config.reasoning,
@@ -1228,10 +2196,8 @@ async function evolutionCliFingerprint(
     maxConcurrency: config.maxConcurrency,
     harnessPolicyVersion: HARNESS_POLICY_VERSION,
     organizationVersion: HARNESS_V2_ORG_VERSION,
-    sourceCommit: await resolveLocalSourceIdentity(
-      workspace,
-      explicitSource,
-    ),
+    releaseEpoch: config.evolutionReleaseEpoch,
+    sourceCommit: source.identity,
   };
 }
 
@@ -1332,6 +2298,22 @@ function requiredIntegerOption(args: string[], name: string, min: number): numbe
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < min) throw new Error(`${name} must be an integer >= ${min}`);
   return value;
+}
+
+function evolutionProtectedProcessAuthorities(
+  config: SwarmConfig,
+): Readonly<Record<string, TrustedProtectedProcessAuthority>> {
+  const result: Record<string, TrustedProtectedProcessAuthority> = {};
+  for (const benchmarkAuthority of Object.values(config.evolutionBenchmarkAuthorities ?? {})) {
+    for (const [keyId, authority] of Object.entries(benchmarkAuthority.protectedProcessAuthorities ?? {})) {
+      const existing = result[keyId];
+      if (existing && JSON.stringify(existing) !== JSON.stringify(authority)) {
+        throw new Error(`Conflicting protected process authority: ${keyId}`);
+      }
+      result[keyId] = authority as TrustedProtectedProcessAuthority;
+    }
+  }
+  return Object.freeze(result);
 }
 
 function evolutionRolloutAuthorities(config: SwarmConfig): Readonly<Record<string, TrustedRolloutAuthority>> {
@@ -1446,6 +2428,8 @@ function numberOption(
 function positional(args: string[]): string[] {
   const withValue = new Set([
     "--goal",
+    "--coding-policy",
+    "--artifact-policy",
     "--workspace",
     "--config",
     "--run-id",
@@ -1474,6 +2458,8 @@ function positional(args: string[]): string[] {
     "--measured-calls-per-stage",
     "--account-email-sha256",
     "--authorization-expires-at",
+    "--key-file",
+    "--source",
   ]);
   const result: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -1516,6 +2502,19 @@ function printResult(state: RunState, finalPath: string, organizationPath: strin
   if (state.error) process.stderr.write(`오류: ${state.error}\n`);
 }
 
+function printArtifactOutputs(runtime: ArtifactProductionRuntime): void {
+  const outputs = runtime.listProducedFiles().flatMap((record) =>
+    record.files.map((file) => ({ ...file, path: resolve(record.storeRoot, file.relativePath) }))
+  );
+  if (outputs.length === 0) return;
+  process.stdout.write("\n생성 파일:\n");
+  for (const output of outputs) {
+    process.stdout.write(
+      `- ${output.fileName} · ${output.format.toUpperCase()} · ${output.bytes} bytes · sha256:${output.sha256}\n  ${output.path}\n`,
+    );
+  }
+}
+
 function printHelp(): void {
   process.stdout.write(`Luna Swarm — ChatGPT 로그인으로 Codex Luna 논리 에이전트를 조율합니다.
 
@@ -1536,13 +2535,20 @@ function printHelp(): void {
   luna-swarm storage status [--workspace .]
   luna-swarm storage gc [--dry-run] [--workspace .]
   luna-swarm storage restore <run-id> [--workspace .]
+  luna-swarm cache status [--workspace .]
+  luna-swarm cache explain|verify|invalidate --key-file <cache-key.json> [--workspace .]
+  luna-swarm cache invalidate --source <source-identity> [--workspace .]
   luna-swarm init [config.json]
   luna-swarm run --goal "작업" [--workspace .] [--mock]
+  luna-swarm code --goal "코딩 작업" --coding-policy <policy.json> [--workspace .] [--mock]
+  luna-swarm artifact --goal "파일 제작" --artifact-policy <policy.json> [--workspace .] [--mock]
   luna-swarm resume <run-id> [--workspace .]
   luna-swarm status [run-id] [--workspace .]
 
 옵션:
   --config <file>
+  --coding-policy <file>   Luna-only repair/genesis 전략·범위·보호 check를 고정하는 코딩 정책 JSON
+  --artifact-policy <file> PDF/XLSX/CSV/SVG/PNG 형식·파일명·locale·font hash·상한을 고정하는 정책 JSON
   --max-concurrency <1..1024>
   --initial-concurrency <1..1024>
   --run-id <id>

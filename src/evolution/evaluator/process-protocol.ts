@@ -22,7 +22,7 @@ export interface ProtectedEvaluatorProcessReady {
   suites: ReadonlyArray<ProtectedBenchmarkSuiteDescriptor>;
   trustedRunnerPin: {
     executableSha256: string;
-    integritySha256: ReadonlyArray<string>;
+    integrityFiles: ReadonlyArray<{ relativePath: string; sha256: string }>;
     commandSha256: string;
   };
 }

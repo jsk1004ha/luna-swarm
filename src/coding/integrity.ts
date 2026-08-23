@@ -1,5 +1,15 @@
 import { createHash, sign as signBytes, verify as verifyBytes } from "node:crypto";
-import type { ReceiptMaterial, SignedReceipt, SnapshotFile, TrustedReceiptIssuer, WorktreeSnapshot } from "./contracts.js";
+import type {
+  CodingAttemptContext,
+  CodingRepairFinding,
+  CodingRepairStage,
+  CodingWorkOrder,
+  ReceiptMaterial,
+  SignedReceipt,
+  SnapshotFile,
+  TrustedReceiptIssuer,
+  WorktreeSnapshot,
+} from "./contracts.js";
 
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
@@ -23,6 +33,85 @@ export function snapshotManifestHash(files: readonly SnapshotFile[]): string {
   return sha256(canonicalJson(files));
 }
 
+export function codingWorkOrderHash(order: CodingWorkOrder): string {
+  return sha256(canonicalJson({
+    schemaVersion: 4,
+    id: order.id,
+    repository: order.repository,
+    baseCommit: order.baseCommit,
+    targetRef: order.targetRef,
+    commitMessage: order.commitMessage,
+    objective: order.objective,
+    requirementIds: order.requirementIds,
+    acceptanceCriteria: order.acceptanceCriteria,
+    constraints: order.constraints,
+    contextReferences: order.contextReferences,
+    readScopes: order.readScopes,
+    writeScopes: order.writeScopes,
+    requiredChecks: order.requiredChecks,
+    requiredAuditIssuers: order.requiredAuditIssuers,
+    codingStrategy: order.codingStrategy,
+    sourceBinding: order.sourceBinding,
+    implementationManifest: order.implementationManifest,
+  }));
+}
+
+export function codingAttemptContext(
+  order: CodingWorkOrder,
+  executionAttempt: number,
+  maxAttempts: number,
+  previousFinding?: Readonly<CodingRepairFinding>,
+): Readonly<CodingAttemptContext> {
+  const material = {
+    schemaVersion: 1 as const,
+    workOrderHash: codingWorkOrderHash(order),
+    executionAttempt,
+    maxAttempts,
+    ...(previousFinding === undefined ? {} : { previousFinding }),
+  };
+  return deepFreeze({
+    schemaVersion: 1 as const,
+    executionAttempt,
+    maxAttempts,
+    contextHash: sha256(canonicalJson(material)),
+    ...(previousFinding === undefined ? {} : { previousFinding: structuredClone(previousFinding) }),
+  });
+}
+
+export function codingRepairFinding(
+  stage: CodingRepairStage,
+  subject: string,
+  receipt: Readonly<SignedReceipt>,
+): Readonly<CodingRepairFinding> {
+  if (receipt.outcome !== "fail" || receipt.kind !== stage) throw new Error("Repair findings require a matching failed signed receipt");
+  const material = {
+    schemaVersion: 1 as const,
+    stage,
+    code: stage === "check" ? "CHECK_FAILED" as const : "AUDIT_FAILED" as const,
+    subject,
+    executionAttempt: receipt.executionAttempt,
+    attemptContextHash: receipt.attemptContextHash,
+    patchHash: receipt.patchHash,
+    manifestHash: receipt.manifestHash,
+    receiptHash: receipt.receiptHash,
+    evidenceHash: receipt.evidenceHash,
+  };
+  return Object.freeze({ ...material, findingHash: sha256(canonicalJson(material)) });
+}
+
+export function verifyCodingRepairFinding(finding: Readonly<CodingRepairFinding>): boolean {
+  const { findingHash, ...material } = finding;
+  return finding.schemaVersion === 1
+    && (finding.stage === "check" || finding.stage === "audit")
+    && finding.code === (finding.stage === "check" ? "CHECK_FAILED" : "AUDIT_FAILED")
+    && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(finding.subject)
+    && Number.isSafeInteger(finding.executionAttempt)
+    && finding.executionAttempt > 0
+    && [finding.attemptContextHash, finding.patchHash, finding.manifestHash, finding.receiptHash, finding.evidenceHash, findingHash]
+      .every((value) => /^[a-f0-9]{64}$/.test(value))
+    && sha256(canonicalJson(material)) === findingHash;
+}
+
 export function signReceipt(material: ReceiptMaterial, privateKeyPem: string): Readonly<SignedReceipt> {
   const signature = signBytes(null, Buffer.from(canonicalJson(material)), privateKeyPem).toString("base64url");
   const receipt = { ...material, signature };
@@ -41,6 +130,7 @@ export function verifySignedReceipt(receipt: SignedReceipt, trusted: TrustedRece
 }
 
 export function receiptMaterial(
+  order: CodingWorkOrder,
   kind: ReceiptMaterial["kind"],
   issuer: string,
   snapshot: WorktreeSnapshot,
@@ -49,10 +139,13 @@ export function receiptMaterial(
   evidence: unknown,
 ): ReceiptMaterial {
   return {
-    schemaVersion: 1,
+    schemaVersion: 3,
     kind,
     issuer,
     workOrderId: snapshot.workOrderId,
+    workOrderHash: codingWorkOrderHash(order),
+    executionAttempt: snapshot.executionAttempt,
+    attemptContextHash: snapshot.attemptContextHash,
     baseCommit: snapshot.baseCommit,
     headCommit: snapshot.headCommit,
     patchHash: snapshot.patchHash,
@@ -63,4 +156,13 @@ export function receiptMaterial(
     outcome,
     evidenceHash: sha256(canonicalJson(evidence)),
   };
+}
+
+function deepFreeze<T>(value: T, seen = new Set<object>()): Readonly<T> {
+  if (value !== null && typeof value === "object" && !seen.has(value)) {
+    seen.add(value);
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child, seen);
+    Object.freeze(value);
+  }
+  return value;
 }

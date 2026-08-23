@@ -5,6 +5,7 @@ import type { AgentRole, SwarmConfig } from "./types.js";
 export const DEFAULT_CONFIG: SwarmConfig = {
   model: "gpt-5.6-luna",
   organizationHeadcount: "auto",
+  evolutionReleaseEpoch: 1,
   maxConcurrency: 128,
   appServerShardCount: 1,
   initialConcurrency: 8,
@@ -30,6 +31,15 @@ export const DEFAULT_CONFIG: SwarmConfig = {
   rateLimitCooldownMs: 30_000,
   schedulerAgingMs: 5_000,
   allowNetwork: false,
+  webResearch: {
+    enabled: true,
+    allowedOrigins: ["*"],
+    maxCallsPerSession: 12,
+    maxRedirects: 4,
+    maxResponseBytes: 256 * 1024,
+    maxDeadlineMs: 30_000,
+    allowedMimeTypes: ["text/html", "text/plain", "application/json"],
+  },
   ephemeralThreads: true,
   stateDirectory: ".luna-swarm",
   storageMaintenance: {
@@ -43,6 +53,12 @@ export const DEFAULT_CONFIG: SwarmConfig = {
     maxArchiveBytes: 2 * 1024 * 1024 * 1024,
   },
   harnessEnabled: true,
+  skillPortfolio: {
+    enabled: true,
+    maxUniquePerTask: 8,
+    maxPerAgent: 2,
+    maxInstructionCharsPerAgent: 4_000,
+  },
   maxSkillsPerCall: 3,
   maxSkillChars: 6_000,
   learningEnabled: true,
@@ -95,6 +111,26 @@ export async function loadConfig(
       ...(fromFile.storageMaintenance ?? {}),
       ...(overrides.storageMaintenance ?? {}),
     },
+    webResearch: {
+      ...DEFAULT_CONFIG.webResearch,
+      ...(fromFile.webResearch ?? {}),
+      ...(overrides.webResearch ?? {}),
+      allowedOrigins: [
+        ...(overrides.webResearch?.allowedOrigins
+          ?? fromFile.webResearch?.allowedOrigins
+          ?? DEFAULT_CONFIG.webResearch.allowedOrigins),
+      ],
+      allowedMimeTypes: [
+        ...(overrides.webResearch?.allowedMimeTypes
+          ?? fromFile.webResearch?.allowedMimeTypes
+          ?? DEFAULT_CONFIG.webResearch.allowedMimeTypes),
+      ],
+    },
+    skillPortfolio: {
+      ...DEFAULT_CONFIG.skillPortfolio,
+      ...(fromFile.skillPortfolio ?? {}),
+      ...(overrides.skillPortfolio ?? {}),
+    },
   };
   validateConfig(config);
   return config;
@@ -133,8 +169,22 @@ export function validateConfig(config: SwarmConfig): void {
   intInRange("gatewayMaxAttempts", config.gatewayMaxAttempts, 1, 10);
   intInRange("schedulerAgingMs", config.schedulerAgingMs, 100, 60_000);
   intInRange("maxContextChars", config.maxContextChars, 1_024, 2_000_000);
-  intInRange("maxSkillsPerCall", config.maxSkillsPerCall, 0, 8);
+  intInRange("maxSkillsPerCall", config.maxSkillsPerCall, 0, 10);
   intInRange("maxSkillChars", config.maxSkillChars, 0, 40_000);
+  if (typeof config.skillPortfolio.enabled !== "boolean") {
+    throw new Error("skillPortfolio.enabled must be a boolean");
+  }
+  intInRange("skillPortfolio.maxUniquePerTask", config.skillPortfolio.maxUniquePerTask, 1, 10);
+  intInRange("skillPortfolio.maxPerAgent", config.skillPortfolio.maxPerAgent, 1, 4);
+  intInRange(
+    "skillPortfolio.maxInstructionCharsPerAgent",
+    config.skillPortfolio.maxInstructionCharsPerAgent,
+    512,
+    20_000,
+  );
+  if (config.skillPortfolio.maxPerAgent > config.skillPortfolio.maxUniquePerTask) {
+    throw new Error("skillPortfolio.maxPerAgent must be <= skillPortfolio.maxUniquePerTask");
+  }
   intInRange("maxMemoriesPerCall", config.maxMemoriesPerCall, 0, 12);
   intInRange("maxMemoryChars", config.maxMemoryChars, 0, 20_000);
   intInRange("learningHistoryRuns", config.learningHistoryRuns, 1, 2_000);
@@ -148,6 +198,36 @@ export function validateConfig(config: SwarmConfig): void {
   if (!config.model.trim()) throw new Error("model is required");
   if (typeof config.ephemeralThreads !== "boolean") {
     throw new Error("ephemeralThreads must be a boolean");
+  }
+  if (typeof config.webResearch.enabled !== "boolean") {
+    throw new Error("webResearch.enabled must be a boolean");
+  }
+  intInRange("webResearch.maxCallsPerSession", config.webResearch.maxCallsPerSession, 1, 128);
+  intInRange("webResearch.maxRedirects", config.webResearch.maxRedirects, 0, 10);
+  intInRange("webResearch.maxResponseBytes", config.webResearch.maxResponseBytes, 1_024, 4 * 1024 * 1024);
+  intInRange("webResearch.maxDeadlineMs", config.webResearch.maxDeadlineMs, 1_000, 120_000);
+  if (config.webResearch.enabled && config.webResearch.allowedOrigins.length === 0) {
+    throw new Error("webResearch.enabled requires exact origins or the public HTTPS wildcard");
+  }
+  if (config.webResearch.allowedOrigins.includes("*") &&
+      (config.webResearch.allowedOrigins.length !== 1 || config.webResearch.allowedOrigins[0] !== "*")) {
+    throw new Error("webResearch.allowedOrigins public wildcard must be the only entry");
+  }
+  const normalizedOrigins = new Set<string>();
+  for (const origin of config.webResearch.allowedOrigins) {
+    if (origin === "*") continue;
+    let parsed: URL;
+    try { parsed = new URL(origin); } catch { throw new Error(`webResearch.allowedOrigins contains an invalid URL: ${origin}`); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      throw new Error(`webResearch.allowedOrigins must contain credential-free exact HTTPS origins: ${origin}`);
+    }
+    const normalized = parsed.origin.toLowerCase();
+    if (normalizedOrigins.has(normalized)) throw new Error(`webResearch.allowedOrigins contains a duplicate: ${origin}`);
+    normalizedOrigins.add(normalized);
+  }
+  if (config.webResearch.allowedMimeTypes.length === 0 ||
+      config.webResearch.allowedMimeTypes.some((value) => !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/u.test(value))) {
+    throw new Error("webResearch.allowedMimeTypes must contain bounded MIME identifiers");
   }
   if (typeof config.storageMaintenance.enabled !== "boolean") {
     throw new Error("storageMaintenance.enabled must be a boolean");
@@ -164,6 +244,7 @@ export function validateConfig(config: SwarmConfig): void {
   if (config.sourceIdentity !== undefined && !config.sourceIdentity.trim()) {
     throw new Error("sourceIdentity must be a non-empty concrete build identity when provided");
   }
+  intInRange("evolutionReleaseEpoch", config.evolutionReleaseEpoch, 1, Number.MAX_SAFE_INTEGER);
   for (const [keyId, authority] of Object.entries(config.evolutionBenchmarkAuthorities ?? {})) {
     if (!keyId.trim() || !authority.evaluatorVersion.trim() || !authority.publicKeyPem.includes("BEGIN PUBLIC KEY")) {
       throw new Error(`evolutionBenchmarkAuthorities.${keyId || "<empty>"} is invalid`);
@@ -173,6 +254,24 @@ export function validateConfig(config: SwarmConfig): void {
     for (const [suiteId, hash] of suites) {
       if (!suiteId.trim() || !/^sha256:[a-f0-9]{64}$/.test(hash)) {
         throw new Error(`evolutionBenchmarkAuthorities.${keyId}.benchmarkSuites.${suiteId || "<empty>"} is invalid`);
+      }
+    }
+    for (const [hostKeyId, hostAuthority] of Object.entries(authority.protectedProcessAuthorities ?? {})) {
+      if (!hostKeyId.trim() || !hostAuthority.publicKeyPem.includes("BEGIN PUBLIC KEY")) {
+        throw new Error(`evolutionBenchmarkAuthorities.${keyId}.protectedProcessAuthorities.${hostKeyId || "<empty>"} is invalid`);
+      }
+      const policyFields = [
+        "evaluatorExecutableSha256", "evaluatorCommandSha256", "evaluatorIntegritySha256",
+        "trustedRunnerExecutableSha256", "trustedRunnerCommandSha256", "trustedRunnerIntegritySha256",
+      ] as const;
+      if (Object.keys(hostAuthority.policy).sort().join("\0") !== [...policyFields].sort().join("\0")) {
+        throw new Error(`evolutionBenchmarkAuthorities.${keyId}.protectedProcessAuthorities.${hostKeyId}.policy is invalid`);
+      }
+      for (const field of policyFields) {
+        const hash = hostAuthority.policy[field];
+        if (!/^sha256:[a-f0-9]{64}$/.test(hash)) {
+          throw new Error(`evolutionBenchmarkAuthorities.${keyId}.protectedProcessAuthorities.${hostKeyId}.policy.${field} is invalid`);
+        }
       }
     }
   }

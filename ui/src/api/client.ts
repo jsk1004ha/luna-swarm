@@ -1,7 +1,7 @@
 import { createMockSnapshot } from "../data/mock";
-import { companyEventSchema, runsSchema, snapshotSchema, socketEnvelopeSchema } from "../schema";
+import { companyEventSchema, evidenceArtifactDetailSchema, runsSchema, snapshotSchema, socketEnvelopeSchema } from "../schema";
 import { useCompanyStore } from "../store/companyStore";
-import type { RunSummary, Snapshot } from "../types";
+import type { EvidenceArtifactDetail, GeneratedFile, RunSummary, Snapshot } from "../types";
 
 const JSON_HEADERS = { Accept: "application/json" };
 const SNAPSHOT_RETRY_DELAYS_MS = [0, 80, 180, 360] as const;
@@ -10,7 +10,7 @@ let pendingStartControl: { key: string; promise: Promise<UiControlResponse> } | 
 
 export type UiControlPayload =
   | { action: "start"; goal: string; mock?: boolean; maxConcurrency?: number; requestId?: string }
-  | { action: "pause" | "resume" | "cancel"; runId: string }
+  | { action: "pause" | "resume" | "recover" | "cancel"; runId: string }
   | { action: "concurrency"; runId: string; value: number }
   | { action: "instruction"; runId: string; text: string; taskId?: string; trigger?: "next_turn" | "next_retry" }
   | { action: "priority"; runId: string; taskId: string; value: number }
@@ -93,6 +93,37 @@ export function sendUiControl(payload: UiControlPayload): Promise<UiControlRespo
   });
   pendingStartControl = { key, promise: tracked };
   return tracked;
+}
+
+export function artifactDownloadUrl(runId: string, file: Pick<GeneratedFile, "sha256" | "kind">): string {
+  const query = new URLSearchParams({ runId, sha256: file.sha256, kind: file.kind });
+  const search = typeof window === "undefined" ? "" : window.location.search;
+  const token = new URLSearchParams(search).get("token");
+  if (token) query.set("token", token);
+  return `/api/ui/artifacts/download?${query}`;
+}
+
+export function evidenceArtifactUrl(
+  runId: string,
+  ref: { artifactId: string; revision: number; contentHash: string },
+): string {
+  const query = new URLSearchParams({
+    runId,
+    artifactId: ref.artifactId,
+    revision: String(ref.revision),
+    contentHash: ref.contentHash,
+  });
+  const search = typeof window === "undefined" ? "" : window.location.search;
+  const token = new URLSearchParams(search).get("token");
+  if (token) query.set("token", token);
+  return `/api/ui/evidence/artifact?${query}`;
+}
+
+export async function loadEvidenceArtifact(
+  runId: string,
+  ref: { artifactId: string; revision: number; contentHash: string },
+): Promise<EvidenceArtifactDetail> {
+  return evidenceArtifactDetailSchema.parse(await getJson(evidenceArtifactUrl(runId, ref)));
 }
 
 async function postUiControl(payload: UiControlPayload): Promise<UiControlResponse> {
@@ -183,6 +214,8 @@ export function connectEvents(runId: string): () => void {
   let retryTimer = 0;
   let retry = 0;
   let socket: WebSocket | null = null;
+  const initialSnapshot = useCompanyStore.getState().snapshot;
+  let terminal = initialSnapshot?.run.id === runId && isTerminalStatus(initialSnapshot.run.status);
 
   const open = () => {
     if (stopped) return;
@@ -199,22 +232,38 @@ export function connectEvents(runId: string): () => void {
     socket.addEventListener("message", (message) => {
       try {
         const envelope = socketEnvelopeSchema.parse(JSON.parse(String(message.data)));
+        if (envelope.type === "error") {
+          useCompanyStore.getState().setError(envelope.data.message);
+          socket?.close();
+          return;
+        }
         if (envelope.type === "snapshot") {
-          if (envelope.data) useCompanyStore.getState().setSnapshot(envelope.data, "live", "seq" in envelope ? envelope.seq : undefined);
+          if (envelope.data) {
+            useCompanyStore.getState().resyncSnapshot(envelope.data, envelope.seq);
+            terminal = isTerminalStatus(envelope.data.run.status);
+          }
+          return;
+        }
+        const lastSeq = useCompanyStore.getState().lastSeq;
+        if (envelope.seq <= lastSeq) return;
+        if (envelope.seq !== lastSeq + 1) {
+          useCompanyStore.getState().setConnection("stale");
+          socket?.close();
           return;
         }
         if ("eventType" in envelope && envelope.eventType === "snapshot_updated") {
-          useCompanyStore.getState().setSnapshot(snapshotSchema.parse(envelope.data), "live", envelope.seq);
+          useCompanyStore.getState().resyncSnapshot(snapshotSchema.parse(envelope.data), envelope.seq);
+          terminal = isTerminalStatus(useCompanyStore.getState().snapshot?.run.status);
           return;
         }
         const event = companyEventSchema.parse(envelope.data);
-        useCompanyStore.getState().appendEvent(event, "seq" in envelope ? envelope.seq : undefined);
+        useCompanyStore.getState().appendEvent(event, envelope.seq);
       } catch {
         useCompanyStore.getState().setConnection("stale");
       }
     });
     socket.addEventListener("close", () => {
-      if (stopped) return;
+      if (stopped || terminal) return;
       useCompanyStore.getState().setConnection("stale");
       retryTimer = window.setTimeout(open, Math.min(15_000, 700 * 2 ** retry++));
     });
@@ -226,4 +275,8 @@ export function connectEvents(runId: string): () => void {
     window.clearTimeout(retryTimer);
     socket?.close();
   };
+}
+
+function isTerminalStatus(status: string | undefined): boolean {
+  return status === "completed" || status === "partial" || status === "failed" || status === "cancelled";
 }

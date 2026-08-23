@@ -2,6 +2,10 @@
   "name": "luna-swarm",
   "version": "0.1.0",
   "description": "Adaptive vertical organizations of ChatGPT-authenticated Codex Luna agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jsk1004ha/luna-swarm.git"
+  },
   "type": "module",
   "private": true,
   "workspaces": [
@@ -11,7 +15,7 @@
     "luna-swarm": "./dist/src/cli.js"
   },
   "files": [
-    "dist/",
+    "dist/src/",
     "ui/dist/",
     "DESIGN.md",
     "SECURITY.md",
@@ -27,8 +31,12 @@
     "dev:ui": "npm run dev --workspace=luna-swarm-ui",
     "start": "node dist/src/cli.js",
     "test": "npm run test:server && npm run test:ui",
-    "test:server": "node --import tsx --test --test-concurrency=1 test/**/*.test.ts",
+    "test:server": "node scripts/test-server.mjs all",
+    "test:server:fast": "node scripts/test-server.mjs fast",
+    "test:server:serial": "node scripts/test-server.mjs serial",
+    "test:coding-harness-quality": "node scripts/test-coding-harness-quality.mjs",
     "test:ui": "npm test --workspace=luna-swarm-ui",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"ui/src/**/*.{ts,tsx}\" && node scripts/check-import-cycles.mjs",
     "check": "tsc -p tsconfig.json --noEmit && npm run check --workspace=luna-swarm-ui",
     "ui": "tsx src/cli.ts ui"
   },
@@ -37,13 +45,18 @@
   },
   "dependencies": {
     "@openai/codex-sdk": "0.147.0",
+    "@resvg/resvg-js": "2.6.2",
+    "pdfkit": "0.19.1",
     "typescript": "^5.9.0",
     "ws": "8.21.3",
     "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/pdfkit": "0.17.6",
     "@types/ws": "8.18.1",
-    "tsx": "^4.20.0"
+    "eslint": "10.8.1",
+    "tsx": "^4.20.0",
+    "typescript-eslint": "8.67.0"
   }
 }

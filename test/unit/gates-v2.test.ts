@@ -15,13 +15,16 @@ import {
   hashOracleArtifactContent,
 } from "../../src/harness-v2/oracle-forge.js";
 import { runArtifactStructuralOracles } from "../../src/harness-v2/oracle-runner.js";
+import { VerificationDiversityCoordinator } from "../../src/orchestrator/verification-diversity-coordinator.js";
 
 const hash = (character: string) => character.repeat(64);
 const registry = organizationRegistryV2();
 const ownerTeam = registry.agents.find((agent) => agent.headquartersId === "engineering")!.teamId;
 const reviewerTeam = registry.agents.find((agent) => agent.headquartersId === "quality")!.teamId;
+const redTeam = registry.agents.find((agent) => agent.teamId.endsWith("/team:security-attack"))!.teamId;
 const ownerAgents = registry.agents.filter((agent) => agent.teamId === ownerTeam);
 const reviewerAgents = registry.agents.filter((agent) => agent.teamId === reviewerTeam);
+const redTeamAgents = registry.agents.filter((agent) => agent.teamId === redTeam);
 
 function workOrder(requiredGateIds: GateId[] = ["G0", "G3"]): WorkOrder {
   return {
@@ -33,7 +36,7 @@ function workOrder(requiredGateIds: GateId[] = ["G0", "G3"]): WorkOrder {
     constraints: [],
     nonGoals: [],
     ownerTeam,
-    reviewerPool: [reviewerTeam],
+    reviewerPool: [redTeam, reviewerTeam],
     risk: "high",
     dependencies: [],
     inputArtifactIds: [],
@@ -121,7 +124,7 @@ function voteArtifacts(): ArtifactRevision[] {
   const output = outputArtifact();
   return [
     ["vote-manager", "m", ownerAgents[1]!.agentId, ownerTeam, "manager", "MANAGER"],
-    ["vote-v1", "n", reviewerAgents[1]!.agentId, reviewerTeam, "blind-validator", "V1"],
+    ["vote-v1", "n", redTeamAgents[0]!.agentId, redTeam, "red-team", "V1"],
     ["vote-v2", "o", reviewerAgents[2]!.agentId, reviewerTeam, "blind-validator", "V2"],
   ].map(([artifactId, hashChar, agentId, teamId, reviewerKind, validatorId]) => ({
     schemaVersion: 1,
@@ -272,6 +275,25 @@ test("G2 recomputes the sealed Oracle receipt against the exact submitted artifa
   });
   assert.equal(valid.passed, true, valid.blockers.join("\n"));
 
+  const historical = await evaluateGateSet({
+    workOrder: order,
+    outputArtifacts: [output],
+    receipts: [g0, g2],
+    blackboard: blackboard([observationArtifact, oracleArtifact]),
+    oracle: {
+      commitment: {
+        suiteId: forged.suite.id,
+        suiteHash: forged.suite.suiteHash,
+        workOrderId: order.id,
+        workOrderRevision: order.revision,
+        requirementIds: [...order.requirementIds],
+        suite: structuredClone(forged.suite),
+      },
+    },
+    allowHistoricalRevisions: true,
+  });
+  assert.equal(historical.passed, true, historical.blockers.join("\n"));
+
   const fabricated = structuredClone(oracleArtifact);
   (fabricated.content as { passed: boolean }).passed = false;
   const rejected = await evaluateGateSet({
@@ -326,6 +348,99 @@ test("G3 recomputes persisted vote provenance and quorum instead of trusting rec
   });
   assert.equal(selfReviewResult.passed, false);
   assert.match(selfReviewResult.blockers.join("\n"), /manager vote cannot self-review/i);
+});
+
+test("G3 v3 requires and recomputes host-bound same-Luna verification diversity", async () => {
+  const output = outputArtifact();
+  const votes = voteArtifacts();
+  const g2 = receipt("G2");
+  g2.content.inputArtifacts = [ref(output)];
+  const content = new VerificationDiversityCoordinator().build({
+    risk: "high",
+    outputArtifact: output,
+    backend: { name: "Codex App Server", model: "gpt-5.6-luna", transport: "stdio-jsonrpc" },
+    oracleGateArtifact: ref(g2 as unknown as ArtifactRevision),
+    oracleReceiptHash: `sha256:${hash("r")}`,
+    oraclePassed: true,
+    verifierTeamId: reviewerTeam,
+    redTeam: {
+      artifact: ref(votes[1]!),
+      agentId: votes[1]!.createdBy.agentId,
+      teamId: votes[1]!.createdBy.teamId,
+      verdict: "accept",
+    },
+    workspace: {
+      artifact: ref(votes[2]!),
+      agentId: votes[2]!.createdBy.agentId,
+      teamId: votes[2]!.createdBy.teamId,
+      verdict: "accept",
+    },
+    programKnowledge: {
+      status: "ready",
+      graphHash: hash("g"),
+      nodeCount: 1,
+      edgeCount: 0,
+      indexedAt: new Date(0).toISOString(),
+      omittedFiles: 0,
+      sourceIdentity: `git:${hash("s")}`,
+      cacheKey: hash("k"),
+      parserVersion: "test-parser-v1",
+    },
+  });
+  const diversity: ArtifactRevision = {
+    ...outputArtifact(),
+    artifactId: "verification-diversity-1",
+    contentHash: hash("v"),
+    recordHash: hash("w"),
+    kind: "finding",
+    createdBy: { agentId: "system-gate:verification-diversity", teamId: reviewerTeam, workOrderId: "wo-1" },
+    inputs: [ref(output), ref(g2 as unknown as ArtifactRevision), ref(votes[1]!), ref(votes[2]!)],
+    content: JSON.parse(JSON.stringify(content)),
+  };
+  const g3 = receipt("G3");
+  g3.content.policyVersion = "harness-v2-gates@3";
+  g3.content.diversity = {
+    assessmentArtifact: ref(diversity),
+    assessmentHash: content.assessment.assessmentHash,
+    executionHashes: [...content.assessment.executionHashes],
+    requiredMethods: [...content.assessment.requiredMethods],
+  };
+  g3.inputs = [...votes.map(ref), ref(diversity)];
+  const artifacts: ArtifactRevision[] = [...votes, diversity, g2 as unknown as ArtifactRevision];
+  const byRef = new Map(artifacts.map((artifact) => [`${artifact.artifactId}@${artifact.revision}#${artifact.contentHash}`, artifact]));
+  const boundBlackboard = {
+    read: async (artifactRef: { artifactId: string; revision: number; contentHash: string }) => {
+      const artifact = byRef.get(`${artifactRef.artifactId}@${artifactRef.revision}#${artifactRef.contentHash}`);
+      if (!artifact) throw new Error("missing evidence");
+      return structuredClone(artifact);
+    },
+    isStale: async () => false,
+  } as unknown as ImmutableBlackboard;
+  const accepted = await evaluateGateSet({
+    workOrder: workOrder(),
+    outputArtifacts: [output],
+    receipts: [receipt("G0"), g3],
+    blackboard: boundBlackboard,
+  });
+  assert.equal(accepted.passed, true, accepted.blockers.join("\n"));
+
+  const tampered = structuredClone(diversity);
+  const tamperedContent = tampered.content as unknown as {
+    executions: Array<(typeof content.executions)[number]>;
+  };
+  tamperedContent.executions[0] = {
+    ...tamperedContent.executions[0]!,
+    outcome: "fail",
+  };
+  byRef.set(`${tampered.artifactId}@${tampered.revision}#${tampered.contentHash}`, tampered);
+  const rejected = await evaluateGateSet({
+    workOrder: workOrder(),
+    outputArtifacts: [output],
+    receipts: [receipt("G0"), g3],
+    blackboard: boundBlackboard,
+  });
+  assert.equal(rejected.passed, false);
+  assert.match(rejected.blockers.join("\n"), /diversity|execution evidence/i);
 });
 
 test("deterministic, reproduced critical/security, and missing-requirement findings override passing votes", async () => {

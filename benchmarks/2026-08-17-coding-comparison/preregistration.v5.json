@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "supersedes": "preregistration.v4.json",
+  "createdAt": "2026-08-17T13:25:00.000Z",
+  "reason": "The first real Luna request proved that nested Codex Desktop 0.146 mapped workspace-write to a read-only patch boundary. That run is excluded as infrastructure failure. V5 uses a remote-less disposable clone, no network instruction, and a complete post-run changed-path gate. It also records unavailable total_tokens as null rather than zero.",
+  "excludedInfrastructureAttempts": [
+    "luna-r1-codex.cmd-spawn-EPERM",
+    "luna-r1-WindowsApps-codex.exe-spawn-EPERM",
+    "luna-r1-v4-nested-workspace-read-only",
+    "host-cleanup-policy-rejection"
+  ],
+  "protocol": "direct-codex-model-coding-paired-v5",
+  "baseCommit": "99af081e99226cfc3cb36297325a10c093fae19d",
+  "executionOrder": [
+    ["gpt-5.6-luna", "gpt-5.6-sol"],
+    ["gpt-5.6-sol", "gpt-5.6-luna"],
+    ["gpt-5.6-luna", "gpt-5.6-sol"]
+  ],
+  "reasoningEffort": "medium",
+  "timeoutMs": 1200000,
+  "isolation": "remote-less-disposable-clone-with-post-run-scope-check",
+  "missionHash": "sha256:a7c17910d9ad08f1adacf70c311e2f80fd9e5f69cdeed494c07e0731b7c92dd9",
+  "hiddenSuiteHashes": [
+    "sha256:bd263359ee632063e7c593f7d65e0fcfdc6f711de4b5b00697752bf878ff05e1",
+    "sha256:fe95daf1d10b26e4f1ffeecf08f42e5af6e08c2a973722749b224d81f51c169f"
+  ],
+  "scoreHash": "sha256:ebcd7ce2417420016ac2b932e9c69236e6f2167da0850dcd26dfc64bd4682a0b",
+  "runnerHash": "sha256:f60418a7cedc72c9cddf65d6e0d0c8d1fe1cfd01eecbf85cb6fc44095d09f49a",
+  "allowedChangedPaths": [
+    "src/backend/codex-app-server.ts",
+    "test/unit/app-server.test.ts",
+    "test/fixtures/fake-codex.mjs"
+  ],
+  "primaryGates": [
+    "hidden-race-regression",
+    "focused-app-server-suite",
+    "typescript-no-emit",
+    "changed-path-scope"
+  ],
+  "interpretation": "Model-level coding diagnostic only; not a Luna Swarm system comparison, production sandbox certification, or promotion-grade evaluation."
+}

@@ -1,0 +1,415 @@
+export class TaskPoolClosedError extends Error {
+  constructor(message = "Task pool is closed") {
+    super(message);
+    this.name = "TaskPoolClosedError";
+  }
+}
+
+export class TaskPoolTimeoutError extends Error {
+  constructor(taskId) {
+    super(`Task timed out: ${taskId}`);
+    this.name = "TaskPoolTimeoutError";
+    this.taskId = taskId;
+  }
+}
+
+function requirePositiveSafeInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+}
+
+function requireNonNegativeSafeInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative safe integer`);
+  }
+}
+
+function isAbortSignal(value) {
+  return value !== null
+    && typeof value === "object"
+    && typeof value.aborted === "boolean"
+    && typeof value.addEventListener === "function"
+    && typeof value.removeEventListener === "function";
+}
+
+function abortError(taskId) {
+  const error = new Error(`Task aborted: ${taskId}`);
+  error.name = "AbortError";
+  return error;
+}
+
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+export class AsyncTaskPool {
+  #concurrency;
+  #perKeyConcurrency;
+  #agingMs;
+  #now;
+  #closed = false;
+  #queue = [];
+  #reservedIds = new Set();
+  #active = 0;
+  #activeByKey = new Map();
+  #nextSequence = 0;
+  #draining = false;
+  #idleWaiters = [];
+  #counts = {
+    submitted: 0,
+    started: 0,
+    succeeded: 0,
+    failed: 0,
+    aborted: 0,
+    timedOut: 0,
+    maxActive: 0,
+  };
+
+  constructor(options) {
+    if (options === null || typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("options must be an object");
+    }
+
+    const {
+      concurrency,
+      perKeyConcurrency = 1,
+      agingMs = 100,
+      now = Date.now,
+    } = options;
+
+    requirePositiveSafeInteger(concurrency, "concurrency");
+    requirePositiveSafeInteger(perKeyConcurrency, "perKeyConcurrency");
+    requireNonNegativeSafeInteger(agingMs, "agingMs");
+    if (typeof now !== "function") {
+      throw new TypeError("now must be a function");
+    }
+
+    this.#concurrency = concurrency;
+    this.#perKeyConcurrency = perKeyConcurrency;
+    this.#agingMs = agingMs;
+    this.#now = now;
+  }
+
+  schedule(options) {
+    if (options === null || typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("task options must be an object");
+    }
+
+    const {
+      id,
+      key = "default",
+      priority = 0,
+      timeoutMs,
+      signal,
+      run,
+    } = options;
+
+    if (typeof id !== "string" || id.length === 0) {
+      throw new TypeError("id must be a non-empty string");
+    }
+    if (typeof key !== "string" || key.length === 0) {
+      throw new TypeError("key must be a non-empty string");
+    }
+    if (typeof priority !== "number" || !Number.isFinite(priority)) {
+      throw new TypeError("priority must be a finite number");
+    }
+    if (typeof run !== "function") {
+      throw new TypeError("run must be a function");
+    }
+    if (timeoutMs !== undefined) {
+      requirePositiveSafeInteger(timeoutMs, "timeoutMs");
+    }
+    if (signal !== undefined && !isAbortSignal(signal)) {
+      throw new TypeError("signal must be an AbortSignal");
+    }
+    if (this.#closed) {
+      throw new TaskPoolClosedError();
+    }
+    if (this.#reservedIds.has(id)) {
+      throw new Error(`Task ID is already reserved: ${id}`);
+    }
+
+    const enqueuedAt = this.#readNow();
+    const childController = new AbortController();
+    let resolveCaller;
+    let rejectCaller;
+    const promise = new Promise((resolve, reject) => {
+      resolveCaller = resolve;
+      rejectCaller = reject;
+    });
+    const task = {
+      id,
+      key,
+      priority,
+      timeoutMs,
+      signal,
+      run,
+      enqueuedAt,
+      sequence: this.#nextSequence++,
+      childController,
+      resolveCaller,
+      rejectCaller,
+      outcome: null,
+      state: "queued",
+      timeoutHandle: undefined,
+      onAbort: undefined,
+    };
+
+    this.#reservedIds.add(id);
+    this.#counts.submitted += 1;
+
+    if (signal?.aborted) {
+      const error = abortError(id);
+      childController.abort(error);
+      this.#classify(task, "aborted", error);
+      task.state = "settled";
+      this.#reservedIds.delete(id);
+      this.#notifyIdle();
+      return promise;
+    }
+
+    if (signal !== undefined) {
+      task.onAbort = () => this.#handleCallerAbort(task);
+      signal.addEventListener("abort", task.onAbort, { once: true });
+    }
+
+    this.#queue.push(task);
+    this.#drain(enqueuedAt);
+    return promise;
+  }
+
+  close(options = undefined) {
+    if (options !== undefined
+      && (options === null || typeof options !== "object" || Array.isArray(options))) {
+      throw new TypeError("close options must be an object");
+    }
+    if (options?.abortQueued !== undefined && typeof options.abortQueued !== "boolean") {
+      throw new TypeError("abortQueued must be a boolean");
+    }
+
+    this.#closed = true;
+    if (options?.abortQueued) {
+      const queued = this.#queue;
+      this.#queue = [];
+      for (const task of queued) {
+        this.#settleQueuedAbort(task, new TaskPoolClosedError(), false);
+      }
+      this.#notifyIdle();
+    }
+  }
+
+  whenIdle() {
+    if (this.#queue.length === 0 && this.#active === 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.#idleWaiters.push(resolve);
+    });
+  }
+
+  metrics() {
+    return Object.freeze({
+      queued: this.#queue.length,
+      active: this.#active,
+      submitted: this.#counts.submitted,
+      started: this.#counts.started,
+      succeeded: this.#counts.succeeded,
+      failed: this.#counts.failed,
+      aborted: this.#counts.aborted,
+      timedOut: this.#counts.timedOut,
+      maxActive: this.#counts.maxActive,
+    });
+  }
+
+  #readNow() {
+    const value = this.#now();
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new TypeError("now must return a finite number");
+    }
+    return value;
+  }
+
+  #effectivePriority(task, now) {
+    if (this.#agingMs === 0) {
+      return task.priority;
+    }
+    const waitedMs = Math.max(0, now - task.enqueuedAt);
+    return task.priority + Math.floor(waitedMs / this.#agingMs);
+  }
+
+  #nextEligibleIndex(now) {
+    let bestIndex = -1;
+    let bestPriority = -Infinity;
+    let bestSequence = Infinity;
+
+    for (let index = 0; index < this.#queue.length; index += 1) {
+      const task = this.#queue[index];
+      if ((this.#activeByKey.get(task.key) ?? 0) >= this.#perKeyConcurrency) {
+        continue;
+      }
+      const effectivePriority = this.#effectivePriority(task, now);
+      if (effectivePriority > bestPriority
+        || (effectivePriority === bestPriority && task.sequence < bestSequence)) {
+        bestIndex = index;
+        bestPriority = effectivePriority;
+        bestSequence = task.sequence;
+      }
+    }
+    return bestIndex;
+  }
+
+  #drain(nowHint = undefined) {
+    if (this.#draining) {
+      return;
+    }
+    this.#draining = true;
+    try {
+      let now = nowHint;
+      while (this.#active < this.#concurrency && this.#queue.length > 0) {
+        if (now === undefined) {
+          now = this.#readNow();
+        }
+        const index = this.#nextEligibleIndex(now);
+        if (index === -1) {
+          break;
+        }
+        const [task] = this.#queue.splice(index, 1);
+        this.#start(task);
+      }
+    } finally {
+      this.#draining = false;
+    }
+  }
+
+  #start(task) {
+    task.state = "running";
+    this.#active += 1;
+    this.#activeByKey.set(task.key, (this.#activeByKey.get(task.key) ?? 0) + 1);
+    this.#counts.started += 1;
+    this.#counts.maxActive = Math.max(this.#counts.maxActive, this.#active);
+
+    if (task.timeoutMs !== undefined) {
+      this.#armTimeout(task, task.timeoutMs);
+    }
+
+    let result;
+    try {
+      result = task.run(task.childController.signal);
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+
+    Promise.resolve(result).then(
+      (value) => this.#underlyingSettled(task, true, value),
+      (error) => this.#underlyingSettled(task, false, error),
+    );
+  }
+
+  #armTimeout(task, remainingMs) {
+    const delay = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+    task.timeoutHandle = setTimeout(() => {
+      if (task.state !== "running") {
+        return;
+      }
+      if (remainingMs > MAX_TIMER_DELAY_MS) {
+        this.#armTimeout(task, remainingMs - MAX_TIMER_DELAY_MS);
+        return;
+      }
+      const error = new TaskPoolTimeoutError(task.id);
+      if (this.#classify(task, "timedOut", error)) {
+        task.childController.abort(error);
+      }
+    }, delay);
+  }
+
+  #underlyingSettled(task, succeeded, value) {
+    if (task.state !== "running") {
+      return;
+    }
+
+    if (task.timeoutHandle !== undefined) {
+      clearTimeout(task.timeoutHandle);
+    }
+    if (task.signal !== undefined && task.onAbort !== undefined) {
+      task.signal.removeEventListener("abort", task.onAbort);
+    }
+
+    if (task.outcome === null) {
+      this.#classify(task, succeeded ? "succeeded" : "failed", value);
+    }
+
+    task.state = "settled";
+    this.#active -= 1;
+    const keyActive = this.#activeByKey.get(task.key) - 1;
+    if (keyActive === 0) {
+      this.#activeByKey.delete(task.key);
+    } else {
+      this.#activeByKey.set(task.key, keyActive);
+    }
+    this.#reservedIds.delete(task.id);
+
+    this.#drain();
+    this.#notifyIdle();
+  }
+
+  #handleCallerAbort(task) {
+    const error = abortError(task.id);
+    if (task.state === "queued") {
+      const index = this.#queue.indexOf(task);
+      if (index !== -1) {
+        this.#queue.splice(index, 1);
+      }
+      this.#settleQueuedAbort(task, error);
+      return;
+    }
+    if (task.state === "running" && this.#classify(task, "aborted", error)) {
+      if (task.timeoutHandle !== undefined) {
+        clearTimeout(task.timeoutHandle);
+        task.timeoutHandle = undefined;
+      }
+      task.childController.abort(error);
+    }
+  }
+
+  #settleQueuedAbort(task, error, drain = true) {
+    if (task.state !== "queued") {
+      return;
+    }
+    task.state = "settled";
+    if (task.signal !== undefined && task.onAbort !== undefined) {
+      task.signal.removeEventListener("abort", task.onAbort);
+    }
+    task.childController.abort(error);
+    this.#classify(task, "aborted", error);
+    this.#reservedIds.delete(task.id);
+    if (drain) {
+      this.#drain();
+      this.#notifyIdle();
+    }
+  }
+
+  #classify(task, outcome, value) {
+    if (task.outcome !== null) {
+      return false;
+    }
+    task.outcome = outcome;
+    this.#counts[outcome] += 1;
+    if (outcome === "succeeded") {
+      task.resolveCaller(value);
+    } else {
+      task.rejectCaller(value);
+    }
+    return true;
+  }
+
+  #notifyIdle() {
+    if (this.#queue.length !== 0 || this.#active !== 0 || this.#idleWaiters.length === 0) {
+      return;
+    }
+    const waiters = this.#idleWaiters;
+    this.#idleWaiters = [];
+    for (const resolve of waiters) {
+      resolve();
+    }
+  }
+}
+

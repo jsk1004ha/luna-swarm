@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "allowedFormats": ["pdf", "xlsx", "csv", "svg", "png"],
+  "allowedOutputNames": [
+    "report.pdf",
+    "data.xlsx",
+    "data.csv",
+    "chart.svg",
+    "chart.png"
+  ],
+  "locale": "en-US",
+  "timezone": "Etc/UTC",
+  "limits": {
+    "outputs": 5,
+    "rowsPerDataset": 2000,
+    "totalCells": 50000,
+    "outputBytes": 16777216,
+    "width": 2400,
+    "height": 2400
+  },
+  "fonts": [],
+  "assets": []
+}

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AgentBackend, AgentRequest, AgentResponse } from "../backend/agent-backend.js";
+import type { BackendInfo } from "../backend/agent-backend.js";
 import type { ExecutionController, LaunchPermit } from "../controls/execution-controller.js";
 import type {
   AgentRole,
@@ -18,6 +19,16 @@ import {
   type Clock,
 } from "../util.js";
 import { AdaptivePermitPool, type Permit } from "./adaptive-pool.js";
+import {
+  assertBudgetAdmission,
+  budgetArtifactRef,
+  canonicalSha256,
+  validateCompanyExecutionIdentity,
+  validateCompanyWorkOrder,
+  validateWorkOrderBudget,
+  type BudgetUsage,
+} from "../harness-v2/company-os.js";
+import { COMPANY_OS_ORG_VERSION } from "../harness-v2/contracts.js";
 
 export type ErrorKind = "rate_limit" | "auth" | "transient" | "permanent" | "abort";
 
@@ -67,6 +78,8 @@ export class AgentGateway {
   private readonly callBreakdown = new Map<string, CallPurposeMetrics>();
   private lastCooldownUntil = 0;
   private callSequence = 0;
+  private readonly companyBudgetUsage = new Map<string, BudgetUsage>();
+  private companyAuthorityRequired = false;
 
   constructor(private readonly options: GatewayOptions) {
     this.clock = options.clock ?? systemClock;
@@ -107,6 +120,7 @@ export class AgentGateway {
   }
 
   async run(request: AgentRequest, signal?: AbortSignal): Promise<AgentResponse> {
+    this.assertCompanyRequestAuthority(request);
     let entry = this.threadLocks.get(request.threadKey);
     if (!entry) {
       entry = { mutex: new Mutex(), users: 0 };
@@ -201,6 +215,7 @@ export class AgentGateway {
       let callMetricsRecorded = false;
       let callMetrics: CallPurposeMetrics | undefined;
       let backendStartedAt = 0;
+      let companyUsageRecorded = false;
       try {
         const failureBeforeSend = this.getAuthFailure();
         if (failureBeforeSend) {
@@ -218,6 +233,7 @@ export class AgentGateway {
             attempt - 1,
           );
         }
+        this.reserveCompanyCall(effectiveRequest);
         this.modelCalls += 1;
         backendInvoked = true;
         callMetrics = this.recordCallStarted(effectiveRequest, permit.queueWaitMs);
@@ -252,6 +268,13 @@ export class AgentGateway {
         const outcome = await backendOutcome;
         if (!outcome.ok) throw outcome.error;
         const response = outcome.response;
+        this.recordCompanyCallCompletion(
+          effectiveRequest,
+          response.tokenUsage,
+          response.tokenUsageComplete === true,
+          response.durationMs,
+        );
+        companyUsageRecorded = true;
         this.recordCallCompleted(
           callMetrics,
           response.tokenUsage,
@@ -290,6 +313,16 @@ export class AgentGateway {
         });
         return { ...response, queueWaitMs: totalQueueWaitMs, modelTurns: attempt };
       } catch (error) {
+        if (backendInvoked && !companyUsageRecorded) {
+          const failedUsage = tokenUsageFromError(error);
+          this.recordCompanyCallCompletion(
+            effectiveRequest!,
+            failedUsage.usage,
+            failedUsage.complete,
+            Math.max(0, this.clock.now() - backendStartedAt),
+          );
+          companyUsageRecorded = true;
+        }
         if (backendInvoked && !callMetricsRecorded) {
           const failedUsage = tokenUsageFromError(error);
           this.recordCallCompleted(
@@ -391,6 +424,113 @@ export class AgentGateway {
         .map(cloneCallPurposeMetrics)
         .sort((left, right) => left.role.localeCompare(right.role) || left.purpose.localeCompare(right.purpose)),
     };
+  }
+
+  backendInfo(): BackendInfo {
+    return this.options.backend.info();
+  }
+
+  /** Permanently fail closed for every subsequent call in a Company OS run. */
+  requireCompanyAuthority(): void {
+    this.companyAuthorityRequired = true;
+  }
+
+  private assertCompanyRequestAuthority(request: AgentRequest): void {
+    const authority = request.companyAuthority;
+    const isCompanyRequest = this.companyAuthorityRequired ||
+      request.companyAuthorityRequired === true ||
+      request.roleContract?.orgVersion === COMPANY_OS_ORG_VERSION ||
+      request.hostToolSession?.authority !== undefined;
+    if (!authority) {
+      if (isCompanyRequest) {
+        throw new AgentCallError("Company request requires exact Company authority", "permanent", 0);
+      }
+      return;
+    }
+    validateCompanyExecutionIdentity({
+      runId: authority.runId,
+      workOrderId: authority.workOrderId,
+      workOrderRevision: authority.workOrderRevision,
+      executionRevision: authority.executionRevision,
+      attemptId: authority.attemptId,
+      fencingToken: authority.fencingToken,
+      authorityKind: "model",
+    });
+    validateCompanyWorkOrder(authority.workOrder);
+    validateWorkOrderBudget(authority.budget);
+    if (
+      request.workOrderId !== authority.workOrderId ||
+      authority.workOrder.id !== authority.workOrderId ||
+      authority.workOrder.revision !== authority.workOrderRevision ||
+      canonicalSha256(authority.workOrder) !== authority.workOrderHash ||
+      authority.budget.workOrderId !== authority.workOrderId ||
+      authority.budget.workOrderRevision !== authority.workOrderRevision ||
+      authority.budget.budgetHash !== authority.budgetHash ||
+      canonicalSha256(request.effectiveToolPolicy ?? {
+        allowedTools: [],
+        network: "off",
+        allowedDomains: [],
+        readScopes: [],
+        writeScopes: [],
+      }) !== authority.toolPolicyHash ||
+      !sameArtifactRef(authority.budgetArtifactRef, budgetArtifactRef(authority.budget))
+    ) {
+      throw new AgentCallError("Company Work Order authority binding mismatch", "permanent", 0);
+    }
+    if (request.agentSlotId && request.agentSlotId !== authority.agentId) {
+      throw new AgentCallError("Company employee identity does not match the Work Order authority", "permanent", 0);
+    }
+    if (request.roleContract && request.roleContract.agentId !== authority.agentId) {
+      throw new AgentCallError("Company role contract does not match the Work Order authority", "permanent", 0);
+    }
+    if (request.attemptIdentity && (
+      request.attemptIdentity.runId !== authority.runId ||
+      request.attemptIdentity.workOrderId !== authority.workOrderId ||
+      request.attemptIdentity.attemptId !== authority.attemptId ||
+      request.attemptIdentity.fencingToken !== authority.fencingToken ||
+      request.attemptIdentity.budgetDigest !== authority.budgetHash
+    )) {
+      throw new AgentCallError("Evolution attempt identity does not match Company authority", "permanent", 0);
+    }
+    if (request.hostToolSession) {
+      const bound = request.hostToolSession.authority;
+      if (!bound || canonicalSha256(bound) !== canonicalSha256(stripCompanyAuthority(authority))) {
+        throw new AgentCallError("Host Tool Session is not bound to the exact Company authority", "permanent", 0);
+      }
+    } else if ((request.effectiveToolPolicy?.allowedTools.length ?? 0) > 0) {
+      throw new AgentCallError("Company Work Order with tools requires a bound Host Tool Session", "permanent", 0);
+    }
+  }
+
+  private reserveCompanyCall(request: AgentRequest): void {
+    const authority = request.companyAuthority;
+    if (!authority) return;
+    this.assertCompanyRequestAuthority(request);
+    const usage = this.companyBudgetUsage.get(authority.budgetHash) ?? emptyBudgetUsage();
+    assertBudgetAdmission(authority.budget, usage, { modelCalls: 1 });
+    this.companyBudgetUsage.set(authority.budgetHash, { ...usage, modelCalls: usage.modelCalls + 1 });
+  }
+
+  private recordCompanyCallCompletion(
+    request: AgentRequest,
+    tokenUsage: ModelTokenUsage | undefined,
+    tokenUsageComplete: boolean,
+    durationMs: number,
+  ): void {
+    const authority = request.companyAuthority;
+    if (!authority) return;
+    const current = this.companyBudgetUsage.get(authority.budgetHash) ?? emptyBudgetUsage();
+    const next: BudgetUsage = {
+      ...current,
+      inputTokens: current.inputTokens + (tokenUsage?.inputTokens ?? 0),
+      outputTokens: current.outputTokens + (tokenUsage?.outputTokens ?? 0),
+      elapsedMs: current.elapsedMs + Math.max(0, Math.round(durationMs)),
+    };
+    this.companyBudgetUsage.set(authority.budgetHash, next);
+    assertBudgetAdmission(authority.budget, next);
+    if (authority.strictMetering && (!tokenUsage || !tokenUsageComplete)) {
+      throw new AgentCallError("Strict Company Work Order received an unmetered model response", "permanent", 1);
+    }
   }
 
   private recordCallStarted(request: AgentRequest, queueWaitMs: number): CallPurposeMetrics {
@@ -505,6 +645,46 @@ export class AgentGateway {
       prompt: `${request.prompt}\n\n<operator-instruction id="${instruction.id}">\n${instruction.text}\n</operator-instruction>`,
     };
   }
+}
+
+function emptyBudgetUsage(): BudgetUsage {
+  return {
+    modelCalls: 0,
+    toolCalls: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    elapsedMs: 0,
+    repairCalls: 0,
+    revalidationCalls: 0,
+    concurrentCells: 0,
+  };
+}
+
+function stripCompanyAuthority(
+  authority: NonNullable<AgentRequest["companyAuthority"]>,
+): NonNullable<AgentRequest["hostToolSession"]>["authority"] {
+  return {
+    schemaVersion: authority.schemaVersion,
+    runId: authority.runId,
+    agentId: authority.agentId,
+    workOrderId: authority.workOrderId,
+    workOrderRevision: authority.workOrderRevision,
+    workOrderHash: authority.workOrderHash,
+    toolPolicyHash: authority.toolPolicyHash,
+    executionRevision: authority.executionRevision,
+    attemptId: authority.attemptId,
+    fencingToken: authority.fencingToken,
+    budgetHash: authority.budgetHash,
+  };
+}
+
+function sameArtifactRef(
+  left: { artifactId: string; revision: number; contentHash: string },
+  right: { artifactId: string; revision: number; contentHash: string },
+): boolean {
+  return left.artifactId === right.artifactId &&
+    left.revision === right.revision &&
+    left.contentHash === right.contentHash;
 }
 
 const ROLE_SCHEDULER_PRIORITY: Record<AgentRole, number> = {

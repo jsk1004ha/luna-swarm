@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 2,
+  "benchmarkId": "company-os-v4-coding-crash-safe-lease-log",
+  "preregisteredAt": "2026-08-24T02:30:00+09:00",
+  "diagnosticSeed": "smoke-1",
+  "diagnosticOnly": true,
+  "generalizationClaimAllowed": false,
+  "fixture": {
+    "baseCommit": "8ef24a10550311e60658fcb36ba84cb12e09e64f",
+    "branch": "main",
+    "bundleSha256": "sha256:8af456d4a71aa12a0edc4d4cc70a12c92a882525d2f69d28f287ff7a734d864a",
+    "allowedChangedPaths": ["src/crash-safe-lease-log.mjs"],
+    "contractSha256": "sha256:57253c64523d8f1c87217630a63b7029280d2a3aa864ec6a9f05a35b0db057b9",
+    "packageSha256": "sha256:dc47a053e585155207b3b1a7bfa8db2893bc5ee5985ea9fe8cd02b7c93a22b3a",
+    "starterSha256": "sha256:1bc403ee8d61d377d35d0532358ed17a03a7fb8dbc03b72d7e1d832b6f07b925",
+    "publicTests": [
+      {
+        "path": "test/public/crash-safe-lease-log.public.test.mjs",
+        "sha256": "sha256:f834d3e181d33720b859f0f567154437cf2cc68cb6d1844169d39c0cf92f3019"
+      },
+      {
+        "path": "test/public/type-contract.public.test.mjs",
+        "sha256": "sha256:823fca41f845e68761f0c39c816e4e6956947db2e81f7c5fe0f8644097590cc4"
+      }
+    ],
+    "hiddenSuiteSha256": "sha256:f904888908b67d007e435b2465dc22b1e1ba8cb2f36f66e22be09bbbe6a3239d"
+  },
+  "mission": {
+    "path": "mission.md",
+    "sha256": "sha256:3c6ddc44078f783a99ca54c0e3e3ab3f361dbff26b359dce054c4a76ca7d733b",
+    "timeBudgetMsPerArm": 3600000,
+    "networkAllowed": false,
+    "dependencyInstallationAllowed": false,
+    "hiddenInputsAvailableToCandidates": false
+  },
+  "arms": [
+    {
+      "id": "single-sol",
+      "system": "single-codex-sol-session",
+      "entrypoint": "Codex App Server read-only structured generation; host exact-path materialization",
+      "model": "gpt-5.6-sol",
+      "modelConstraint": "exactly one non-resumed Codex App Server session; strict full-source schema; host writes only the exact sourcePath; network and subagents forbidden"
+    },
+    {
+      "id": "single-luna",
+      "system": "single-codex-luna-session",
+      "entrypoint": "Codex App Server read-only structured generation; host exact-path materialization",
+      "model": "gpt-5.6-luna",
+      "modelConstraint": "exactly one non-resumed Codex App Server session; strict full-source schema; host writes only the exact sourcePath; network and subagents forbidden"
+    },
+    {
+      "id": "serial-luna-retry",
+      "system": "two-serial-codex-luna-sessions-with-public-test-feedback",
+      "entrypoint": "Codex App Server read-only structured generation twice; host exact-path materialization after each session",
+      "model": "gpt-5.6-luna",
+      "modelConstraint": "exactly two non-resumed serial Codex App Server sessions; strict full-source schema; second receives only mission, current source, and visible public-test trajectory; host writes only exact sourcePath; network and subagents forbidden"
+    },
+    {
+      "id": "luna-swarm",
+      "system": "actual-luna-swarm-company-os-coding",
+      "entrypoint": "dist/src/cli.js code",
+      "model": "gpt-5.6-luna",
+      "modelConstraint": "all generative calls use gpt-5.6-luna",
+      "configSha256": "sha256:461d5f1075728b6a3a256777443ffa442eef2caf57f1dd986cbc25702b3ab76f",
+      "codingPolicySha256": "sha256:6d98facd7c12de448e505c4fe5613acb39c99ce0061e599a30bc5d13af7ae77d"
+    }
+  ],
+  "protocolAmendment": {
+    "version": "company-os-v4/direct-full-source@1",
+    "amendedAt": "2026-08-24T04:16:27+09:00",
+    "effectiveComparisonId": "actual-v3",
+    "reason": "actual-v2 proved that nested Windows codex exec advertised workspace-write but the effective child sandbox was read-only; actual-v2 evidence is retained as an infrastructure failure",
+    "candidateContext": "first session receives only mission, fixture README, starter source, and public tests; retry receives only mission, current source, and public-test trajectory",
+    "authority": "model calls are read-only and tool-less; the host validates an exact JSON schema and writes only src/crash-safe-lease-log.mjs"
+  },
+  "executionOrder": ["single-sol", "single-luna", "serial-luna-retry", "luna-swarm"],
+  "comparisons": {
+    "primaryPair": { "treatment": "luna-swarm", "baseline": "single-sol" },
+    "ablations": [
+      { "id": "serial-retry-ablation", "treatment": "serial-luna-retry", "baseline": "single-luna" },
+      { "id": "swarm-ablation", "treatment": "luna-swarm", "baseline": "serial-luna-retry" }
+    ]
+  },
+  "fullStudyRequirement": {
+    "minimumCases": 30,
+    "minimumSeedsPerCase": 3,
+    "satisfiedByThisDiagnostic": false,
+    "claimWhenUnsatisfied": "forbidden"
+  },
+  "candidateFreeze": {
+    "beforeHiddenEvaluation": true,
+    "bundleRequired": true,
+    "patchHashRequired": true,
+    "sourceHashRequired": true,
+    "resultOverwriteForbidden": true,
+    "disposableRemoteLessCloneRequired": true
+  },
+  "qualityScoring": {
+    "allGatesRequired": true,
+    "efficiencyCannotOffsetQualityFailure": true,
+    "gates": [
+      { "id": "hidden-contract", "points": 50 },
+      { "id": "public-contract", "points": 15 },
+      { "id": "runtime-type-contract", "points": 5 },
+      { "id": "syntax", "points": 5 },
+      { "id": "scope-and-repository-integrity", "points": 15 },
+      { "id": "frozen-input-integrity", "points": 10 }
+    ]
+  },
+  "telemetry": {
+    "reportedSeparatelyFromQuality": true,
+    "requiredFields": [
+      "wallMs",
+      "modelCalls",
+      "tokenUsage",
+      "tokenMeteredCalls",
+      "tokenUnmeteredCalls",
+      "tokenUsageComplete",
+      "costUsd",
+      "costReportedCalls",
+      "costUnreportedCalls",
+      "costComplete",
+      "completion"
+    ],
+    "missingValuesEstimated": false
+  },
+  "interpretation": [
+    "This one task is diagnostic evidence only.",
+    "A win or tie cannot establish Sol-level general coding performance.",
+    "Luna Swarm and the three ablation/comparison arms have different orchestration overhead; quality and efficiency are reported separately.",
+    "No paired, ablation, token, or cost claim is allowed unless every referenced arm has a frozen run and deterministic evaluation.",
+    "Provider cost is never inferred from token counts; absent provider-reported cost remains null and incomparable."
+  ]
+}

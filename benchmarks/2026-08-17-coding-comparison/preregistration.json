@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-08-17T13:10:17.6263852Z",
+  "protocol": "direct-codex-model-coding-paired-v1",
+  "interpretation": "This is a model-level coding diagnostic under one Codex wrapper, not evidence that the full Luna Swarm coding route is production-ready.",
+  "baseCommit": "99af081e99226cfc3cb36297325a10c093fae19d",
+  "models": ["gpt-5.6-luna", "gpt-5.6-sol"],
+  "reasoningEffort": "medium",
+  "repetitions": 3,
+  "executionOrder": [
+    ["gpt-5.6-luna", "gpt-5.6-sol"],
+    ["gpt-5.6-sol", "gpt-5.6-luna"],
+    ["gpt-5.6-luna", "gpt-5.6-sol"]
+  ],
+  "budgets": {
+    "wallMinutesPerRun": 20,
+    "network": false,
+    "dependencyInstall": false,
+    "allowedChangedFiles": 3
+  },
+  "qualityRule": {
+    "criticalGates": ["hiddenPass", "focusedPass", "typecheckPass", "scopePass"],
+    "qualityNonInferiorityPoints": 3,
+    "efficiencyComparedOnlyAfterQualityNonInferiority": true
+  },
+  "files": {
+    "mission.txt": "sha256:a7c17910d9ad08f1adacf70c311e2f80fd9e5f69cdeed494c07e0731b7c92dd9",
+    "hidden/fake-codex-early-usage.mjs": "sha256:bd263359ee632063e7c593f7d65e0fcfdc6f711de4b5b00697752bf878ff05e1",
+    "hidden/early-raw-response.test.ts": "sha256:fe95daf1d10b26e4f1ffeecf08f42e5af6e08c2a973722749b224d81f51c169f",
+    "run-candidate.mjs": "sha256:4a91ec5a69eca979f5a9c65336a599038165d171e3d609f7951fab757b9c0ddd",
+    "score-candidate.mjs": "sha256:fb2c2a76ad866d0315bdc264087a6fd238e35d37882e212b31c68a6a82af8f3e"
+  },
+  "baselineHiddenTest": {
+    "expected": "fail",
+    "observed": "fail",
+    "failure": "stale turn usage was incorrectly included: 1100 total tokens instead of 100"
+  }
+}

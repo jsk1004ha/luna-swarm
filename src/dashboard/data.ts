@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { open, readFile, readdir, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { organizationRegistryV2 } from "../harness-v2/organization-registry.js";
+import { ImmutableBlackboard } from "../harness-v2/blackboard.js";
+import type { ArtifactRef, ArtifactRevision } from "../harness-v2/contracts.js";
 import {
   HARNESS_V2_AGENT_COUNT,
   HARNESS_V2_MAX_AGENT_COUNT,
@@ -24,6 +27,7 @@ import type {
   TaskRecord,
   TaskStatus,
   TeamRecord,
+  JsonValue,
 } from "../types.js";
 
 export type DashboardActivity =
@@ -171,12 +175,30 @@ export interface DashboardReport {
   teamId?: string;
   sourceTaskIds: string[];
   sections: Array<{ title: string; items: string[] }>;
+  generatedFiles?: DashboardGeneratedFile[];
   references: {
     artifactIds: string[];
     gateIds: string[];
     reviewerIds: string[];
     eventIds: string[];
   };
+}
+
+export interface DashboardGeneratedFile {
+  id: string;
+  kind: "output" | "preview";
+  fileName: string;
+  format: "pdf" | "docx" | "pptx" | "xlsx" | "csv" | "svg" | "png";
+  mimeType: string;
+  bytes: number;
+  sha256: string;
+}
+
+export interface DashboardArtifactDownload {
+  bytes: Buffer;
+  fileName: string;
+  mimeType: string;
+  sha256: string;
 }
 
 export interface DashboardEvent {
@@ -190,6 +212,10 @@ export interface DashboardEvent {
   status?: string;
   department?: Department;
   taskId?: string;
+  workOrderId?: string;
+  councilId?: string;
+  artifactIds?: string[];
+  messageType?: string;
   agentId?: string;
   role?: AgentRole;
   corporateRole?: string;
@@ -265,6 +291,7 @@ export interface DashboardSnapshot {
   workOrders?: DashboardWorkOrderV2[];
   councils?: DashboardCouncilV2[];
   intelligenceV2?: DashboardIntelligenceV2;
+  reportCenter?: DashboardReportCenter;
 }
 
 export interface DashboardIntelligenceV2 {
@@ -343,6 +370,117 @@ export interface DashboardCouncilV2 {
   blockingFindings: string[];
 }
 
+export type DashboardCompanyStatus = "ready" | "needs-review" | "blocked" | "running";
+
+export interface DashboardEmployeeBinding {
+  agentId: string;
+  displayName: string;
+  title: string;
+  department: Department;
+  teamId?: string;
+}
+
+export interface DashboardReportCenter {
+  executiveBrief: {
+    directive: string;
+    summary?: string;
+    coveredRequirements: number;
+    totalRequirements: number;
+    unresolvedRisks: number;
+    approvalStatus: DashboardCompanyStatus;
+  };
+  staffing: {
+    logical: number;
+    active: number;
+    inflight: number;
+    idle: number;
+    employees: DashboardEmployeeBinding[];
+  };
+  missionCells: Array<{
+    id: string;
+    status: DashboardCompanyStatus;
+    lifecycle: string;
+    owner: DashboardEmployeeBinding;
+    members: DashboardEmployeeBinding[];
+    workOrderIds: string[];
+    createdAt: string;
+  }>;
+  departmentBoard: Array<{
+    id: string;
+    headquartersId?: string;
+    objective: string;
+    status: DashboardCompanyStatus;
+    lifecycle: string;
+    owner: DashboardEmployeeBinding;
+    reviewers: DashboardEmployeeBinding[];
+    artifactIds: string[];
+    handoffArtifactIds: string[];
+    cycleTimeMs?: number;
+    reworkCount: number;
+  }>;
+  meetings: Array<{
+    id: string;
+    agenda: string;
+    state: string;
+    status: DashboardCompanyStatus;
+    participants: DashboardEmployeeBinding[];
+    round: number;
+    newEvidenceCount: number;
+    challengeCount: number;
+    minorityCount: number;
+    followUpWorkOrderIds: string[];
+    outcome?: string;
+  }>;
+  evidenceLedger: Array<{
+    artifactId: string;
+    revision?: number;
+    contentHash?: string;
+    artifactRef?: ArtifactRef;
+    taskId?: string;
+    workOrderId?: string;
+    status: DashboardCompanyStatus;
+    gateIds: string[];
+    referenceKinds: Array<"artifact-head" | "work-order" | "research-envelope" | "host-tool-receipt">;
+    hostToolReceiptArtifactIds: string[];
+    publiclyInspectable: boolean;
+  }>;
+  engineeringQuality: Array<{
+    taskId: string;
+    candidateCount: number;
+    selectedCandidateId?: string;
+    protectedCheckCount: number;
+    repairRounds: number;
+    redFindingCount: number;
+    redVerdict?: string;
+    integrated: boolean;
+  }>;
+  visualQa: Array<{
+    taskId: string;
+    fileName: string;
+    format: DashboardGeneratedFile["format"];
+    unitKind: "page" | "slide" | "view";
+    unitCount: number;
+    previewCount: number;
+    qaReceiptCount: number;
+    status: DashboardCompanyStatus;
+  }>;
+  artifacts: Array<DashboardGeneratedFile & {
+    taskId: string;
+    sourceArtifactId?: string;
+    rendererReceiptIds: string[];
+    qaReceiptIds: string[];
+    stale: boolean;
+  }>;
+  health: {
+    activeAssignmentRate: number;
+    meetingCount: number;
+    meetingEvidenceCount: number;
+    handoffCount: number;
+    reworkCount: number;
+    reviewerIndependenceViolations: number;
+  };
+}
+
 export interface DashboardDataOptions {
   workspace?: string;
   stateDirectory?: string;
@@ -408,6 +546,18 @@ const OUTPUT_LIMIT = 60;
 const REPORT_LIMIT = 120;
 const OUTPUT_SUMMARY_CHARS = 280;
 const OUTPUT_ITEM_CHARS = 180;
+const MAX_GENERATED_FILES = 32;
+const ARTIFACT_HASH = /^[0-9a-f]{64}$/;
+const ARTIFACT_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const ARTIFACT_MIME: Record<DashboardGeneratedFile["format"], string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  csv: "text/csv; charset=utf-8",
+  svg: "image/svg+xml",
+  png: "image/png",
+};
 
 const FAMILY_NAMES = [
   "김", "이", "박", "최", "정", "강", "조", "윤", "장", "임",
@@ -676,6 +826,241 @@ interface OrderedRunEvent {
   ordinal: number;
 }
 
+export interface DashboardEvidenceArtifact {
+  schemaVersion: 1;
+  artifactRef: ArtifactRef;
+  taskId: string;
+  workOrderId: string;
+  kind: "research";
+  verificationStatus: "accepted";
+  createdAt: string;
+  claims: Array<{
+    claimId: string;
+    claimText: string;
+    status: string;
+    modality: string;
+    claimHash: string;
+    citations: Array<{
+      citationHash: string;
+      snapshotHash: string;
+      sourceFamilyId: string;
+      sourceIdentityHash: string;
+      sourceUrl: string;
+      finalUrl: string;
+      spans: Array<{ startByte: number; endByte: number; quoteHash: string; quote: string }>;
+    }>;
+  }>;
+}
+
+export type DashboardEvidenceLookupResult =
+  | { status: "found"; artifact: DashboardEvidenceArtifact }
+  | { status: "not-found" }
+  | { status: "mismatch" };
+
+/** Resolves a generated file only when the run checksum, host proof, CAS path, bytes, and hash all agree. */
+export async function getDashboardArtifactDownload(
+  options: DashboardDataOptions,
+  input: { runId: string; sha256: string; kind: "output" | "preview" },
+): Promise<DashboardArtifactDownload | null> {
+  if (!isValidRunId(input.runId)) throw new Error("Invalid run id");
+  if (!ARTIFACT_HASH.test(input.sha256)) throw new Error("Invalid artifact hash");
+  const workspace = resolve(options.workspace ?? process.cwd());
+  const stateDirectory = options.stateDirectory ?? ".luna-swarm";
+  const runsDirectory = resolve(workspace, stateDirectory, "runs");
+  const loaded = await loadSelectedRun(runsDirectory, input.runId);
+  if (!loaded) return null;
+  const descriptor = findStoredArtifact(loaded.state, input.sha256, input.kind);
+  if (!descriptor) return null;
+
+  const runInfo = await lstat(loaded.runDirectory);
+  if (!runInfo.isDirectory() || runInfo.isSymbolicLink()) throw new Error("Artifact run directory is unsafe");
+  const root = resolve(loaded.runDirectory, "artifact-files");
+  const rootInfo = await lstat(root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("Artifact store root is unsafe");
+  const expectedRelativePath = descriptor.relativePath;
+  const path = containedPath(root, expectedRelativePath);
+  const canonicalRoot = await realpath(root);
+  const canonicalPath = await realpath(path);
+  if (canonicalPath !== canonicalRoot && !canonicalPath.startsWith(`${canonicalRoot}${sep}`)) {
+    throw new Error("Artifact file resolves outside its run store");
+  }
+  const pathSegments = expectedRelativePath.split("/");
+  for (let index = 0; index < pathSegments.length - 1; index += 1) {
+    const segmentPath = containedPath(root, pathSegments.slice(0, index + 1).join("/"));
+    const info = await lstat(segmentPath);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Artifact CAS contains an unsafe directory");
+  }
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size !== descriptor.bytes) {
+    throw new Error("Artifact CAS file does not match its host proof");
+  }
+  if (before.size < 0 || before.size > 64 * 1024 * 1024) throw new Error("Artifact CAS file exceeds the download bound");
+  const handle = await open(canonicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat();
+    if (!sameStableFile(before, opened)) throw new Error("Artifact CAS file changed before reading");
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (!sameStableFile(opened, after) || bytes.length !== descriptor.bytes) {
+      throw new Error("Artifact CAS file changed while reading");
+    }
+    const actualHash = createHash("sha256").update(bytes).digest("hex");
+    if (actualHash !== descriptor.sha256) throw new Error("Artifact CAS hash does not match its host proof");
+    return { bytes, fileName: descriptor.fileName, mimeType: descriptor.mimeType, sha256: descriptor.sha256 };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Returns only the bounded, public projection of an accepted research envelope.
+ * The exact immutable ref must still be referenced by the selected run state; a
+ * valid Blackboard identity alone is never sufficient authorization.
+ */
+export async function getDashboardEvidenceArtifact(
+  options: DashboardDataOptions,
+  input: { runId: string; artifactId: string; revision: number; contentHash: string },
+): Promise<DashboardEvidenceLookupResult> {
+  if (!isValidRunId(input.runId)) throw new Error("Invalid run id");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.artifactId)) throw new Error("Invalid artifact id");
+  if (!Number.isSafeInteger(input.revision) || input.revision < 1) throw new Error("Invalid artifact revision");
+  if (!ARTIFACT_HASH.test(input.contentHash)) throw new Error("Invalid artifact content hash");
+
+  const workspace = resolve(options.workspace ?? process.cwd());
+  const stateDirectory = options.stateDirectory ?? ".luna-swarm";
+  const runsDirectory = resolve(workspace, stateDirectory, "runs");
+  const loaded = await loadSelectedRun(runsDirectory, input.runId);
+  if (!loaded) return { status: "not-found" };
+  const requestedRef: ArtifactRef = {
+    artifactId: input.artifactId,
+    revision: input.revision,
+    contentHash: input.contentHash,
+  };
+  const task = Object.values(loaded.state.tasks).find((candidate) =>
+    candidate.researchEnvelopeRef?.artifactId === requestedRef.artifactId);
+  if (!task?.researchEnvelopeRef) return { status: "not-found" };
+  if (!sameDashboardArtifactRef(task.researchEnvelopeRef, requestedRef)) return { status: "mismatch" };
+  const harness = loaded.state.harnessV2;
+  const record = harness?.workOrders[task.id];
+  if (task.status !== "accepted" || !record || !["ACCEPTED", "INTEGRATED"].includes(record.state) ||
+      !record.artifactIds.includes(requestedRef.artifactId) ||
+      !sameDashboardArtifactRef(harness.artifactHeads[requestedRef.artifactId], requestedRef)) {
+    return { status: "not-found" };
+  }
+
+  let artifact: ArtifactRevision;
+  try {
+    artifact = await new ImmutableBlackboard(loaded.runDirectory, input.runId).read(requestedRef);
+  } catch {
+    return { status: "mismatch" };
+  }
+  if (artifact.kind !== "research" || artifact.verificationStatus !== "accepted" ||
+      artifact.runId !== input.runId || artifact.createdBy.workOrderId !== record.order.id ||
+      artifact.createdBy.runId !== input.runId) {
+    return { status: "not-found" };
+  }
+  const projected = projectPublicResearchEnvelope(artifact, task.id, record.order.id);
+  return projected ? { status: "found", artifact: projected } : { status: "mismatch" };
+}
+
+function projectPublicResearchEnvelope(
+  artifact: ArtifactRevision,
+  taskId: string,
+  workOrderId: string,
+): DashboardEvidenceArtifact | null {
+  const content = artifact.content;
+  if (!isRecord(content) || content.status !== "accepted" || !isRecord(content.claimGraph) ||
+      !Array.isArray(content.claimGraph.claims) || !Array.isArray(content.sources) ||
+      !Array.isArray(content.citationReplay)) return null;
+  const sources = new Map<string, {
+    sourceFamilyId: string; sourceUrl: string; finalUrl: string; snapshotHash: string;
+  }>();
+  for (const raw of content.sources) {
+    if (!isRecord(raw) || !isRecord(raw.sourceIdentity) || !isRecord(raw.snapshot)) return null;
+    const identityHash = safeResearchHash(raw.sourceIdentity.identityHash);
+    const sourceFamilyId = safeResearchHash(raw.sourceIdentity.sourceFamilyId);
+    const snapshotHash = safeResearchHash(raw.snapshot.snapshotHash);
+    const sourceUrl = safePublicHttpsUrl(raw.snapshot.sourceUrl);
+    const finalUrl = safePublicHttpsUrl(raw.snapshot.finalUrl);
+    if (!identityHash || !sourceFamilyId || !snapshotHash || !sourceUrl || !finalUrl || sources.has(identityHash)) return null;
+    sources.set(identityHash, { sourceFamilyId, sourceUrl, finalUrl, snapshotHash });
+  }
+  const replay = new Map<string, { snapshotHash: string; spans: Array<{ startByte: number; endByte: number; quoteHash: string; quote: string }> }>();
+  for (const raw of content.citationReplay) {
+    if (!isRecord(raw) || !isRecord(raw.citation) || !Array.isArray(raw.citation.spans) || !Array.isArray(raw.quotes) ||
+        raw.citation.spans.length !== raw.quotes.length || raw.citation.spans.length < 1 || raw.citation.spans.length > 32) return null;
+    const citationHash = safeResearchHash(raw.citation.citationHash);
+    const snapshotHash = safeResearchHash(raw.citation.snapshotHash);
+    if (!citationHash || !snapshotHash || replay.has(citationHash)) return null;
+    const quotes = raw.quotes;
+    const spans = raw.citation.spans.map((span, index) => {
+      if (!isRecord(span) || !Number.isSafeInteger(span.startByte) || !Number.isSafeInteger(span.endByte) ||
+          (span.startByte as number) < 0 || (span.endByte as number) <= (span.startByte as number)) return null;
+      const quoteHash = safeResearchHash(span.quoteHash);
+      const quote = safePublicText(quotes[index], 8_000);
+      return quoteHash && quote ? { startByte: span.startByte as number, endByte: span.endByte as number, quoteHash, quote } : null;
+    });
+    if (spans.some((span) => span === null)) return null;
+    replay.set(citationHash, { snapshotHash, spans: spans as NonNullable<(typeof spans)[number]>[] });
+  }
+  const claims: DashboardEvidenceArtifact["claims"] = [];
+  if (content.claimGraph.claims.length > 1_024) return null;
+  for (const raw of content.claimGraph.claims) {
+    if (!isRecord(raw) || !Array.isArray(raw.citations) || raw.citations.length > 64) return null;
+    const claimId = safePublicText(raw.claimId, 160);
+    const claimText = safePublicText(raw.claimText, 4_000);
+    const status = safePublicText(raw.status, 80);
+    const modality = safePublicText(raw.modality, 80);
+    const claimHash = safeResearchHash(raw.claimHash);
+    if (!claimId || !claimText || !status || !modality || !claimHash) return null;
+    const citations: DashboardEvidenceArtifact["claims"][number]["citations"] = [];
+    for (const binding of raw.citations) {
+      if (!isRecord(binding) || !isRecord(binding.citation)) return null;
+      const citationHash = safeResearchHash(binding.citation.citationHash);
+      const sourceIdentityHash = safeResearchHash(binding.sourceIdentityHash);
+      const source = sourceIdentityHash ? sources.get(sourceIdentityHash) : undefined;
+      const replayed = citationHash ? replay.get(citationHash) : undefined;
+      if (!citationHash || !sourceIdentityHash || !source || !replayed || replayed.snapshotHash !== source.snapshotHash) return null;
+      citations.push({ citationHash, snapshotHash: source.snapshotHash, sourceFamilyId: source.sourceFamilyId,
+        sourceIdentityHash, sourceUrl: source.sourceUrl, finalUrl: source.finalUrl, spans: replayed.spans });
+    }
+    claims.push({ claimId, claimText, status, modality, claimHash, citations });
+  }
+  return {
+    schemaVersion: 1,
+    artifactRef: { artifactId: artifact.artifactId, revision: artifact.revision, contentHash: artifact.contentHash },
+    taskId,
+    workOrderId,
+    kind: "research",
+    verificationStatus: "accepted",
+    createdAt: artifact.createdAt,
+    claims,
+  };
+}
+
+function sameDashboardArtifactRef(left: ArtifactRef | undefined, right: ArtifactRef): boolean {
+  return left?.artifactId === right.artifactId && left.revision === right.revision && left.contentHash === right.contentHash;
+}
+
+function safeResearchHash(value: unknown): string | null {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value) ? value : null;
+}
+
+function safePublicText(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string" || value.length < 1 || value.length > maxLength || /[\0]/u.test(value)) return null;
+  return value;
+}
+
+function safePublicHttpsUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 4_096) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 interface DashboardTaskIdentity {
   agentId: string;
   name: string;
@@ -724,6 +1109,18 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
   const tasks = Object.values(state.tasks).sort(
     (left, right) => left.priority - right.priority || left.id.localeCompare(right.id),
   );
+  const seatCount = Math.min(MAX_AGENTS, Math.max(tasks.length, state.config.maxConcurrency));
+  const rosterDisplayNames = state.harnessV2
+    ? agentDisplayNames(registryForDashboard(state.harnessV2, seatCount).agents.map((agent) => agent.agentId))
+    : new Map<string, string>();
+  const unassignedIdentityIds = [
+    ...tasks.flatMap((task) => state.harnessV2?.workOrders[task.id]?.assignedAgentId ? [] : [`agent-${task.id}`]),
+    ...Array.from({ length: Math.max(0, seatCount - tasks.length) }, (_, index) =>
+      `capacity-${String(tasks.length + index + 1).padStart(3, "0")}`),
+  ];
+  const fallbackDisplayNames = agentDisplayNames(unassignedIdentityIds);
+  const displayNameFor = (agentId: string): string =>
+    rosterDisplayNames.get(agentId) ?? fallbackDisplayNames.get(agentId) ?? employeeNameForId(agentId);
   const orderedEvents = runEvents.slice().sort(compareRunEvents);
   const latestByTask = new Map<string, StoredRunEvent>();
   for (const { event } of orderedEvents) if (event.taskId) latestByTask.set(event.taskId, event);
@@ -735,9 +1132,8 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
   }
   const taskIdentityByTask = new Map(tasks.map((task) => {
     const agentId = state.harnessV2?.workOrders[task.id]?.assignedAgentId ?? `agent-${task.id}`;
-    return [task.id, { agentId, name: agentId, taskTitle: task.title } satisfies DashboardTaskIdentity] as const;
+    return [task.id, { agentId, name: displayNameFor(agentId), taskTitle: task.title } satisfies DashboardTaskIdentity] as const;
   }));
-  const seatCount = Math.min(MAX_AGENTS, Math.max(tasks.length, state.config.maxConcurrency));
   const agents: DashboardAgent[] = tasks.slice(0, seatCount).map((task, index) =>
     taskAgent(
       task,
@@ -748,6 +1144,7 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
       state.tasks,
       state.teams[task.teamId],
       state.harnessV2?.workOrders[task.id]?.assignedAgentId,
+      displayNameFor(state.harnessV2?.workOrders[task.id]?.assignedAgentId ?? `agent-${task.id}`),
     ),
   );
   for (let index = agents.length; index < seatCount; index += 1) {
@@ -755,7 +1152,7 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
     const id = `capacity-${String(index + 1).padStart(3, "0")}`;
     agents.push({
       id,
-      ...canonicalAgentIdentity(id),
+      ...canonicalAgentIdentity(id, displayNameFor(id)),
       department,
       rank: "staff",
       role: "capacity_agent",
@@ -850,12 +1247,14 @@ function snapshotFromState(state: RunState, runEvents: OrderedRunEvent[], now: D
       : undefined,
     outputs,
   );
+  snapshot.reports = dashboardReports(outputs, state.harnessV2, orderedEvents, state.tasks);
   if (!state.harnessV2) return snapshot;
+  const logicalAgents = logicalAgentsForDashboard(agents, state.harnessV2);
   return {
     ...snapshot,
-    logicalAgents: logicalAgentsForDashboard(agents, state.harnessV2, "real"),
-    reports: dashboardReports(outputs, state.harnessV2, orderedEvents),
+    logicalAgents,
     ...dashboardHarnessV2(state.harnessV2),
+    reportCenter: dashboardReportCenter(state, logicalAgents, now),
   };
 }
 
@@ -948,9 +1347,9 @@ function dashboardHarnessV2(harnessV2: NonNullable<RunState["harnessV2"]>): Pick
 function logicalAgentsForDashboard(
   runtimeAgents: readonly DashboardAgent[],
   harnessV2?: NonNullable<RunState["harnessV2"]>,
-  mode: "real" | "demo" = "real",
 ): DashboardLogicalAgent[] {
   const registry = registryForDashboard(harnessV2, runtimeAgents.length);
+  const displayNames = agentDisplayNames(registry.agents.map((agent) => agent.agentId));
   const units = new Map(registry.units.map((unit) => [unit.id, unit]));
   const runtimeByTask = new Map(runtimeAgents.flatMap((agent) => agent.taskId ? [[agent.taskId, agent] as const] : []));
   const records = Object.values(harnessV2?.workOrders ?? {})
@@ -1006,7 +1405,7 @@ function logicalAgentsForDashboard(
     const lineageIds = [`hq:${slot.headquartersId}`, slot.divisionId, slot.teamId, slot.cellId];
     return {
       id: slot.agentId,
-      ...(mode === "demo" ? demoAgentIdentity(slot.agentId) : canonicalAgentIdentity(slot.agentId)),
+      ...canonicalAgentIdentity(slot.agentId, displayNames.get(slot.agentId)),
       department,
       rank: slot.role === "cell-lead" ? "section_chief" : slot.role === "review-liaison" ? "assistant_manager" : "staff",
       role: slot.title,
@@ -1034,7 +1433,6 @@ function logicalAgentsForDashboard(
       workOrderIds: [...new Set([...ownedRecords, ...reviewedRecords].map((candidate) => candidate.order.id))],
     };
   });
-  if (mode === "demo") ensureUniqueDemoAgentNames(logicalAgents);
   return logicalAgents;
 }
 
@@ -1094,6 +1492,7 @@ function taskAgent(
   tasks: Record<string, TaskRecord>,
   team: TeamRecord | undefined,
   assignedAgentId?: string,
+  assignedAgentName?: string,
 ): DashboardAgent {
   const activity = event ? activityForEvent(event, task) : activityForTask(task);
   const status = statusForActivity(activity);
@@ -1107,7 +1506,7 @@ function taskAgent(
   const agent: DashboardAgent = {
     id,
     ...(assignedAgentId ? { principalAgentId: assignedAgentId } : {}),
-    ...canonicalAgentIdentity(identityId),
+    ...canonicalAgentIdentity(identityId, assignedAgentName),
     department: task.department,
     rank: task.assigneeRank,
     role: task.ownerRole,
@@ -1238,6 +1637,7 @@ function dashboardReports(
   outputs: readonly DashboardOutput[],
   harnessV2?: NonNullable<RunState["harnessV2"]>,
   orderedEvents: readonly OrderedRunEvent[] = [],
+  tasks: Readonly<Record<string, TaskRecord>> = {},
 ): DashboardReport[] {
   const records = harnessV2?.workOrders ?? {};
   const eventsByTask = new Map<string, string[]>();
@@ -1264,6 +1664,7 @@ function dashboardReports(
       output.sourceTaskIds.flatMap((taskId) => eventsByTask.get(taskId) ?? []),
     );
     const kind: DashboardReportKind = output.kind === "final" ? "executive" : output.kind;
+    const generatedFiles = generatedFilesForTasks(output.sourceTaskIds, tasks);
     return {
       id: reportRecordId(kind, output.id),
       kind,
@@ -1280,6 +1681,7 @@ function dashboardReports(
         { title: "보고 요약", items: [output.summary] },
         { title: "산출물", items: output.deliverables },
       ]),
+      ...(generatedFiles.length > 0 ? { generatedFiles } : {}),
       references: output.kind === "final"
         ? { ...references, eventIds: uniqueReportReferences([...references.eventIds, ...runEventIds]) }
         : references,
@@ -1354,6 +1756,382 @@ function dashboardReports(
     .sort((left, right) => eventTimestamp(right.updatedAt ?? right.createdAt) - eventTimestamp(left.updatedAt ?? left.createdAt)
       || left.id.localeCompare(right.id))
     .slice(0, REPORT_LIMIT);
+}
+
+interface StoredArtifactDescriptor extends DashboardGeneratedFile {
+  relativePath: string;
+}
+
+function generatedFilesForTasks(
+  taskIds: readonly string[],
+  tasks: Readonly<Record<string, TaskRecord>>,
+): DashboardGeneratedFile[] {
+  const generated: DashboardGeneratedFile[] = [];
+  const seen = new Set<string>();
+  for (const taskId of taskIds) {
+    const files = tasks[taskId]?.artifactProduction?.files;
+    if (!Array.isArray(files) || files.length > 8) continue;
+    for (const file of files) {
+      const output = parseStoredArtifact(file, "output");
+      if (output) pushGeneratedFile(generated, seen, output);
+      const preview = parseStoredArtifact(file, "preview");
+      if (preview) pushGeneratedFile(generated, seen, preview);
+      if (generated.length >= MAX_GENERATED_FILES) return generated;
+    }
+  }
+  return generated;
+}
+
+function pushGeneratedFile(
+  generated: DashboardGeneratedFile[],
+  seen: Set<string>,
+  descriptor: StoredArtifactDescriptor,
+): void {
+  const key = `${descriptor.kind}:${descriptor.sha256}:${descriptor.fileName}`;
+  if (seen.has(key) || generated.length >= MAX_GENERATED_FILES) return;
+  seen.add(key);
+  const { relativePath: _relativePath, ...file } = descriptor;
+  generated.push(file);
+}
+
+function findStoredArtifact(
+  state: RunState,
+  sha256: string,
+  kind: "output" | "preview",
+): StoredArtifactDescriptor | null {
+  for (const task of Object.values(state.tasks).sort((left, right) => left.id.localeCompare(right.id))) {
+    const files = task.artifactProduction?.files;
+    if (!Array.isArray(files) || files.length > 8) continue;
+    for (const file of files) {
+      const descriptor = parseStoredArtifact(file, kind);
+      if (descriptor?.sha256 === sha256) return descriptor;
+    }
+  }
+  return null;
+}
+
+function parseStoredArtifact(value: unknown, kind: "output" | "preview"): StoredArtifactDescriptor | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.format !== "string" || !Object.hasOwn(ARTIFACT_MIME, value.format)) return null;
+  const format = value.format as DashboardGeneratedFile["format"];
+  if (typeof value.fileName !== "string" || !ARTIFACT_FILE_NAME.test(value.fileName)) return null;
+  if (kind === "output") {
+    if (typeof value.sha256 !== "string" || !ARTIFACT_HASH.test(value.sha256)) return null;
+    if (value.id !== `file:${value.sha256}`) return null;
+    if (!Number.isSafeInteger(value.bytes) || (value.bytes as number) < 0 || (value.bytes as number) > 64 * 1024 * 1024) return null;
+    const relativePath = `cas/${value.sha256.slice(0, 2)}/${value.sha256}.${format}`;
+    if (value.relativePath !== relativePath || value.mimeType !== ARTIFACT_MIME[format]) return null;
+    return {
+      id: `output:${value.sha256}:${value.fileName}`,
+      kind,
+      fileName: value.fileName,
+      format,
+      mimeType: ARTIFACT_MIME[format],
+      bytes: value.bytes as number,
+      sha256: value.sha256,
+      relativePath,
+    };
+  }
+  if (!isRecord(value.preview)) return null;
+  const preview = value.preview;
+  if (typeof preview.sha256 !== "string" || !ARTIFACT_HASH.test(preview.sha256)) return null;
+  if (!Number.isSafeInteger(preview.bytes) || (preview.bytes as number) < 0 || (preview.bytes as number) > 64 * 1024 * 1024) return null;
+  const relativePath = `cas/${preview.sha256.slice(0, 2)}/${preview.sha256}.png`;
+  if (preview.relativePath !== relativePath) return null;
+  const fileName = `${value.fileName}.preview.png`;
+  return {
+    id: `preview:${preview.sha256}:${fileName}`,
+    kind,
+    fileName,
+    format: "png",
+    mimeType: ARTIFACT_MIME.png,
+    bytes: preview.bytes as number,
+    sha256: preview.sha256,
+    relativePath,
+  };
+}
+
+function dashboardReportCenter(
+  state: RunState,
+  logicalAgents: readonly DashboardLogicalAgent[],
+  now: Date,
+): DashboardReportCenter {
+  const harnessV2 = state.harnessV2!;
+  const employeeById = new Map(logicalAgents.map((agent) => [agent.id, employeeBinding(agent)]));
+  const bindEmployee = (agentId: string, headquartersId?: string): DashboardEmployeeBinding => {
+    const known = employeeById.get(agentId);
+    if (known) return known;
+    return {
+      agentId,
+      displayName: employeeNameForId(agentId),
+      title: "외부 참여자",
+      department: departmentForHeadquarters(headquartersId),
+    };
+  };
+  const records = Object.values(harnessV2.workOrders);
+  const finalCoverage = state.final?.requirementsCoverage ?? [];
+  const unresolvedRisks = (state.final?.caveats.length ?? 0)
+    + (state.final?.conflicts.length ?? 0)
+    + (state.final?.criticResolution.issueResolutions.filter((issue) => !issue.resolved).length ?? 0);
+  const approvalStatus = companyStatusForRun(state.status, unresolvedRisks);
+  const active = harnessV2.activeAssignments ?? records.filter((record) =>
+    ["LEASED", "EXECUTING", "SUBMITTED", "VALIDATING", "REWORK_REQUIRED", "VALIDATION_RETRY"].includes(record.state)).length;
+  const inflight = harnessV2.inflightModelCalls ?? state.metrics.maxActiveCalls;
+
+  const missionCells = Object.values(harnessV2.missionCells)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .map((cell) => ({
+      id: cell.id,
+      status: companyStatusForCell(cell.status),
+      lifecycle: cell.status ?? "PROPOSED",
+      owner: bindEmployee(cell.ownerAgentId),
+      members: cell.members.map((member) => bindEmployee(member.agentId)),
+      workOrderIds: [...cell.workOrderIds],
+      createdAt: cell.createdAt,
+    }));
+
+  const departmentBoard = records
+    .sort((left, right) => left.order.priority - right.order.priority || left.order.id.localeCompare(right.order.id))
+    .map((record) => {
+      const task = state.tasks[record.order.id];
+      const started = task?.startedAt ? eventTimestamp(task.startedAt) : Number.NaN;
+      const endedAt = task?.completedAt ?? (isTerminalWorkOrderState(record.state) ? record.updatedAt : now.toISOString());
+      const ended = eventTimestamp(endedAt);
+      return {
+        id: record.order.id,
+        ...(record.order.headquartersId ? { headquartersId: record.order.headquartersId } : {}),
+        objective: compactOutputText(record.order.objective, OUTPUT_SUMMARY_CHARS),
+        status: companyStatusForWorkOrder(record.state),
+        lifecycle: record.state,
+        owner: bindEmployee(record.assignedAgentId, record.order.headquartersId),
+        reviewers: record.reviewerAgentIds.map((id) => bindEmployee(id)),
+        artifactIds: uniqueReportReferences(record.artifactIds),
+        handoffArtifactIds: record.artifactIds.filter((id) => /(?:^|[-_:])handoff(?:[-_:]|$)/iu.test(id)),
+        ...(Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? { cycleTimeMs: ended - started } : {}),
+        reworkCount: Math.max(record.validationAttempts - 1, state.tasks[record.order.id]?.codingRepair?.rounds ?? 0),
+      };
+    });
+
+  const meetings = Object.values(harnessV2.councils)
+    .sort((left, right) => left.agenda.createdAt.localeCompare(right.agenda.createdAt) || left.agenda.councilId.localeCompare(right.agenda.councilId))
+    .map((council) => ({
+      id: council.agenda.councilId,
+      agenda: compactOutputText(council.agenda.question, OUTPUT_SUMMARY_CHARS),
+      state: council.state,
+      status: companyStatusForCouncil(council.state, council.decision?.outcome),
+      participants: council.agenda.participantIds.map((id) => bindEmployee(id)),
+      round: council.round,
+      newEvidenceCount: council.evidenceAddedThisRound.length,
+      challengeCount: council.challenges.length,
+      minorityCount: council.decision?.minorityReports.length ?? 0,
+      followUpWorkOrderIds: [...(council.decision?.followUpWorkOrderIds ?? [])],
+      ...(council.decision ? { outcome: council.decision.outcome } : {}),
+    }));
+
+  const artifactToOrder = new Map<string, WorkOrderRecordV2>();
+  for (const record of records) {
+    for (const artifactId of record.artifactIds) if (!artifactToOrder.has(artifactId)) artifactToOrder.set(artifactId, record);
+  }
+  const taskByEvidenceId = new Map<string, TaskRecord>();
+  const researchRefById = new Map<string, ArtifactRef>();
+  const hostReceiptIds = new Set<string>();
+  for (const task of Object.values(state.tasks)) {
+    if (task.researchEnvelopeRef) {
+      taskByEvidenceId.set(task.researchEnvelopeRef.artifactId, task);
+      researchRefById.set(task.researchEnvelopeRef.artifactId, task.researchEnvelopeRef);
+    }
+    for (const artifactId of task.hostToolReceiptArtifactIds ?? []) {
+      if (!taskByEvidenceId.has(artifactId)) taskByEvidenceId.set(artifactId, task);
+      hostReceiptIds.add(artifactId);
+    }
+  }
+  const evidenceIds = new Set([
+    ...Object.keys(harnessV2.artifactHeads),
+    ...artifactToOrder.keys(),
+    ...researchRefById.keys(),
+    ...hostReceiptIds,
+  ]);
+  const evidenceLedger = [...evidenceIds].sort().map((artifactId) => {
+    const head = harnessV2.artifactHeads[artifactId];
+    const task = taskByEvidenceId.get(artifactId);
+    const record = artifactToOrder.get(artifactId) ?? (task ? harnessV2.workOrders[task.id] : undefined);
+    const researchRef = researchRefById.get(artifactId);
+    const artifactRef = head ?? researchRef;
+    const referenceKinds: DashboardReportCenter["evidenceLedger"][number]["referenceKinds"] = [];
+    if (head) referenceKinds.push("artifact-head");
+    if (artifactToOrder.has(artifactId)) referenceKinds.push("work-order");
+    if (researchRef) referenceKinds.push("research-envelope");
+    if (hostReceiptIds.has(artifactId)) referenceKinds.push("host-tool-receipt");
+    return {
+      artifactId,
+      ...(artifactRef ? {
+        revision: artifactRef.revision,
+        contentHash: artifactRef.contentHash,
+        artifactRef: structuredClone(artifactRef),
+      } : {}),
+      ...(task ? { taskId: task.id } : {}),
+      ...(record ? { workOrderId: record.order.id } : {}),
+      status: record ? companyStatusForWorkOrder(record.state) : "needs-review" as const,
+      gateIds: [...(record?.order.requiredGateIds ?? [])],
+      referenceKinds,
+      hostToolReceiptArtifactIds: [...(task?.hostToolReceiptArtifactIds ?? [])].sort(),
+      publiclyInspectable: Boolean(researchRef && task?.status === "accepted" && record &&
+        ["ACCEPTED", "INTEGRATED"].includes(record.state) && head && sameDashboardArtifactRef(head, researchRef)),
+    };
+  });
+
+  const engineeringQuality = Object.values(state.tasks)
+    .filter((task) => task.coding || task.codingSelection || task.codingRepair || task.adversarial)
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((task) => {
+      const selection = task.codingSelection ?? task.coding?.candidateSelection;
+      return {
+        taskId: task.id,
+        candidateCount: selection?.evaluatedTaskIds.length ?? 0,
+        ...(selection?.selectedTaskId ? { selectedCandidateId: selection.selectedTaskId } : {}),
+        protectedCheckCount: task.codingRepair?.protectedCheck.testFiles.length ?? task.coding?.verificationArtifacts.length ?? 0,
+        repairRounds: task.codingRepair?.rounds ?? 0,
+        redFindingCount: task.adversarial?.latestFindingCount ?? 0,
+        ...(task.adversarial?.latestVerdict ? { redVerdict: task.adversarial.latestVerdict } : {}),
+        integrated: Boolean(task.coding),
+      };
+    });
+
+  const artifacts: DashboardReportCenter["artifacts"] = [];
+  const visualQa: DashboardReportCenter["visualQa"] = [];
+  for (const task of Object.values(state.tasks).sort((left, right) => left.id.localeCompare(right.id))) {
+    const proof = task.artifactProduction;
+    if (!proof?.files) continue;
+    for (const value of proof.files) {
+      const file = parseStoredArtifact(value, "output");
+      if (!file) continue;
+      const { relativePath: _relativePath, ...generatedFile } = file;
+      const previews = Array.isArray(value.previews) ? value.previews.length : value.preview ? 1 : 0;
+      const unitKind = value.format === "pptx" ? "slide" as const
+        : ["pdf", "docx"].includes(value.format) ? "page" as const : "view" as const;
+      const qaReceiptIds = proof.validationArtifacts.map((ref) => ref.artifactId);
+      const unitCount = unitKind === "view" ? 1 : previews;
+      artifacts.push({
+        ...generatedFile,
+        taskId: task.id,
+        sourceArtifactId: proof.manifestArtifact.artifactId,
+        rendererReceiptIds: [proof.receiptHash],
+        qaReceiptIds,
+        stale: task.status !== "accepted",
+      });
+      visualQa.push({
+        taskId: task.id,
+        fileName: file.fileName,
+        format: file.format,
+        unitKind,
+        unitCount,
+        previewCount: previews,
+        qaReceiptCount: qaReceiptIds.length,
+        status: unitCount > 0 && qaReceiptIds.length > 0 ? "ready" : "needs-review",
+      });
+    }
+  }
+
+  const reviewerIndependenceViolations = records.filter((record) => {
+    const owner = logicalAgents.find((agent) => agent.id === record.assignedAgentId);
+    return record.reviewerAgentIds.some((id) => {
+      const reviewer = logicalAgents.find((agent) => agent.id === id);
+      return id === record.assignedAgentId || Boolean(owner?.teamId && reviewer?.teamId === owner.teamId);
+    });
+  }).length;
+
+  return {
+    executiveBrief: {
+      directive: compactOutputText(state.goal, OUTPUT_SUMMARY_CHARS),
+      ...(state.final?.executiveSummary ? { summary: compactOutputText(state.final.executiveSummary, OUTPUT_SUMMARY_CHARS) } : {}),
+      coveredRequirements: finalCoverage.filter((item) => item.covered).length,
+      totalRequirements: finalCoverage.length,
+      unresolvedRisks,
+      approvalStatus,
+    },
+    staffing: {
+      logical: logicalAgents.length,
+      active,
+      inflight,
+      idle: logicalAgents.filter((agent) => agent.logicalStatus === "available").length,
+      employees: logicalAgents.map(employeeBinding),
+    },
+    missionCells,
+    departmentBoard,
+    meetings,
+    evidenceLedger,
+    engineeringQuality,
+    visualQa,
+    artifacts,
+    health: {
+      activeAssignmentRate: logicalAgents.length === 0 ? 0 : active / logicalAgents.length,
+      meetingCount: meetings.length,
+      meetingEvidenceCount: meetings.reduce((sum, meeting) => sum + meeting.newEvidenceCount, 0),
+      handoffCount: departmentBoard.reduce((sum, workOrder) => sum + workOrder.handoffArtifactIds.length, 0),
+      reworkCount: departmentBoard.reduce((sum, workOrder) => sum + workOrder.reworkCount, 0),
+      reviewerIndependenceViolations,
+    },
+  };
+}
+
+function employeeBinding(agent: DashboardLogicalAgent): DashboardEmployeeBinding {
+  return {
+    agentId: agent.id,
+    displayName: agent.name,
+    title: agent.role,
+    department: agent.department,
+    ...(agent.teamId ? { teamId: agent.teamId } : {}),
+  };
+}
+
+function departmentForHeadquarters(headquartersId?: string): Department {
+  if (headquartersId === "research") return "research";
+  if (headquartersId === "engineering") return "engineering";
+  if (headquartersId === "quality") return "quality";
+  if (headquartersId === "integration") return "integration";
+  return "executive";
+}
+
+function companyStatusForRun(status: RunState["status"], unresolvedRisks: number): DashboardCompanyStatus {
+  if (["failed", "cancelled", "interrupted"].includes(status)) return "blocked";
+  if (status === "completed") return unresolvedRisks > 0 ? "needs-review" : "ready";
+  if (status === "partial") return "needs-review";
+  return "running";
+}
+
+function companyStatusForWorkOrder(state: WorkOrderState): DashboardCompanyStatus {
+  if (["ACCEPTED", "INTEGRATED"].includes(state)) return "ready";
+  if (["LEASED", "EXECUTING"].includes(state)) return "running";
+  if (state === "READY") return "ready";
+  if (["SUBMITTED", "VALIDATING", "REWORK_REQUIRED", "VALIDATION_RETRY"].includes(state)) return "needs-review";
+  return "blocked";
+}
+
+function companyStatusForCell(status?: string): DashboardCompanyStatus {
+  if (status === "ACTIVE" || status === "CLOSING") return "running";
+  if (status === "CLOSED") return "ready";
+  if (status === "FAILED") return "blocked";
+  return "needs-review";
+}
+
+function companyStatusForCouncil(state: CouncilState, outcome?: CouncilOutcome): DashboardCompanyStatus {
+  if (state !== "CLOSED") return state === "WAITING_FOR_EVIDENCE" ? "needs-review" : "running";
+  if (outcome === "ADOPTED") return "ready";
+  if (outcome === "REJECTED") return "blocked";
+  return "needs-review";
+}
+
+function isTerminalWorkOrderState(state: WorkOrderState): boolean {
+  return ["ACCEPTED", "INTEGRATED", "CANCELLED", "FAILED"].includes(state);
+}
+
+function sameStableFile(
+  left: Awaited<ReturnType<typeof lstat>>,
+  right: Awaited<ReturnType<typeof lstat>>,
+): boolean {
+  return left.isFile() && right.isFile() && left.nlink === 1 && right.nlink === 1 &&
+    left.size === right.size && left.mtimeMs === right.mtimeMs && left.ino === right.ino &&
+    (process.platform === "win32" || left.dev === right.dev);
 }
 
 function reportStatusForOutput(status: DashboardOutputStatus): DashboardReportStatus {
@@ -1450,8 +2228,8 @@ function avatarIdentity(id: string): DashboardAvatar {
   };
 }
 
-function canonicalAgentIdentity(id: string): Pick<DashboardAgent, "name" | "avatar"> {
-  return { name: id, avatar: avatarIdentity(id) };
+function canonicalAgentIdentity(id: string, displayName = employeeNameForId(id)): Pick<DashboardAgent, "name" | "avatar"> {
+  return { name: displayName, avatar: avatarIdentity(id) };
 }
 
 function demoAgentIdentity(id: string): Pick<DashboardAgent, "name" | "avatar"> {
@@ -1515,7 +2293,7 @@ function buildSnapshot(
     mode,
     run,
     agents,
-    logicalAgents: logicalAgentsForDashboard(agents, undefined, mode),
+    logicalAgents: logicalAgentsForDashboard(agents),
     departments,
     metrics: {
       totalAgents: agents.length,
@@ -1558,6 +2336,27 @@ function dashboardOrganizationV2(registry: OrganizationRegistryV2): DashboardOrg
   };
 }
 
+function agentDisplayNames(agentIds: readonly string[]): Map<string, string> {
+  const names = new Map<string, string>();
+  const used = new Set<string>();
+  const nameCount = FAMILY_NAMES.length * GIVEN_NAMES.length;
+  for (const agentId of [...new Set(agentIds)].sort((left, right) => left.localeCompare(right))) {
+    const hash = createHash("sha256").update(agentId).digest().readUInt32BE(0);
+    for (let offset = 0; offset < nameCount; offset += 1) {
+      const candidate = employeeName(hash + offset);
+      if (used.has(candidate)) continue;
+      names.set(agentId, candidate);
+      used.add(candidate);
+      break;
+    }
+  }
+  return names;
+}
+
+function employeeNameForId(id: string): string {
+  return employeeName(createHash("sha256").update(id).digest().readUInt32BE(0));
+}
+
 function registryForDashboard(
   harnessV2?: HarnessV2RunState,
   runtimeAgentCount: number = HARNESS_V2_AGENT_COUNT,
@@ -1585,6 +2384,10 @@ function dashboardEvent(event: StoredRunEvent, id: string, identity?: DashboardT
     ...(event.status ? { status: event.status } : {}),
     ...(event.department ? { department: event.department } : {}),
     ...(event.taskId ? { taskId: event.taskId } : {}),
+    ...(event.workOrderId ? { workOrderId: event.workOrderId } : {}),
+    ...(event.councilId ? { councilId: event.councilId } : {}),
+    ...(event.artifactIds ? { artifactIds: [...event.artifactIds] } : {}),
+    ...(event.messageType ? { messageType: event.messageType } : {}),
     ...(identity ? { agentId: identity.agentId } : {}),
     ...(event.role ? { role: event.role } : {}),
     ...(event.corporateRole ? { corporateRole: event.corporateRole } : {}),
@@ -1653,6 +2456,10 @@ function legacyEventId(event: RunEvent): string {
     type: event.type,
     directiveId: event.directiveId ?? null,
     taskId: event.taskId ?? null,
+    workOrderId: event.workOrderId ?? null,
+    councilId: event.councilId ?? null,
+    messageType: event.messageType ?? null,
+    artifactIds: event.artifactIds ?? [],
     role: event.role ?? null,
     corporateRole: event.corporateRole ?? null,
     department: event.department ?? null,
@@ -1803,6 +2610,13 @@ function eventTitle(type: string): string {
     audit_escalated: "추가 감사자 투입",
     audit_early_stopped: "감사 조기 종료",
     audit_completed: "독립 감사 완료",
+    blue_team_repair_started: "Blue Team 수정 시작",
+    blue_team_repair_completed: "Blue Team 수정안 제출",
+    red_team_attack_started: "Red Team 공격 검증 시작",
+    red_team_attack_completed: "Red Team 공격 검증 완료",
+    red_team_reattack_started: "Red Team 재공격 시작",
+    red_team_reattack_completed: "Red Team 재공격 완료",
+    adversarial_judge_decided: "적대적 검증 Judge 판정",
     team_synthesis_started: "팀 결과 통합 시작",
     team_synthesis_elided: "팀 결과 즉시 통합",
     team_synthesis_fallback: "팀 결과 결정론적 통합",

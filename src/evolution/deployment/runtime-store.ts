@@ -4,8 +4,9 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { canonicalJson, canonicalSha256, immutable, type Sha256 } from "../domain/canonical.js";
 import type { RunBundlePin } from "../domain/bundle.js";
+import { withEvolutionActivationLock } from "../registry/activation-lock.js";
 import { assertNoLinks, ExecutionBundleStore } from "../registry/bundle-store.js";
-import { GenomeQuarantineStore } from "../registry/quarantine-store.js";
+import { GenomeQuarantineStore, GenomeQuarantinedError } from "../registry/quarantine-store.js";
 import { StablePointerStore } from "../registry/stable-pointer-store.js";
 import { RolloutStore } from "./store.js";
 import type { RolloutRevision } from "./types.js";
@@ -61,6 +62,12 @@ export interface ActiveRolloutBindingStoreOptions {
   now?: () => string;
 }
 
+export function isTerminalBindingState(state: RolloutRevision["state"]): boolean {
+  return [
+    "stable", "rejected", "quarantined", "rolled_back", "superseded", "expired",
+  ].includes(state);
+}
+
 /** Durable workload -> rollout binding used by the pre-harness request router. */
 export class ActiveRolloutBindingStore {
   readonly boundary: ExecutionBundleStore;
@@ -96,6 +103,14 @@ export class ActiveRolloutBindingStore {
     if (!Number.isSafeInteger(input.expectedIndexRevision) || input.expectedIndexRevision < 0) {
       throw new DeploymentRuntimeBindingError("expectedIndexRevision must be non-negative");
     }
+    return withEvolutionActivationLock(this.boundary, () => this.activateAuthorized(input));
+  }
+
+  private async activateAuthorized(input: ActiveRolloutBindingInput & {
+    expectedIndexRevision: number;
+    actor: string;
+    reason: string;
+  }): Promise<Readonly<ActiveRolloutSnapshot>> {
     await this.assertAuthorityBinding(input);
     const material = {
       schemaVersion: 1 as const,
@@ -120,14 +135,29 @@ export class ActiveRolloutBindingStore {
       return existing.recordHash === binding.recordHash;
     });
     const index = await this.withIndexLock(input.workloadClass, async () => {
-      const current = await this.readIndex(input.workloadClass);
+      let current = await this.readIndex(input.workloadClass);
       if ((current?.revision ?? 0) !== input.expectedIndexRevision) {
         throw new DeploymentRuntimeConflictError(
           `Expected active rollout index revision ${input.expectedIndexRevision}, found ${current?.revision ?? 0}`,
         );
       }
       if (current?.rolloutId && current.rolloutId !== input.rolloutId) {
-        throw new DeploymentRuntimeConflictError(`Workload ${input.workloadClass} already has active rollout ${current.rolloutId}`);
+        const existingBinding = await this.readBinding(current.rolloutId);
+        const existingRollout = await this.requireRollout(existingBinding);
+        if (!isTerminalBindingState(existingRollout.state)) {
+          throw new DeploymentRuntimeConflictError(`Workload ${input.workloadClass} already has active rollout ${current.rolloutId}`);
+        }
+        current = await this.appendIndex({
+          workloadClass: input.workloadClass,
+          revision: current.revision + 1,
+          action: "stop",
+          rolloutId: null,
+          bindingHash: null,
+          actor: "deployment-reconciler",
+          reason: `release terminal rollout ${existingRollout.rolloutId}:${existingRollout.state}`,
+          createdAt: requireTimestamp(this.now(), "createdAt"),
+          previousRecordHash: current.recordHash,
+        }, current.revision);
       }
       return this.appendIndex({
         workloadClass: input.workloadClass,
@@ -177,6 +207,54 @@ export class ActiveRolloutBindingStore {
 
   async readActive(workloadClass: string): Promise<Readonly<ActiveRolloutSnapshot> | undefined> {
     requireWorkload(workloadClass);
+    return withEvolutionActivationLock(this.boundary, () => this.readActiveAuthorized(workloadClass, true));
+  }
+
+  /** Assertion-only guard called while StablePointerStore owns the activation lock. */
+  async prepareStablePromotion(input: {
+    workloadClass: string;
+    bundleId: string;
+    bundleHash: Sha256;
+    expectedPointerGeneration: number | null;
+    actor: string;
+    reason: string;
+  }): Promise<void> {
+    const active = await this.readActiveAuthorized(input.workloadClass, false);
+    if (!active) return;
+    if (active.rollout.state !== "operator_promoted" ||
+        active.binding.candidate.bundleId !== input.bundleId ||
+        active.binding.candidate.bundleHash !== input.bundleHash ||
+        active.binding.champion.pointerGeneration !== input.expectedPointerGeneration) {
+      throw new DeploymentRuntimeBindingError(
+        `Stable promotion is blocked by active rollout ${active.binding.rolloutId}:${active.rollout.state}`,
+      );
+    }
+  }
+
+  /**
+   * Post-commit cleanup. Stable Pointer is authoritative; readActive performs
+   * idempotent self-healing if the old champion binding is still indexed.
+   */
+  async reconcileAfterStablePromotion(workloadClass: string): Promise<void> {
+    await this.readActive(workloadClass);
+  }
+
+  /** Linearization point immediately before issuing a candidate request. */
+  async admitCandidate(snapshot: Readonly<ActiveRolloutSnapshot>): Promise<boolean> {
+    return withEvolutionActivationLock(this.boundary, async () => {
+      const current = await this.readActiveAuthorized(snapshot.binding.workloadClass, true);
+      return current !== undefined &&
+        current.binding.recordHash === snapshot.binding.recordHash &&
+        current.index.recordHash === snapshot.index.recordHash &&
+        current.rollout.recordHash === snapshot.rollout.recordHash &&
+        (current.rollout.state === "shadow" || current.rollout.state === "canary");
+    });
+  }
+
+  private async readActiveAuthorized(
+    workloadClass: string,
+    reconcileUnsafe: boolean,
+  ): Promise<Readonly<ActiveRolloutSnapshot> | undefined> {
     const index = await this.readIndex(workloadClass);
     if (!index?.rolloutId || !index.bindingHash) return undefined;
     const binding = await this.readBindingByHash(index.bindingHash);
@@ -184,6 +262,36 @@ export class ActiveRolloutBindingStore {
       throw new DeploymentRuntimeIntegrityError("Active rollout index points to a different binding");
     }
     const rollout = await this.requireRollout(binding);
+    if (reconcileUnsafe) {
+      const pointer = await this.pointerStore.get(workloadClass);
+      const candidate = await this.boundary.read(binding.candidate.bundleId);
+      let candidateQuarantined = !["challenger", "shadow", "canary"].includes(candidate.status) ||
+        await this.pointerStore.isQuarantined(candidate.bundleId);
+      if (!candidateQuarantined) {
+        const genomeHash = candidate.componentHashes.genome;
+        try {
+          if (!genomeHash || !isSha256(genomeHash)) candidateQuarantined = true;
+          else await this.quarantineStore.assertPinAllowed({ genomeId: candidate.genomeId, genomeHash, workloadClass });
+        } catch (error) {
+          if (!(error instanceof GenomeQuarantinedError)) throw error;
+          candidateQuarantined = true;
+        }
+      }
+      const championChanged = !pointer || pointer.bundleId !== binding.champion.bundleId ||
+        pointer.bundleHash !== binding.champion.bundleHash || pointer.generation !== binding.champion.pointerGeneration;
+      if (candidateQuarantined || championChanged) {
+        await this.stop({
+          workloadClass,
+          rolloutId: binding.rolloutId,
+          expectedIndexRevision: index.revision,
+          actor: "deployment-reconciler",
+          reason: candidateQuarantined
+            ? "Stop rollout whose candidate was quarantined"
+            : "Stop rollout whose champion no longer matches the Stable Pointer",
+        });
+        return undefined;
+      }
+    }
     return immutable({ binding, index, rollout });
   }
 
@@ -273,7 +381,13 @@ export class ActiveRolloutBindingStore {
     if (candidate.bundleHash !== input.candidate.bundleHash || !candidate.workloadClasses.includes(input.workloadClass)) {
       throw new DeploymentRuntimeBindingError("Candidate bundle does not match the workload binding");
     }
+    if (!["challenger", "shadow", "canary"].includes(candidate.status)) {
+      throw new DeploymentRuntimeBindingError(`Candidate bundle status ${candidate.status} is not runnable`);
+    }
     if (candidate.bundleHash === input.champion.bundleHash) throw new DeploymentRuntimeBindingError("Champion and candidate must differ");
+    if (await this.pointerStore.isQuarantined(candidate.bundleId)) {
+      throw new DeploymentRuntimeBindingError("Candidate bundle is quarantined by the Stable Pointer authority");
+    }
     const genomeHash = candidate.componentHashes.genome;
     if (!genomeHash || !isSha256(genomeHash)) throw new DeploymentRuntimeBindingError("Candidate bundle has no immutable genome hash");
     await this.quarantineStore.assertPinAllowed({ genomeId: candidate.genomeId, genomeHash, workloadClass: input.workloadClass });

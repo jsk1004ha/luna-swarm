@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import type { WorkOrder } from "./contracts.js";
 
 export const ORACLE_FORGE_SCHEMA_VERSION = 1 as const;
 export const ARTIFACT_STRUCTURAL_ORACLE_RUNNER_ID = "harness-v2/artifact-structural" as const;
@@ -124,7 +123,15 @@ export interface OracleForgePreflight {
 }
 
 export interface OracleForgeInput {
-  workOrder: Pick<WorkOrder, "id" | "revision" | "requirementIds" | "objective" | "constraints" | "acceptanceTests" | "deliverables">;
+  workOrder: {
+    id: string;
+    revision: number;
+    requirementIds: string[];
+    objective: string;
+    constraints: string[];
+    acceptanceTests: string[];
+    deliverables: string[];
+  };
   preflight: OracleForgePreflight;
 }
 
@@ -241,6 +248,19 @@ export interface OracleReceipt {
   evaluations: OracleEvaluation[];
   passed: boolean;
   receiptHash: string;
+}
+
+/**
+ * Immutable authority needed to re-verify an already sealed Oracle receipt
+ * after the local forge implementation has evolved.
+ */
+export interface PersistedOracleSuiteCommitment {
+  suiteId: string;
+  suiteHash: string;
+  workOrderId: string;
+  workOrderRevision: number;
+  requirementIds: string[];
+  suite: OracleSuite;
 }
 
 function hash(value: string): string {
@@ -665,6 +685,32 @@ export function validateOracleObservationReceipt(receipt: OracleObservationRecei
   if (new Set(receipt.tools).size !== receipt.tools.length || new Set(receipt.commands).size !== receipt.commands.length) throw new Error("Oracle observation receipt tool/command entries must be unique");
 }
 
+export function validatePersistedOracleObservationReceipt(
+  receipt: OracleObservationReceipt,
+  commitment: PersistedOracleSuiteCommitment,
+  artifact: OracleOutputArtifact,
+): void {
+  validatePersistedOracleSuite(commitment);
+  if (receipt.receiptHash !== hash(canonicalize(observationReceiptMaterial(receipt)))) throw new Error("Oracle observation receipt integrity check failed");
+  if (receipt.suiteId !== commitment.suiteId || receipt.suiteHash !== commitment.suiteHash ||
+      receipt.workOrderId !== commitment.workOrderId || receipt.workOrderRevision !== commitment.workOrderRevision) {
+    throw new Error("Oracle observation receipt persisted suite/work-order binding mismatch");
+  }
+  if (receipt.artifact.artifactId !== artifact.artifactId || receipt.artifact.revision !== artifact.revision || receipt.artifact.contentHash !== artifact.contentHash) {
+    throw new Error("Oracle observation receipt artifact binding mismatch");
+  }
+  if (receipt.runner.id !== ARTIFACT_STRUCTURAL_ORACLE_RUNNER_ID || receipt.runner.version !== ARTIFACT_STRUCTURAL_ORACLE_RUNNER_VERSION) {
+    throw new Error("Oracle observation receipt was not produced by the trusted artifact-structural runner");
+  }
+  if (new Set(receipt.tools).size !== receipt.tools.length || new Set(receipt.commands).size !== receipt.commands.length) {
+    throw new Error("Oracle observation receipt tool/command entries must be unique");
+  }
+  const expectedOracleIds = commitment.suite.oracles.map((oracle) => oracle.id).sort();
+  if (canonicalize(Object.keys(receipt.observations).sort()) !== canonicalize(expectedOracleIds)) {
+    throw new Error("Oracle observation receipt does not exactly cover the sealed suite");
+  }
+}
+
 export function evaluateOracleSuite(
   suite: OracleSuite,
   artifact: OracleOutputArtifact,
@@ -714,6 +760,75 @@ export function validateOracleReceipt(
   if (receipt.receiptHash !== hash(canonicalize(receiptMaterial(receipt)))) throw new Error("Oracle receipt integrity check failed");
   const expected = evaluateOracleSuite(suite, artifact, observationReceiptOrLegacyReveal, reveal);
   if (canonicalize(receipt) !== canonicalize(expected)) throw new Error("Oracle receipt does not match deterministic evaluation");
+}
+
+export function validatePersistedOracleReceipt(
+  receipt: OracleReceipt,
+  commitment: PersistedOracleSuiteCommitment,
+  artifact: OracleOutputArtifact,
+  observationReceipt: OracleObservationReceipt,
+): void {
+  validatePersistedOracleSuite(commitment);
+  if (receipt.receiptHash !== hash(canonicalize(receiptMaterial(receipt)))) throw new Error("Oracle receipt integrity check failed");
+  if (receipt.suiteId !== commitment.suiteId || receipt.suiteHash !== commitment.suiteHash ||
+      receipt.workOrderId !== commitment.workOrderId || receipt.workOrderRevision !== commitment.workOrderRevision) {
+    throw new Error("Oracle receipt persisted suite/work-order binding mismatch");
+  }
+  if (receipt.artifact.artifactId !== artifact.artifactId || receipt.artifact.revision !== artifact.revision || receipt.artifact.contentHash !== artifact.contentHash) {
+    throw new Error("Oracle receipt artifact binding mismatch");
+  }
+  if (receipt.observationReceipt.id !== observationReceipt.id ||
+      receipt.observationReceipt.receiptHash !== observationReceipt.receiptHash ||
+      receipt.observationReceipt.runnerId !== ARTIFACT_STRUCTURAL_ORACLE_RUNNER_ID ||
+      receipt.observationReceipt.runnerVersion !== ARTIFACT_STRUCTURAL_ORACLE_RUNNER_VERSION) {
+    throw new Error("Oracle receipt observation binding mismatch");
+  }
+  if (commitment.suite.oracles.some((oracle) => oracle.kind === "hidden")) {
+    throw new Error("Historical hidden Oracle evidence lacks an immutable reveal and is not promotion-authoritative");
+  }
+  const expected = evaluateOracleSuite(commitment.suite, artifact, observationReceipt);
+  if (canonicalize(receipt) !== canonicalize(expected)) {
+    throw new Error("Oracle receipt does not match deterministic evaluation of the persisted sealed suite");
+  }
+}
+
+function validatePersistedOracleSuite(commitment: PersistedOracleSuiteCommitment): void {
+  const suite = commitment.suite;
+  if (!suite || suite.schemaVersion !== ORACLE_FORGE_SCHEMA_VERSION ||
+      suite.id !== commitment.suiteId || suite.suiteHash !== commitment.suiteHash ||
+      suite.workOrderId !== commitment.workOrderId || suite.workOrderRevision !== commitment.workOrderRevision ||
+      suite.suiteHash !== hash(canonicalize(suiteMaterial(suite)))) {
+    throw new Error("Persisted sealed Oracle suite integrity check failed");
+  }
+  const bounds = resolveBounds(suite.resourceBounds);
+  if (canonicalize(bounds) !== canonicalize(suite.resourceBounds) ||
+      suite.oracles.length === 0 || suite.oracles.length > bounds.maxOracles ||
+      Buffer.byteLength(canonicalize(suite)) > bounds.maxSerializedBytes) {
+    throw new Error("Persisted sealed Oracle suite bounds are invalid");
+  }
+  validateRequirements(commitment.requirementIds, commitment.requirementIds);
+  const validationInput: OracleForgeInput = {
+    workOrder: {
+      id: commitment.workOrderId,
+      revision: commitment.workOrderRevision,
+      requirementIds: [...commitment.requirementIds],
+      objective: "persisted sealed Oracle suite",
+      constraints: [],
+      acceptanceTests: [],
+      deliverables: [],
+    },
+    preflight: { phase: "pre-implementation", implementationRevision: 0 },
+  };
+  const seen = new Set<string>();
+  let previousKind = -1;
+  for (const oracle of suite.oracles) {
+    if (seen.has(oracle.id)) throw new Error("Persisted sealed Oracle suite contains duplicate IDs");
+    seen.add(oracle.id);
+    const kind = ORACLE_KIND_ORDER.indexOf(oracle.kind);
+    if (kind < previousKind) throw new Error("Persisted sealed Oracle suite ordering is not canonical");
+    previousKind = kind;
+    validateContract(oracle, validationInput, bounds);
+  }
 }
 
 // Integration aliases keep call sites explicit about the pre-implementation lifecycle.

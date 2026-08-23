@@ -4,6 +4,7 @@ import {
   HARNESS_V2_MAX_AGENT_COUNT,
   HARNESS_V2_MIN_AGENT_COUNT,
   HARNESS_V2_ORG_VERSION,
+  COMPANY_OS_ORG_VERSION,
   type AgentRoleContract,
   type HeadquartersId,
   type MissionCell,
@@ -12,7 +13,8 @@ import {
   type OrganizationUnitV2,
   type WorkOrderToolPolicy,
 } from "./contracts.js";
-import { canonicalJson } from "./blackboard.js";
+import { canonicalJson } from "./canonical-json.js";
+import { assertToolPolicySubset } from "./tool-policy.js";
 
 interface DivisionBlueprint {
   id: string;
@@ -89,10 +91,12 @@ function normalizedId(value: string): string {
 function rolePolicy(headquartersId: HeadquartersId): Pick<AgentRoleContract, "tools" | "filesystem" | "network" | "allowedDomains"> {
   if (headquartersId === "research") {
     return {
-      tools: { allow: ["read", "search", "web-fetch"], deny: ["shell", "workspace-write"] },
+      tools: { allow: ["read", "search", "search-discover", "web-fetch"], deny: ["shell", "workspace-write"] },
       filesystem: { read: ["workspace/**", "artifacts/**"], write: ["artifacts/research/**"] },
       network: "allowlist",
-      allowedDomains: ["*.gov", "*.edu", "arxiv.org", "github.com"],
+      // Universal public HTTPS is still mediated by the credential-free broker,
+      // which rejects private/reserved DNS targets and revalidates redirects.
+      allowedDomains: ["*"],
     };
   }
   if (headquartersId === "engineering") {
@@ -347,7 +351,7 @@ function activationOrder(teams: readonly TeamBlueprint[]): TeamBlueprint[] {
     byHeadquarters.get("research")?.[0],
     byHeadquarters.get("engineering")?.[0],
     byHeadquarters.get("quality")?.[0],
-    byHeadquarters.get("quality")?.[1],
+    byHeadquarters.get("quality")?.find((team) => team.teamName === "security-attack"),
     byHeadquarters.get("integration")?.[0],
   ].filter((team): team is TeamBlueprint => Boolean(team));
   const selected = new Set(mandatory.map(teamKey));
@@ -554,7 +558,9 @@ export function organizationRegistryV2(options: OrganizationRegistryOptions = {}
 export const createOrganizationRegistryV2 = organizationRegistryV2;
 
 export function validateOrganizationRegistryV2(registry: OrganizationRegistryV2): void {
-  if (registry.orgVersion !== HARNESS_V2_ORG_VERSION) throw new Error("Organization version does not match Harness v2");
+  if (registry.orgVersion !== HARNESS_V2_ORG_VERSION && registry.orgVersion !== COMPANY_OS_ORG_VERSION) {
+    throw new Error("Organization version is not supported");
+  }
   if (!Number.isInteger(registry.totalAgents) || registry.totalAgents < HARNESS_V2_MIN_AGENT_COUNT || registry.totalAgents > HARNESS_V2_MAX_AGENT_COUNT || registry.agents.length !== registry.totalAgents) {
     throw new Error(`Organization must contain its declared ${HARNESS_V2_MIN_AGENT_COUNT}-${HARNESS_V2_MAX_AGENT_COUNT} agents`);
   }
@@ -592,19 +598,225 @@ export function validateOrganizationRegistryV2(registry: OrganizationRegistryV2)
   }
 }
 
-function subset(values: readonly string[], allowed: readonly string[]): boolean {
-  return values.every((value) => allowed.includes(value));
+export function assertCapabilityNarrowing(contract: AgentRoleContract, policy: WorkOrderToolPolicy): void {
+  try {
+    assertToolPolicySubset(contract, policy);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Tool policy expands ${contract.agentId}: ${message}`, { cause: error });
+  }
 }
 
-export function assertCapabilityNarrowing(contract: AgentRoleContract, policy: WorkOrderToolPolicy): void {
-  if (!subset(policy.allowedTools, contract.tools.allow)) throw new Error(`Tool policy expands ${contract.agentId} allowed tools`);
-  if (!subset(policy.readScopes, contract.filesystem.read)) throw new Error(`Tool policy expands ${contract.agentId} read scopes`);
-  if (!subset(policy.writeScopes, contract.filesystem.write)) throw new Error(`Tool policy expands ${contract.agentId} write scopes`);
-  if (contract.network === "off" && policy.network !== "off") throw new Error(`Tool policy enables network for ${contract.agentId}`);
-  if (policy.network === "allowlist" && !subset(policy.allowedDomains, contract.allowedDomains)) {
-    throw new Error(`Tool policy expands ${contract.agentId} network domains`);
+const COMPANY_OS_REGISTRIES = new Map<string, OrganizationRegistryV2>();
+
+interface CompanyIntegrationTeamDefinition {
+  divisionId: string;
+  divisionName: string;
+  divisionMission: string;
+  teamName: string;
+  teamMission: string;
+  production: boolean;
+}
+
+const COMPANY_INTEGRATION_TEAMS: readonly CompanyIntegrationTeamDefinition[] = [
+  {
+    divisionId: "final-integration",
+    divisionName: "Final Integration Division",
+    divisionMission: "Integrate accepted technical and research outputs without inventing content.",
+    teamName: "technical-integration",
+    teamMission: "Integrate exact accepted revisions and protected checks.",
+    production: false,
+  },
+  {
+    divisionId: "executive-assurance",
+    divisionName: "Executive Assurance Division",
+    divisionMission: "Perform final falsification and release assurance.",
+    teamName: "final-assurance",
+    teamMission: "Verify requirement, evidence, and gate coverage before release.",
+    production: false,
+  },
+  {
+    divisionId: "artifact-production",
+    divisionName: "Executive Communications & Artifact Production Division",
+    divisionMission: "Render accepted company evidence into deterministic accessible artifacts.",
+    teamName: "data-visualization",
+    teamMission: "Own dataset, chart, table, and visual encoding fidelity.",
+    production: true,
+  },
+  {
+    divisionId: "artifact-production",
+    divisionName: "Executive Communications & Artifact Production Division",
+    divisionMission: "Render accepted company evidence into deterministic accessible artifacts.",
+    teamName: "document-production",
+    teamMission: "Produce PDF, DOCX, XLSX, CSV, SVG, and PNG release artifacts.",
+    production: true,
+  },
+  {
+    divisionId: "artifact-production",
+    divisionName: "Executive Communications & Artifact Production Division",
+    divisionMission: "Render accepted company evidence into deterministic accessible artifacts.",
+    teamName: "presentation-production",
+    teamMission: "Produce deterministic PPTX and slide previews.",
+    production: true,
+  },
+  {
+    divisionId: "artifact-production",
+    divisionName: "Executive Communications & Artifact Production Division",
+    divisionMission: "Render accepted company evidence into deterministic accessible artifacts.",
+    teamName: "accessibility-production",
+    teamMission: "Own reading order, contrast, alt text, typography, and multi-view artifact QA readiness.",
+    production: true,
+  },
+] as const;
+
+/**
+ * New runs may opt into Company OS v3. The logical headcount is unchanged;
+ * at the default roster four surplus Research/Engineering slots are reassigned
+ * to Final Integration so all six integration/production teams have two staff.
+ */
+export function organizationRegistryCompanyOsV3(options: OrganizationRegistryOptions = {}): OrganizationRegistryV2 {
+  const requestedReviewerSlots = options.reviewerSlots ?? 3;
+  const key = `${options.headcount ?? HARNESS_V2_AGENT_COUNT}:${Math.max(3, requestedReviewerSlots)}`;
+  const cached = COMPANY_OS_REGISTRIES.get(key);
+  if (cached) return structuredClone(cached);
+
+  const legacy = organizationRegistryV2(options);
+  const agents = legacy.agents.map((agent) => ({ ...structuredClone(agent), orgVersion: COMPANY_OS_ORG_VERSION }));
+  const currentIntegration = agents
+    .filter((agent) => agent.headquartersId === "integration")
+    .sort((left, right) => left.agentId.localeCompare(right.agentId));
+  const donorCandidates: AgentRoleContract[] = [];
+  for (const headquartersId of ["engineering", "research"] as const) {
+    const teamIds = [...new Set(agents.filter((agent) => agent.headquartersId === headquartersId).map((agent) => agent.teamId))].sort();
+    for (const teamId of teamIds) {
+      const members = agents.filter((agent) => agent.teamId === teamId).sort((left, right) => left.agentId.localeCompare(right.agentId));
+      donorCandidates.push(...members.slice(2).reverse());
+    }
   }
-  if (policy.network === "off" && policy.allowedDomains.length > 0) throw new Error("Network-off policy cannot include allowed domains");
+  const desiredIntegrationCount = Math.min(12, currentIntegration.length + donorCandidates.length);
+  const donorCount = Math.max(0, desiredIntegrationCount - currentIntegration.length);
+  const integrationPool = [...currentIntegration, ...donorCandidates.slice(0, donorCount)]
+    .sort((left, right) => left.agentId.localeCompare(right.agentId));
+  const activeTeamCount = Math.min(COMPANY_INTEGRATION_TEAMS.length, Math.floor(integrationPool.length / 2));
+  const activeDefinitions = COMPANY_INTEGRATION_TEAMS.slice(0, activeTeamCount);
+  if (activeDefinitions.length === 0) throw new Error("Company OS registry requires Final Integration capacity");
+
+  const allocations = new Map<string, AgentRoleContract[]>();
+  for (const definition of activeDefinitions) allocations.set(definition.teamName, []);
+  integrationPool.forEach((agent, index) => {
+    const definition = activeDefinitions[index % activeDefinitions.length]!;
+    allocations.get(definition.teamName)!.push(agent);
+  });
+  for (const definition of activeDefinitions) {
+    const members = allocations.get(definition.teamName)!;
+    if (members.length < 2 || members.length > 9) throw new Error(`Company integration team ${definition.teamName} requires 2-9 staff`);
+    const divisionId = `hq:integration/division:${definition.divisionId}`;
+    const teamId = `${divisionId}/team:${definition.teamName}`;
+    const cellId = `${teamId}/cell:01`;
+    members.forEach((agent, index) => {
+      agent.headquartersId = "integration";
+      agent.divisionId = divisionId;
+      agent.teamId = teamId;
+      agent.cellId = cellId;
+      agent.role = index === 0 ? "cell-lead" : index === members.length - 1 ? "review-liaison" : "specialist";
+      agent.title = `${definition.teamName} ${agent.role} ${index + 1}`;
+      agent.charter = definition.production
+        ? [
+            `Render only accepted artifact revisions assigned to ${teamId}.`,
+            "Submit typed manifests; never fetch the web, execute shell commands, or write source code.",
+            "Never approve an artifact authored by this agent or team.",
+          ]
+        : [
+            `Execute only accepted integration work assigned to ${teamId}.`,
+            "Preserve exact artifact and gate lineage.",
+            "Never approve an artifact authored by this agent or team.",
+          ];
+      if (definition.production) {
+        agent.inputs = ["WORK_ORDER", "accepted dependency artifacts", "typed artifact manifest"];
+        agent.tools = {
+          allow: ["read", "artifact-render"],
+          deny: ["search", "shell", "workspace-write", "web-fetch", "production-deploy"],
+        };
+        agent.filesystem = {
+          read: ["artifacts/accepted/**"],
+          write: ["artifacts/releases/**"],
+        };
+        agent.network = "off";
+        agent.allowedDomains = [];
+        agent.outputSchema = "company-os/artifact-manifest@1";
+      }
+      agent.cannotReview = [agent.agentId, teamId];
+    });
+  }
+
+  const movedIds = new Set(integrationPool.map((agent) => agent.agentId));
+  const untouchedAgents = agents.filter((agent) => !movedIds.has(agent.agentId));
+  const finalAgents = [...untouchedAgents, ...integrationPool].sort((left, right) => left.agentId.localeCompare(right.agentId));
+  const units = legacy.units
+    .filter((unit) => unit.headquartersId !== "integration")
+    .map((unit) => ({ ...structuredClone(unit) }));
+  const countFor = (unitId: string): number => finalAgents.filter((agent) =>
+    unitId === `hq:${agent.headquartersId}` ||
+    unitId === agent.divisionId ||
+    unitId === agent.teamId ||
+    unitId === agent.cellId).length;
+  for (const unit of units) unit.declaredHeadcount = countFor(unit.id);
+  units.push({
+    id: "hq:integration",
+    name: "Final Integration HQ",
+    kind: "headquarters",
+    headquartersId: "integration",
+    parentId: null,
+    mission: "Integrate accepted evidence and issue deterministic, accessible release artifacts.",
+    declaredHeadcount: integrationPool.length,
+  });
+  const divisions = [...new Set(activeDefinitions.map((definition) => definition.divisionId))];
+  for (const divisionKey of divisions) {
+    const definitions = activeDefinitions.filter((definition) => definition.divisionId === divisionKey);
+    const definition = definitions[0]!;
+    const divisionId = `hq:integration/division:${divisionKey}`;
+    const divisionHeadcount = definitions.reduce((sum, item) => sum + allocations.get(item.teamName)!.length, 0);
+    units.push({
+      id: divisionId,
+      name: definition.divisionName,
+      kind: "division",
+      headquartersId: "integration",
+      parentId: "hq:integration",
+      mission: definition.divisionMission,
+      declaredHeadcount: divisionHeadcount,
+    });
+    for (const item of definitions) {
+      const allocation = allocations.get(item.teamName)!.length;
+      const teamId = `${divisionId}/team:${item.teamName}`;
+      units.push({
+        id: teamId,
+        name: item.teamName.split("-").map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`).join(" "),
+        kind: "team",
+        headquartersId: "integration",
+        parentId: divisionId,
+        mission: item.teamMission,
+        declaredHeadcount: allocation,
+      });
+      units.push({
+        id: `${teamId}/cell:01`,
+        name: `${item.teamName} Cell 01`,
+        kind: "cell",
+        headquartersId: "integration",
+        parentId: teamId,
+        mission: item.teamMission,
+        declaredHeadcount: allocation,
+      });
+    }
+  }
+  const registry: OrganizationRegistryV2 = {
+    orgVersion: COMPANY_OS_ORG_VERSION,
+    totalAgents: legacy.totalAgents,
+    units: units.sort((left, right) => left.id.localeCompare(right.id)),
+    agents: finalAgents,
+  };
+  validateOrganizationRegistryV2(registry);
+  COMPANY_OS_REGISTRIES.set(key, structuredClone(registry));
+  return structuredClone(registry);
 }
 
 export function narrowCapabilities(contract: AgentRoleContract, requested: WorkOrderToolPolicy): WorkOrderToolPolicy {
@@ -624,11 +836,20 @@ export type MissionCellInput = Omit<MissionCell, "createdAt"> & { createdAt?: st
 
 export function validateMissionCell(registry: OrganizationRegistryV2, cell: MissionCell): void {
   if (cell.id.trim().length === 0 || cell.missionId.trim().length === 0) throw new Error("Mission cell id and missionId are required");
+  if (!Number.isFinite(Date.parse(cell.createdAt))) throw new Error("Mission cell createdAt is invalid");
   if (cell.members.length < 3 || cell.members.length > 9) throw new Error("Mission cell must contain between 3 and 9 members");
   const memberIds = cell.members.map((member) => member.agentId);
   if (new Set(memberIds).size !== memberIds.length) throw new Error("Mission cell members must be unique");
   if (!memberIds.includes(cell.ownerAgentId)) throw new Error("Mission cell owner must be a member");
+  if (cell.workOrderIds.length === 0) throw new Error("Mission cell requires at least one work order");
   if (new Set(cell.workOrderIds).size !== cell.workOrderIds.length) throw new Error("Mission cell work order IDs must be unique");
+  if (cell.expiresAt !== undefined && (!Number.isFinite(Date.parse(cell.expiresAt)) || Date.parse(cell.expiresAt) <= Date.parse(cell.createdAt))) {
+    throw new Error("Mission cell expiresAt must be later than createdAt");
+  }
+  if (cell.status === "CLOSED" && !cell.closedAt) throw new Error("Closed mission cell requires closedAt");
+  if (cell.closedAt !== undefined && (!Number.isFinite(Date.parse(cell.closedAt)) || Date.parse(cell.closedAt) < Date.parse(cell.createdAt))) {
+    throw new Error("Mission cell closedAt is invalid");
+  }
   const agents = new Map(registry.agents.map((agent) => [agent.agentId, agent]));
   for (const member of cell.members) {
     if (!agents.has(member.agentId)) throw new Error(`Unknown mission cell agent ${member.agentId}`);
@@ -655,6 +876,11 @@ export function createMissionCell(registry: OrganizationRegistryV2, input: Missi
     workOrderIds: [...input.workOrderIds],
     members: input.members.map((member) => ({ ...member })),
     createdAt: input.createdAt ?? new Date().toISOString(),
+    ...(input.charterArtifactRef === undefined ? {} : { charterArtifactRef: structuredClone(input.charterArtifactRef) }),
+    ...(input.admissionReceiptRef === undefined ? {} : { admissionReceiptRef: structuredClone(input.admissionReceiptRef) }),
+    ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+    ...(input.status === undefined ? {} : { status: input.status }),
+    ...(input.closedReason === undefined ? {} : { closedReason: input.closedReason }),
     ...(input.closedAt === undefined ? {} : { closedAt: input.closedAt }),
   };
   validateMissionCell(registry, cell);

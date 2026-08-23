@@ -325,6 +325,17 @@ export function verifyProtectedExecutionReceipt(
   }
 }
 
+export function verifyProtectedExecutionReceiptIntegrity(receipt: ProtectedExecutionReceipt): boolean {
+  try {
+    const { recordHash, receiptId, signature, ...material } = receipt;
+    return typeof signature === "string" && signature.length >= 40 &&
+      canonicalSha256({ ...material, receiptId, signature }) === recordHash &&
+      `protected-execution:${canonicalSha256({ ...material, signature }).slice(7, 39)}` === receiptId;
+  } catch {
+    return false;
+  }
+}
+
 export function verifyProtectedQualityReceiptPair(
   pair: ProtectedQualityReceiptPair,
   keyId: string,
@@ -343,6 +354,10 @@ export function verifyProtectedQualityReceiptPair(
     quality.attemptId === execution.attemptId && quality.outcomeReceiptId === execution.outcomeReceiptId &&
     quality.outcomeReceiptHash === execution.outcomeReceiptHash &&
     quality.primaryQuality === execution.primaryQuality && quality.measuredAt === execution.measuredAt &&
+    quality.protectedExecutionRef?.id === execution.receiptId &&
+    quality.protectedExecutionRef.revision === 1 &&
+    quality.protectedExecutionRef.contentHash === execution.recordHash &&
+    quality.protectedExecutionRef.authority === execution.authority &&
     pair.qualityReceiptRef.id === quality.receiptId && pair.qualityReceiptRef.contentHash === quality.recordHash &&
     pair.outcome.scheduleId === execution.scheduleId && pair.outcome.side === execution.side &&
     pair.outcome.candidateBuildDigest === execution.candidateBuildDigest;
@@ -472,6 +487,12 @@ function createReceiptPair(input: {
     primaryQuality,
     measuredAt: input.measuredAt,
     evaluatorVersion: input.options.evaluatorVersion,
+    protectedExecutionRef: {
+      id: executionReceipt.receiptId,
+      revision: 1,
+      contentHash: executionReceipt.recordHash,
+      authority: executionReceipt.authority,
+    },
   }, input.options.privateKeyPem);
   const qualityReceiptRef = immutable({
     id: qualityReceipt.receiptId,

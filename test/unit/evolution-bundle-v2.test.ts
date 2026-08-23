@@ -32,6 +32,7 @@ import {
 const HASH_A = canonicalSha256({ protected: "gate-a" });
 const HASH_B = canonicalSha256({ protected: "gate-b" });
 const WORKLOAD = "engineering.bugfix";
+const GENOME_HASH = organizationGenomeHash(createOrganizationGenome(genome()));
 
 function genome(overrides: Partial<OrganizationGenome> = {}): OrganizationGenome {
   return {
@@ -70,7 +71,7 @@ function bundle(bundleId: string, overrides: Partial<ExecutionBundleInput> = {})
     parentBundleIds: [],
     sourceCommit: "0123456789abcdef",
     modelConfigHash: HASH_A,
-    componentHashes: { topology: HASH_A, prompt: HASH_B },
+    componentHashes: { genome: GENOME_HASH, topology: HASH_A, prompt: HASH_B },
     schemaVersions: { genome: 1, bundle: 2 },
     workloadClasses: [WORKLOAD],
     createdAt: "2026-08-13T00:00:00.000Z",
@@ -99,6 +100,7 @@ async function fixture(t: test.TestContext, bootstrapBundleId = "bundle-a") {
   const workspace = await mkdtemp(join(tmpdir(), "evolution-bundle-v2-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const bundles = new ExecutionBundleStore(workspace);
+  const genomes = new OrganizationGenomeStore(workspace, bundles);
   const evaluations = new InMemoryPromotionEvaluationStore();
   const pointers = new StablePointerStore(workspace, {
     bundleStore: bundles,
@@ -109,8 +111,8 @@ async function fixture(t: test.TestContext, bootstrapBundleId = "bundle-a") {
     },
     now: () => new Date("2026-08-13T01:00:00.000Z"),
   });
-  await bundles.init();
-  return { workspace, bundles, pointers, evaluations };
+  await genomes.publish(createOrganizationGenome(genome()));
+  return { workspace, bundles, genomes, pointers, evaluations };
 }
 
 async function evaluatedPromotion(
@@ -166,7 +168,7 @@ test("genomes and bundles are deeply immutable with canonical SHA-256 identities
     parentBundleIds: built.parentBundleIds,
     sourceCommit: built.sourceCommit,
     modelConfigHash: built.modelConfigHash,
-    componentHashes: { prompt: HASH_B, topology: HASH_A },
+    componentHashes: { prompt: HASH_B, genome: GENOME_HASH, topology: HASH_A },
     schemaVersions: { bundle: 2, genome: 1 },
     workloadClasses: built.workloadClasses,
     createdAt: built.createdAt,
@@ -227,6 +229,28 @@ test("bundle store is workspace-scoped, content-addressed, immutable, and ID-CAS
   await writeFile(outsidePointer, pointerText, "utf8");
   await link(outsidePointer, pointerPath);
   await assert.rejects(() => bundles.read(first.bundleId), /Unsafe bundle path/);
+});
+
+test("legacy bundles without an immutable genome hash remain auditable but cannot be activated", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "evolution-legacy-bundle-v2-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const bundles = new ExecutionBundleStore(workspace);
+  const legacy = bundle("bundle-legacy-without-genome", {
+    status: "stable",
+    componentHashes: { topology: HASH_A, prompt: HASH_B },
+  });
+  await bundles.publish(legacy);
+  assert.deepEqual(await bundles.read(legacy.bundleId), legacy);
+
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore: bundles,
+    bootstrapAuthority: { bundleId: legacy.bundleId, bundleHash: legacy.bundleHash },
+  });
+  await assert.rejects(
+    () => pointers.promote(promotion(legacy.bundleId, null, { bootstrap: true })),
+    /missing a canonical immutable genome hash/,
+  );
+  assert.equal(await pointers.get(WORKLOAD), null);
 });
 
 test("genome ID reads reject an externally hard-linked pointer", async (t) => {
@@ -314,6 +338,79 @@ test("rollback restores prior stable, advances generation, and permanently quara
   await assert.rejects(
     () => pointers.rollback(WORKLOAD, 2, { actor: "safety-operator", reason: "stale rollback" }),
     StablePointerConflictError,
+  );
+});
+
+test("draft bundles cannot bypass rollout lifecycle through direct Stable promotion", async (t) => {
+  const { bundles, pointers, evaluations } = await fixture(t);
+  await bundles.publish(bundle("bundle-a", { status: "stable" }));
+  await bundles.publish(bundle("bundle-draft", { status: "draft" }));
+  await pointers.promote(promotion("bundle-a", null, { bootstrap: true }));
+  const request = await evaluatedPromotion(bundles, pointers, evaluations, "bundle-draft", 1);
+  await assert.rejects(
+    () => pointers.promote(request),
+    /status draft is not eligible for evaluated Stable promotion/,
+  );
+  assert.equal((await pointers.get(WORKLOAD))?.bundleId, "bundle-a");
+});
+
+test("bundle quarantine from one workload prevents the same bundle from being pinned by another workload", async (t) => {
+  const workspace = await mkdtemp(join(tmpdir(), "evolution-cross-workload-quarantine-"));
+  t.after(() => rm(workspace, { recursive: true, force: true }));
+  const secondWorkload = "engineering.feature";
+  const workloads = [WORKLOAD, secondWorkload];
+  const bundles = new ExecutionBundleStore(workspace);
+  const genomes = new OrganizationGenomeStore(workspace, bundles);
+  const evaluations = new InMemoryPromotionEvaluationStore();
+  const baseline = bundle("bundle-cross-workload-baseline", { status: "stable", workloadClasses: workloads });
+  const challenger = bundle("bundle-cross-workload-challenger", { workloadClasses: workloads });
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore: bundles,
+    evaluationStore: evaluations,
+    bootstrapAuthority: { bundleId: baseline.bundleId, bundleHash: baseline.bundleHash },
+  });
+  await genomes.publish(createOrganizationGenome(genome()));
+  await bundles.publish(baseline);
+  await bundles.publish(challenger);
+  for (const workloadClass of workloads) {
+    await pointers.promote(promotion(baseline.bundleId, null, { workloadClass, bootstrap: true }));
+    const champion = await pointers.get(workloadClass);
+    assert.ok(champion);
+    const recordHash = canonicalSha256({ champion, challenger, workloadClass });
+    const receipt = {
+      receiptId: `evaluation-receipt:${recordHash.slice(7, 39)}`,
+      recordHash,
+      workloadClass,
+      champion: { bundleId: champion.bundleId, bundleHash: champion.bundleHash },
+      challenger: { bundleId: challenger.bundleId, bundleHash: challenger.bundleHash },
+      scorecard: { outcome: "PROMOTABLE" },
+    } as unknown as PairedEvaluationReceipt;
+    evaluations.set(receipt);
+    await pointers.promote(promotion(challenger.bundleId, 1, {
+      workloadClass,
+      evaluationReceipt: { receiptId: receipt.receiptId, contentHash: receipt.recordHash },
+    }));
+  }
+
+  await pointers.rollback(WORKLOAD, 2, { actor: "safety-operator", reason: "shared bundle regression" });
+  await assert.rejects(
+    () => pointers.pinAttempt(secondWorkload, {
+      runId: "run-cross-workload",
+      workOrderId: "work-cross-workload",
+      attemptId: "attempt-cross-workload",
+      environmentDigest: HASH_A,
+      budgetDigest: HASH_A,
+      fencingToken: 1,
+    }),
+    QuarantinedBundleError,
+  );
+  await assert.rejects(
+    () => pointers.pinRunBundle({
+      workloadClass: secondWorkload,
+      environmentDigest: HASH_A,
+      pinnedAt: "2026-08-13T00:00:00.000Z",
+    }),
+    QuarantinedBundleError,
   );
 });
 
@@ -455,11 +552,13 @@ test("stable pointer readers tolerate thousands of same-directory atomic replace
   const workloads = Array.from({ length: 96 }, (_, index) => `engineering.race-${index}`);
   const baseline = bundle("bundle-race", { status: "stable", workloadClasses: [readWorkload, ...workloads] });
   const bundles = new ExecutionBundleStore(workspace);
+  const genomes = new OrganizationGenomeStore(workspace, bundles);
   const pointers = new StablePointerStore(workspace, {
     bundleStore: bundles,
     bootstrapAuthority: { bundleId: baseline.bundleId, bundleHash: baseline.bundleHash },
     lockTimeoutMs: 20_000,
   });
+  await genomes.publish(createOrganizationGenome(genome()));
   await bundles.publish(baseline);
   await pointers.promote({
     workloadClass: readWorkload,
@@ -495,6 +594,8 @@ test("independent processes converge on one Stable Pointer bootstrap generation"
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const baseline = bundle("bundle-process-race", { status: "stable" });
   const bundles = new ExecutionBundleStore(workspace);
+  const genomes = new OrganizationGenomeStore(workspace, bundles);
+  await genomes.publish(createOrganizationGenome(genome()));
   await bundles.publish(baseline);
   const workerPath = join(process.cwd(), "test", "fixtures", "stable-pointer-bootstrap-worker.ts");
 

@@ -1,7 +1,12 @@
-import type { JsonValue } from "../types.js";
+import type { JsonValue } from "../json.js";
 import type { MissionPreflightReport } from "./preflight.js";
+import type { OracleSuite } from "./oracle-forge.js";
 
 export const HARNESS_V2_ORG_VERSION = "lab-128@2" as const;
+export const COMPANY_OS_ORG_VERSION = "company-os@3" as const;
+export type OrganizationVersion =
+  | typeof HARNESS_V2_ORG_VERSION
+  | typeof COMPANY_OS_ORG_VERSION;
 /** Default retained for persisted-run and deterministic assignment compatibility. */
 export const HARNESS_V2_AGENT_COUNT = 128 as const;
 export const HARNESS_V2_MIN_AGENT_COUNT = 14 as const;
@@ -31,7 +36,7 @@ export type AgentNetworkPolicy = "off" | "allowlist";
 
 export interface AgentRoleContract {
   agentId: string;
-  orgVersion: typeof HARNESS_V2_ORG_VERSION;
+  orgVersion: OrganizationVersion;
   headquartersId: HeadquartersId;
   divisionId: string;
   teamId: string;
@@ -56,7 +61,7 @@ export interface AgentRoleContract {
 }
 
 export interface OrganizationRegistryV2 {
-  orgVersion: typeof HARNESS_V2_ORG_VERSION;
+  orgVersion: OrganizationVersion;
   totalAgents: number;
   units: OrganizationUnitV2[];
   agents: AgentRoleContract[];
@@ -149,6 +154,11 @@ export interface MissionCell {
   workOrderIds: string[];
   members: MissionCellMember[];
   createdAt: string;
+  charterArtifactRef?: ArtifactRef;
+  admissionReceiptRef?: ArtifactRef;
+  expiresAt?: string;
+  status?: "PROPOSED" | "ACTIVE" | "CLOSING" | "CLOSED" | "FAILED";
+  closedReason?: string;
   closedAt?: string;
 }
 
@@ -197,6 +207,13 @@ export interface WorkOrder {
   acceptanceTests: string[];
   requiredGateIds: GateId[];
   toolPolicy: WorkOrderToolPolicy;
+  /** Present on strict Company OS work. Legacy Work Orders remain readable without it. */
+  headquartersId?: HeadquartersId;
+  /** Host-pinned immutable budget. Strict Company OS admission requires it. */
+  budgetRef?: ArtifactRef;
+  /** Services purchased from the department catalog for this exact Work Order. */
+  serviceIds?: string[];
+  authorityKind?: "command-bootstrap" | "planning" | "department" | "verification" | "integration" | "evolution";
   independence?: {
     cohortId: string;
     sealedUntil: "all-submitted";
@@ -224,6 +241,12 @@ export interface WorkOrderRecordV2 {
   validationAttempts: number;
   artifactIds: string[];
   lease?: WorkOrderLease;
+  /**
+   * Immutable identity of the execution that reached a terminal state. The
+   * lease is closed, but host-owned post-acceptance integration artifacts can
+   * still be bound to the exact attempt without inventing a new authority.
+   */
+  completedExecution?: WorkOrderLease;
   lastError?: string;
   updatedAt: string;
 }
@@ -266,10 +289,17 @@ export type ArtifactKind =
   | "patch"
   | "test"
   | "benchmark"
+  | "artifact-deliverable"
+  | "artifact-render-receipt"
+  | "artifact-validation"
   | "finding"
   | "decision"
   | "team-report"
   | "gate-receipt"
+  | "handoff"
+  | "budget-receipt"
+  | "mission-cell-admission"
+  | "source-isolation"
   | "release";
 
 export type ArtifactVerificationStatus =
@@ -289,6 +319,22 @@ export interface ArtifactProducer {
   agentId: string;
   teamId: string;
   workOrderId?: string;
+  runId?: string;
+  workOrderRevision?: number;
+  executionRevision?: number;
+  attemptId?: string;
+  fencingToken?: number;
+  authorityKind?: "host-bootstrap" | "model" | "tool" | "host-effect";
+}
+
+export interface CompanyArtifactProducer extends ArtifactProducer {
+  workOrderId: string;
+  runId: string;
+  workOrderRevision: number;
+  executionRevision: number;
+  attemptId: string;
+  fencingToken: number;
+  authorityKind: "host-bootstrap" | "model" | "tool" | "host-effect";
 }
 
 export interface ArtifactRevision<T extends JsonValue = JsonValue> extends ArtifactRef {
@@ -305,6 +351,132 @@ export interface ArtifactRevision<T extends JsonValue = JsonValue> extends Artif
   commands: string[];
   content: T;
   recordHash: string;
+}
+
+export interface MissionCharterArtifactContent {
+  schemaVersion: 1;
+  missionId: string;
+  directive: string;
+  requirementIds: string[];
+  decisionsRequired: string[];
+  requiredDeliverables: string[];
+  audience: string;
+  risk: "low" | "medium" | "high" | "critical";
+  nonGoals: string[];
+  successGateIds: GateId[];
+}
+
+export interface WorkOrderBudgetEnvelope {
+  schemaVersion: 1;
+  budgetId: string;
+  runId: string;
+  workOrderId: string;
+  workOrderRevision: number;
+  maxModelCalls: number;
+  maxRepairCalls: number;
+  maxRevalidationCalls: number;
+  maxToolCalls: number;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  maxWallClockMs: number;
+  maxConcurrentCells: number;
+  budgetHash: CanonicalSha256;
+}
+
+export interface WorkOrderBudgetReceipt {
+  schemaVersion: 1;
+  runId: string;
+  budgetHash: CanonicalSha256;
+  workOrderId: string;
+  workOrderRevision: number;
+  executionRevision: number;
+  attemptId: string;
+  fencingToken: number;
+  budgetArtifactRef: ArtifactRef;
+  consumedModelCalls: number;
+  consumedToolCalls: number;
+  consumedInputTokens: number;
+  consumedOutputTokens: number;
+  elapsedMs: number;
+  exceeded: boolean;
+  recordHash: CanonicalSha256;
+}
+
+export interface MissionCellCharterArtifactContent {
+  schemaVersion: 1;
+  cellId: string;
+  missionId: string;
+  sponsoringHeadquartersId: HeadquartersId;
+  memberAgentIds: string[];
+  workOrderIds: string[];
+  authorities: Array<"execute" | "coordinate" | "verify" | "advise">;
+  visibleArtifactRefs: ArtifactRef[];
+  hiddenArtifactRefs: ArtifactRef[];
+  allowedSourceIdentities: string[];
+  predecessorVisibility: "none" | "findings-only" | "accepted-artifacts";
+  verifierVisibility: "cell-output-only" | "sealed-source-set" | "workspace-reproduction";
+  activatedAt: string;
+  expiresAt: string;
+  exitConditions: string[];
+  informationBarrierHash: CanonicalSha256;
+}
+
+export interface MissionCellAdmissionReceipt {
+  schemaVersion: 1;
+  runId: string;
+  cellId: string;
+  missionId: string;
+  charterArtifactRef: ArtifactRef;
+  charterHash: CanonicalSha256;
+  workOrderRefs: Array<{ workOrderId: string; workOrderRevision: number }>;
+  memberAgentIds: string[];
+  ownerAgentId: string;
+  verifierAgentIds: string[];
+  visibleArtifactRefs: ArtifactRef[];
+  hiddenArtifactRefs: ArtifactRef[];
+  allowedSourceIdentities: string[];
+  promptFamilyHashes: CanonicalSha256[];
+  contextPackHashes: CanonicalSha256[];
+  predecessorVisibility: "none" | "findings-only" | "accepted-artifacts";
+  verifierVisibility: "cell-output-only" | "sealed-source-set" | "workspace-reproduction";
+  admissionPolicyHash: CanonicalSha256;
+  admitted: boolean;
+  recordHash: CanonicalSha256;
+}
+
+export interface SourceIsolationReceipt {
+  schemaVersion: 1;
+  runId: string;
+  cellId: string;
+  workOrderAttemptRef: {
+    workOrderId: string;
+    workOrderRevision: number;
+    executionRevision: number;
+    attemptId: string;
+    fencingToken: number;
+  };
+  submittedArtifactRevisionRefs: ArtifactRef[];
+  eligibleSourceFamilyHashes: CanonicalSha256[];
+  sharedCanonicalSourceHashes: CanonicalSha256[];
+  overlapNumerator: number;
+  overlapDenominator: number;
+  overlapRate: number;
+  isolationPolicyHash: CanonicalSha256;
+  eligibleForIndependentQuorum: boolean;
+  recordHash: CanonicalSha256;
+}
+
+export interface DepartmentHandoffArtifactContent {
+  schemaVersion: 1;
+  fromDepartment: HeadquartersId;
+  toDepartment: HeadquartersId;
+  workOrderId: string;
+  inputArtifactRefs: ArtifactRef[];
+  acceptedOutputRefs: ArtifactRef[];
+  requirementIds: string[];
+  unresolvedFindingIds: string[];
+  requiredNextGateIds: GateId[];
+  limitations: string[];
 }
 
 export type EvidenceRelation =
@@ -347,13 +519,19 @@ export interface GateReceiptContent {
     blindVoteArtifacts: ArtifactRef[];
     blindAcceptThreshold: number;
   };
+  diversity?: {
+    assessmentArtifact: ArtifactRef;
+    assessmentHash: string;
+    executionHashes: string[];
+    requiredMethods: string[];
+  };
 }
 
 export interface ValidationVoteArtifactContent {
   validationRound: number;
   reviewedArtifact: ArtifactRef;
   boundAgentId: string;
-  reviewerKind: "manager" | "blind-validator";
+  reviewerKind: "manager" | "blind-validator" | "red-team";
   vote: {
     validatorId: string;
     verdict: "accept" | "revise" | "reject";
@@ -483,6 +661,12 @@ export interface ProgramKnowledgeSummary {
   edgeCount: number;
   indexedAt: string;
   omittedFiles: number;
+  cacheKey?: string;
+  sourceIdentity?: string;
+  parserVersion?: string;
+  sourceFilesRead?: number;
+  fileRecordsReused?: number;
+  graphCacheHit?: boolean;
   error?: string;
 }
 
@@ -494,6 +678,8 @@ export interface OracleSuiteSummary {
   kinds: string[];
   hiddenCount: number;
   sealedAt: string;
+  /** Exact immutable suite needed for historical deterministic verification. */
+  sealedSuite?: OracleSuite;
 }
 
 export interface ExperimentSummaryV2 {
@@ -514,7 +700,7 @@ export interface KnowledgeCapsuleStateRef {
 }
 
 export interface HarnessV2RunState {
-  orgVersion: typeof HARNESS_V2_ORG_VERSION;
+  orgVersion: OrganizationVersion;
   /** Resolved organization size pinned for the lifetime of this run. */
   organizationHeadcount?: number;
   /** Reviewer capacity used to build the pinned organization roster. */
@@ -525,6 +711,9 @@ export interface HarnessV2RunState {
   artifactHeads: Record<string, ArtifactRef>;
   councils: Record<string, CouncilSnapshot>;
   missionCells: Record<string, MissionCell>;
+  /** Company staffing observability; logical roster size remains independent. */
+  activeAssignments?: number;
+  inflightModelCalls?: number;
   messages: StructuredMessageEnvelope[];
   /** P0 intelligence fields are optional so schema-v1 runs remain resumable. */
   missionPreflight?: MissionPreflightReport;

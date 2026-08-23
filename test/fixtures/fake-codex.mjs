@@ -76,9 +76,61 @@ lines.on("line", (line) => {
     setTimeout(() => send({ id, result: { thread: { id: threadId } } }), 30);
   } else if (method === "turn/start") {
     const turnId = `turn-${nextTurn++}`;
-    const delayed = params.input?.[0]?.text === "delayed";
+    const prompt = params.input?.[0]?.text;
+    const delayed = prompt === "delayed";
     const neverStartResult = params.input?.[0]?.text === "never-start-result";
     const crash = params.input?.[0]?.text === "crash";
+    if (prompt === "emit-token-usage-race") {
+      const usage = (totalTokens, inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens, reasoningOutputTokens) => ({
+        totalTokens, inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens, reasoningOutputTokens,
+      });
+      // All observations intentionally precede the turn/start response.
+      send({ method: "rawResponse/completed", params: {
+        threadId: params.threadId, turnId: "turn-stale", responseId: "shared-response",
+        usage: usage(1_000, 700, 200, 25, 300, 100),
+      } });
+      send({ method: "rawResponse/completed", params: {
+        threadId: params.threadId, turnId, responseId: "missing-first",
+      } });
+      send({ method: "rawResponse/completed", params: {
+        threadId: params.threadId, turnId, responseId: "missing-first",
+        usage: usage(900, 600, 100, 0, 300, 100),
+      } });
+      send({ method: "rawResponse/completed", params: {
+        threadId: params.threadId, turnId, responseId: "shared-response",
+        usage: usage(100, 70, 20, 5, 30, 10),
+      } });
+      send({ method: "rawResponse/completed", params: {
+        threadId: params.threadId, turnId, responseId: "shared-response",
+        usage: usage(999, 699, 199, 1, 300, 99),
+      } });
+    }
+    if (prompt === "emit-early-turn-events") {
+      send({ method: "error", params: {
+        threadId: params.threadId,
+        turnId: "turn-stale",
+        willRetry: false,
+        error: { message: "stale error must not poison the active turn" },
+      } });
+      send({ method: "item/completed", params: {
+        threadId: params.threadId,
+        turnId,
+        item: { type: "agentMessage", text: "early-correct" },
+      } });
+      send({ method: "turn/completed", params: {
+        threadId: params.threadId,
+        turn: { id: turnId, status: "completed" },
+      } });
+    }
+    if (prompt === "emit-early-overflow") {
+      for (let index = 0; index <= 256; index += 1) {
+        send({ method: "item/agentMessage/delta", params: {
+          threadId: params.threadId,
+          turnId,
+          delta: "x",
+        } });
+      }
+    }
     setTimeout(() => {
       active += 1;
       maximumActive = Math.max(maximumActive, active);
@@ -89,12 +141,45 @@ lines.on("line", (line) => {
         return;
       }
       send({ id, result: { turn: { id: turnId, status: "inProgress" } } });
+      if (prompt === "emit-early-turn-events" || prompt === "emit-early-overflow") {
+        active -= 1;
+        reportActive();
+        return;
+      }
+      if (prompt === "emit-token-usage-failed" || prompt === "emit-token-usage-abort") {
+        send({ method: "rawResponse/completed", params: {
+          threadId: params.threadId,
+          turnId,
+          responseId: `response-${prompt}`,
+          usage: {
+            totalTokens: 25,
+            inputTokens: 18,
+            cachedInputTokens: 4,
+            cacheWriteInputTokens: 1,
+            outputTokens: 7,
+            reasoningOutputTokens: 2,
+          },
+        } });
+        if (prompt === "emit-token-usage-failed") {
+          active -= 1;
+          reportActive();
+          send({ method: "turn/completed", params: {
+            threadId: params.threadId,
+            turn: { id: turnId, status: "failed", error: { message: "fixture failure" } },
+          } });
+        }
+        return;
+      }
       if (crash || (crashOnceMarker && !existsSync(crashOnceMarker))) {
         if (crashOnceMarker) writeFileSync(crashOnceMarker, String(process.pid));
         setTimeout(() => process.exit(23), 10);
       } else if (!delayed && params.input?.[0]?.text?.startsWith("dynamic-tool-")) {
         const mode = params.input[0].text;
-        const tool = mode === "dynamic-tool-unknown" ? "write" : "read";
+        const tool = mode === "dynamic-tool-unknown"
+          ? "write"
+          : mode === "dynamic-tool-web-fetch"
+            ? "web-fetch"
+            : "read";
         const requestedTurnId = mode === "dynamic-tool-stale" ? "turn-stale" : turnId;
         const callId = `dynamic-call-${nextToolCall++}`;
         const finish = (text) => {
@@ -112,8 +197,8 @@ lines.on("line", (line) => {
         };
         const requestTool = () => {
           if (
-            tool === "read"
-            && !threadTools.get(params.threadId)?.some((spec) => spec?.name === "read")
+            tool !== "write"
+            && !threadTools.get(params.threadId)?.some((spec) => spec?.name === tool)
           ) {
             finish("tool-not-declared-on-thread");
             return;
@@ -131,7 +216,9 @@ lines.on("line", (line) => {
             turnId: requestedTurnId,
             callId,
             tool,
-            arguments: { path: "README.md" },
+            arguments: tool === "web-fetch"
+              ? { mode: "replay", snapshotHash: `sha256:${"a".repeat(64)}` }
+              : { path: "README.md" },
           } });
         };
         if (mode === "dynamic-tool-late") {
@@ -184,7 +271,59 @@ lines.on("line", (line) => {
             },
           } });
         }
-        const text = params.input?.[0]?.text === "echo-sandbox-policy"
+        if (params.input?.[0]?.text === "emit-thread-token-usage") {
+          const exactTurnUsage = {
+            totalTokens: 80,
+            inputTokens: 55,
+            cachedInputTokens: 15,
+            cacheWriteInputTokens: 0,
+            outputTokens: 25,
+            reasoningOutputTokens: 8,
+          };
+          send({ method: "rawResponse/completed", params: {
+            threadId: params.threadId,
+            turnId,
+            responseId: "response-without-usage",
+            usage: null,
+          } });
+          send({ method: "thread/tokenUsage/updated", params: {
+            threadId: params.threadId,
+            turnId,
+            tokenUsage: {
+              total: exactTurnUsage,
+              last: exactTurnUsage,
+              modelContextWindow: 128_000,
+            },
+          } });
+        }
+        if (params.input?.[0]?.text === "emit-conflicting-token-usage") {
+          const rawUsage = {
+            totalTokens: 40,
+            inputTokens: 30,
+            cachedInputTokens: 0,
+            cacheWriteInputTokens: 0,
+            outputTokens: 10,
+            reasoningOutputTokens: 3,
+          };
+          send({ method: "rawResponse/completed", params: {
+            threadId: params.threadId,
+            turnId,
+            responseId: "conflicting-response",
+            usage: rawUsage,
+          } });
+          send({ method: "thread/tokenUsage/updated", params: {
+            threadId: params.threadId,
+            turnId,
+            tokenUsage: {
+              total: { ...rawUsage, totalTokens: 41 },
+              last: { ...rawUsage, totalTokens: 41 },
+              modelContextWindow: 128_000,
+            },
+          } });
+        }
+        const text = prompt === "emit-token-usage-race"
+          ? "done"
+          : params.input?.[0]?.text === "echo-sandbox-policy"
           ? JSON.stringify(params.sandboxPolicy)
           : params.input?.[0]?.text === "echo-thread-start-params"
             ? JSON.stringify({
@@ -193,6 +332,8 @@ lines.on("line", (line) => {
                 threadSource: threadStartParams.get(params.threadId)?.threadSource,
                 experimentalRawEvents: threadStartParams.get(params.threadId)?.experimentalRawEvents,
               })
+          : params.input?.[0]?.text === "echo-turn-input"
+            ? JSON.stringify(params.input)
           : params.input?.[0]?.text === "echo-developer-instructions"
             ? threadInstructions.get(params.threadId) ?? ""
             : `network=${String(params.sandboxPolicy?.networkAccess)}`;

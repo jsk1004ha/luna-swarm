@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "runId": "luna-r1-v5",
+  "model": "gpt-5.6-luna",
+  "repetition": 1,
+  "baseCommit": "99af081e99226cfc3cb36297325a10c093fae19d",
+  "startedAt": "2026-08-17T13:19:16.109Z",
+  "wallMs": 298017,
+  "exitCode": 0,
+  "timedOut": false,
+  "eventCount": 44,
+  "turnCount": 1,
+  "toolActionCount": 16,
+  "tokenUsage": {
+    "inputTokens": 1138516,
+    "cachedInputTokens": 1071360,
+    "cacheWriteInputTokens": 0,
+    "outputTokens": 6137,
+    "reasoningOutputTokens": 2105,
+    "totalTokens": null
+  },
+  "metricsComplete": true,
+  "totalTokensAvailable": false,
+  "isolation": "remote-less-disposable-clone-with-post-run-scope-check",
+  "promptSha256": "sha256:a7c17910d9ad08f1adacf70c311e2f80fd9e5f69cdeed494c07e0731b7c92dd9",
+  "patchSha256": "sha256:09131a12dc88112fbf9ec2d90c2529d60d2fb82f00696c0106a7f418fad12a0c"
+}

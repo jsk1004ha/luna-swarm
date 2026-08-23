@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "supersedes": "preregistration.v3.json",
+  "createdAt": "2026-08-17T13:13:27.7716163Z",
+  "reason": "WindowsApps codex.exe also rejected child-process spawn before any model request. The runner now invokes the installed hash-unchanged Codex package entry through the current Node runtime. Mission, hidden suite, scorer, order, and budgets remain frozen.",
+  "excludedInfrastructureAttempts": [
+    "luna-r1-codex.cmd-spawn-EPERM",
+    "luna-r1-WindowsApps-codex.exe-spawn-EPERM",
+    "host-cleanup-policy-rejection"
+  ],
+  "protocol": "direct-codex-model-coding-paired-v4",
+  "baseCommit": "99af081e99226cfc3cb36297325a10c093fae19d",
+  "executionOrder": [
+    ["gpt-5.6-luna", "gpt-5.6-sol"],
+    ["gpt-5.6-sol", "gpt-5.6-luna"],
+    ["gpt-5.6-luna", "gpt-5.6-sol"]
+  ],
+  "missionHash": "sha256:a7c17910d9ad08f1adacf70c311e2f80fd9e5f69cdeed494c07e0731b7c92dd9",
+  "hiddenSuiteHashes": [
+    "sha256:bd263359ee632063e7c593f7d65e0fcfdc6f711de4b5b00697752bf878ff05e1",
+    "sha256:fe95daf1d10b26e4f1ffeecf08f42e5af6e08c2a973722749b224d81f51c169f"
+  ],
+  "scoreHash": "sha256:fb2c2a76ad866d0315bdc264087a6fd238e35d37882e212b31c68a6a82af8f3e",
+  "runnerHash": "sha256:002ac887d9176ed9992ccfb5da44827ca6163cf7cb9d98ada73bc1a34610271c",
+  "interpretation": "No model request was issued before v4. This remains a model-level coding diagnostic."
+}
