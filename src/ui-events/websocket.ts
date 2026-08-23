@@ -22,6 +22,7 @@ export interface UiEventWebSocketAttachment {
 
 export interface UiSnapshotMessage {
   type: "snapshot";
+  mode: "replay" | "resync";
   seq: number;
   data: JsonValue | null;
 }
@@ -37,6 +38,8 @@ export interface UiEventMessage {
 
 export interface UiErrorMessage {
   type: "error";
+  code?: "REPLAY_UNAVAILABLE";
+  seq?: number;
   data: { message: string };
 }
 
@@ -142,11 +145,34 @@ export class UiEventWebSocketSession {
     this.unsubscribe?.();
     this.runId = runId;
     this.lastSeq = lastSeq;
-    const current = this.hub.read(runId, lastSeq);
-    this.sendMessage({ type: "snapshot", seq: current.lastSeq, data: current.snapshot });
-    for (const event of current.replay) this.sendEvent(event);
-    this.lastSeq = current.lastSeq;
-    this.unsubscribe = this.hub.subscribe((event) => this.sendLive(event));
+    const pending: SwarmUiEvent[] = [];
+    let initializing = true;
+    this.unsubscribe = this.hub.subscribe((event) => {
+      if (event.runId !== this.runId) return;
+      if (initializing) pending.push(event);
+      else this.sendLive(event);
+    });
+    const current = this.hub.readReplayWindow(runId, lastSeq);
+    if (current.replayStatus === "unavailable") {
+      this.sendMessage({
+        type: "error",
+        code: "REPLAY_UNAVAILABLE",
+        seq: current.lastSeq,
+        data: { message: "Authoritative snapshot unavailable for event resynchronization" },
+      });
+      this.unsubscribe?.();
+      this.unsubscribe = undefined;
+      return;
+    }
+    if (current.replayStatus === "resync") {
+      this.sendMessage({ type: "snapshot", mode: "resync", seq: current.lastSeq, data: current.snapshot });
+      this.lastSeq = current.lastSeq;
+    } else {
+      this.sendMessage({ type: "snapshot", mode: "replay", seq: lastSeq, data: current.snapshot });
+      for (const event of current.replay) this.sendContiguous(event);
+    }
+    initializing = false;
+    for (const event of pending.sort((left, right) => left.seq - right.seq)) this.sendLive(event);
   }
 
   sendError(message: string): void {
@@ -160,8 +186,38 @@ export class UiEventWebSocketSession {
 
   private sendLive(event: SwarmUiEvent): void {
     if (event.runId !== this.runId || event.seq <= this.lastSeq) return;
+    if (event.seq !== this.lastSeq + 1) {
+      this.resynchronize();
+      return;
+    }
+    this.sendContiguous(event);
+  }
+
+  private sendContiguous(event: SwarmUiEvent): void {
+    if (event.seq <= this.lastSeq) return;
+    if (event.seq !== this.lastSeq + 1) throw new Error(`Non-contiguous UI event sequence ${event.seq} after ${this.lastSeq}`);
     this.sendEvent(event);
     this.lastSeq = event.seq;
+  }
+
+  private resynchronize(): void {
+    if (!this.runId) return;
+    const current = this.hub.readReplayWindow(this.runId, this.lastSeq);
+    if (current.replayStatus === "unavailable") {
+      this.sendMessage({
+        type: "error",
+        code: "REPLAY_UNAVAILABLE",
+        seq: current.lastSeq,
+        data: { message: "Authoritative snapshot unavailable for event resynchronization" },
+      });
+      return;
+    }
+    if (current.replayStatus === "resync") {
+      this.sendMessage({ type: "snapshot", mode: "resync", seq: current.lastSeq, data: current.snapshot });
+      this.lastSeq = current.lastSeq;
+      return;
+    }
+    for (const event of current.replay) this.sendContiguous(event);
   }
 
   private sendEvent(event: SwarmUiEvent): void {

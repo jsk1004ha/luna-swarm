@@ -28,6 +28,7 @@ import {
   type TrustedRunnerRpcRequest,
   type TrustedRunnerRpcResponse,
 } from "./process-protocol.js";
+import { canonicalProtectedClosure } from "./execution-receipt-store.js";
 
 const MAX_SEALED_CONFIG_BYTES = 16 * 1024 * 1024;
 const MAX_RUNNER_STDERR_BYTES = 64 * 1024;
@@ -91,7 +92,7 @@ export async function runProtectedEvaluatorProcessWorker(argv: ReadonlyArray<str
     suites,
     trustedRunnerPin: {
       executableSha256: config.trustedRunner.executableSha256,
-      integritySha256: config.trustedRunner.integrityFiles.map((file) => file.sha256),
+      integrityFiles: canonicalProtectedClosure(config.trustedRunner.closureRoot, config.trustedRunner.integrityFiles),
       commandSha256: canonicalSha256(config.trustedRunner.arguments),
     },
   }, config.rpc.maxMessageBytes);

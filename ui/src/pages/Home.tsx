@@ -59,6 +59,16 @@ const filterOptions: Array<{ id: Activity | "all"; label: string }> = [
 type DirectiveAction = "instruction" | "start" | "start_mock" | "cancel" | "concurrency";
 type DrawerTab = "current" | "history";
 
+export function resolveDirectiveAction(
+  action: DirectiveAction,
+  hasSnapshot: boolean,
+  readOnly: boolean,
+  runMode: string | undefined,
+): DirectiveAction {
+  if (hasSnapshot && !readOnly && runMode !== "idle") return action;
+  return action === "start_mock" ? "start_mock" : "start";
+}
+
 const AVATAR_TONES: Record<DepartmentId, string> = {
   executive: "violet",
   strategy: "blue",
@@ -170,6 +180,7 @@ export default function Home() {
   const readOnly = snapshot?.observation?.readOnly ?? snapshot?.control?.readOnly ?? true;
   const runMode = snapshot?.control?.mode;
   const isPaused = runMode === "paused";
+  const effectiveDirectiveAction = resolveDirectiveAction(directiveAction, snapshot != null, readOnly, runMode);
   const visibleAgents = useMemo(
     () => filteredAgents({ snapshot, selectedDepartment, activityFilter, search }),
     [snapshot, selectedDepartment, activityFilter, search],
@@ -210,22 +221,25 @@ export default function Home() {
 
   const sendDirective = async (event: FormEvent) => {
     event.preventDefault();
-    if (directiveAction === "start" || directiveAction === "start_mock") {
+    if (effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock") {
       if (!commandText.trim()) return toast.error("새 실행 목표를 입력하세요.");
-      const result = await runControl({ action: "start", goal: commandText.trim(), mock: directiveAction === "start_mock", requestId: globalThis.crypto?.randomUUID?.() });
-      if (result?.runId) await refreshRuns(result.runId);
+      const result = await runControl({ action: "start", goal: commandText.trim(), mock: effectiveDirectiveAction === "start_mock", requestId: globalThis.crypto?.randomUUID?.() });
+      if (result?.runId) {
+        setDirectiveAction("instruction");
+        await refreshRuns(result.runId);
+      }
     } else {
       if (!snapshot || readOnly) return toast.error("현재 실행은 관찰 전용입니다.");
-      if (directiveAction === "instruction") {
+      if (effectiveDirectiveAction === "instruction") {
         if (!commandText.trim()) return toast.error("조직에 전달할 지시를 입력하세요.");
         await runControl({ action: "instruction", runId: snapshot.run.id, text: commandText.trim(), trigger: "next_turn" });
       }
-      if (directiveAction === "concurrency") {
+      if (effectiveDirectiveAction === "concurrency") {
         const value = Number(commandText);
         if (!Number.isInteger(value) || value < 1 || value > 1_024) return toast.error("동시성은 1~1024 사이의 정수여야 합니다.");
         await runControl({ action: "concurrency", runId: snapshot.run.id, value });
       }
-      if (directiveAction === "cancel" && window.confirm("전체 실행을 취소할까요? 승인된 결과는 보존됩니다.")) await runControl({ action: "cancel", runId: snapshot.run.id });
+      if (effectiveDirectiveAction === "cancel" && window.confirm("전체 실행을 취소할까요? 승인된 결과는 보존됩니다.")) await runControl({ action: "cancel", runId: snapshot.run.id });
     }
     setCommandText("");
   };
@@ -321,7 +335,13 @@ export default function Home() {
           <div className="summary-progress"><div><span>Overall progress</span><b>{progress}%</b></div><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><small>{completed} of {totalTasks} tasks complete</small></div>
         </section>
 
-        <section className={`runtime-connect ${connectionClass} ${connection}`}><div className="runtime-state"><span className="connection-dot" /><div><p className="label">LOCAL RUNTIME</p><b>{connection === "live" ? "Live stream connected" : connection === "connecting" ? "Connecting to Luna Swarm" : connection === "stale" ? "Connection is stale" : connection === "mock" ? "Demo snapshot" : "Connection needs attention"}</b></div></div><div className="runtime-fields"><span>{snapshot?.observation?.source ?? "runtime API"}</span><span>{snapshot?.observation?.readOnly ? "Read only" : "Operator controlled"}</span></div><button className="runtime-connect-button" onClick={() => snapshot?.run.id && void switchRun(snapshot.run.id)}>Refresh run</button></section>
+        <section className={`runtime-connect ${connectionClass} ${connection}`}><div className="runtime-state"><span className="connection-dot" /><div><p className="label">LOCAL RUNTIME</p><b>{connection === "live" ? "Live stream connected" : connection === "connecting" ? "Connecting to Luna Swarm" : connection === "stale" ? "Connection is stale" : connection === "mock" ? "Demo snapshot" : "Connection needs attention"}</b></div></div><div className="runtime-fields"><span>{snapshot?.observation?.source ?? "runtime API"}</span><span>{snapshot?.observation?.readOnly ? "Read only" : "Operator controlled"}</span></div><button className="runtime-connect-button" disabled={busy || !snapshot?.run.id} onClick={() => {
+          if (!snapshot?.run.id) return;
+          if (!readOnly) return void switchRun(snapshot.run.id);
+          void runControl({ action: "recover", runId: snapshot.run.id }).then(async (result) => {
+            if (result?.runId) await refreshRuns(result.runId);
+          });
+        }}>{readOnly ? "Recover run" : "Refresh run"}</button></section>
 
         {activityPage ? <section className="overview-grid activity-page">
           <article className="card activity-card"><div className="card-header"><div><p className="label">EXECUTION TIMELINE</p><h2>All runtime events <span className={`timeline-status ${connectionClass} ${connection}`}><i />{connection}</span></h2></div><span className="count-badge">{snapshot?.events.length ?? 0}</span></div><div className="timeline-list">{(snapshot?.events ?? []).map((event, index, list) => <div className="timeline-event" key={event.id}><span className={`timeline-mark ${eventTone(event)}`}><i /></span><div><b>{event.title}</b><small>{event.message}</small></div><time>{formatTime(event.at)}</time>{index < list.length - 1 && <em />}</div>)}</div></article>
@@ -347,7 +367,7 @@ export default function Home() {
         </section>
         </>}
 
-        <form className="directive-bar" onSubmit={(event) => void sendDirective(event)}><div className="directive-icon"><Command size={16} /></div><div><b>Operator directive</b><span>{readOnly ? "기존 실행은 관찰 전용이며 새 실행만 시작할 수 있습니다." : "다음 안전한 체크포인트에 실제로 전달됩니다."}</span></div><div className="directive-entry"><select value={directiveAction} onChange={(event) => setDirectiveAction(event.target.value as DirectiveAction)}><option value="instruction" disabled={!snapshot || readOnly}>Instruction</option><option value="start">Start live run</option><option value="start_mock">Start demo run</option><option value="concurrency" disabled={!snapshot || readOnly}>Concurrency</option><option value="cancel" disabled={!snapshot || readOnly}>Cancel run</option></select><input type={directiveAction === "concurrency" ? "number" : "text"} value={commandText} onChange={(event) => setCommandText(event.target.value)} placeholder={directiveAction === "start" || directiveAction === "start_mock" ? "새 실행 목표" : directiveAction === "concurrency" ? "동시성 값" : directiveAction === "cancel" ? "확인 후 Send" : "조직에 보낼 지시"} disabled={directiveAction === "cancel"} /></div><button disabled={busy}><Send size={15} />{busy ? "Sending" : "Send"}</button></form>
+        <form className="directive-bar" onSubmit={(event) => void sendDirective(event)}><div className="directive-icon"><Command size={16} /></div><div><b>Operator directive</b><span>{readOnly ? "새 목표를 입력하면 Luna Swarm 실행을 시작합니다." : "다음 안전한 체크포인트에 실제로 전달됩니다."}</span></div><div className="directive-entry"><select value={effectiveDirectiveAction} onChange={(event) => setDirectiveAction(event.target.value as DirectiveAction)}><option value="instruction" disabled={!snapshot || readOnly}>Instruction</option><option value="start">Start live run</option><option value="start_mock">Start demo run</option><option value="concurrency" disabled={!snapshot || readOnly}>Concurrency</option><option value="cancel" disabled={!snapshot || readOnly}>Cancel run</option></select><input type={effectiveDirectiveAction === "concurrency" ? "number" : "text"} value={commandText} onChange={(event) => setCommandText(event.target.value)} placeholder={effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" ? "새 실행 목표" : effectiveDirectiveAction === "concurrency" ? "동시성 값" : effectiveDirectiveAction === "cancel" ? "확인 후 Send" : "조직에 보낼 지시"} disabled={effectiveDirectiveAction === "cancel"} /></div><button disabled={busy || ((effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" || effectiveDirectiveAction === "instruction") && !commandText.trim())}><Send size={15} />{busy ? "Starting" : effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" ? "Start run" : "Send"}</button></form>
       </div>
     </main>
 

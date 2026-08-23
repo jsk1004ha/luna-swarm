@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { CompanyReport } from "../types";
-import { dialogFocusTarget, filterReports, ReportTable, reportKindLabel, reportStatusLabel, type ReportFilters } from "./ReportsView";
+import { dialogFocusTarget, filterReports, GeneratedFileList, ReportTable, reportKindLabel, reportStatusLabel, type ReportFilters } from "./ReportsView";
 
 const reports: CompanyReport[] = [
   {
@@ -89,5 +89,21 @@ describe("ReportsView", () => {
     expect(dialogFocusTarget(focusable, last, false)).toBe(first);
     expect(dialogFocusTarget(focusable, first, true)).toBe(last);
     expect(dialogFocusTarget(focusable, middle, false)).toBeNull();
+  });
+
+  it("renders receipt-bound generated files as same-origin downloads", () => {
+    const markup = renderToStaticMarkup(<GeneratedFileList runId="run-1" files={[{
+      id: `output:${"a".repeat(64)}:report.pdf`,
+      kind: "output",
+      fileName: "report.pdf",
+      format: "pdf",
+      mimeType: "application/pdf",
+      bytes: 2048,
+      sha256: "a".repeat(64),
+    }]} />);
+    expect(markup).toContain("생성 파일");
+    expect(markup).toContain("report.pdf");
+    expect(markup).toContain(`/api/ui/artifacts/download?runId=run-1&amp;sha256=${"a".repeat(64)}&amp;kind=output`);
+    expect(markup).toContain("download=\"report.pdf\"");
   });
 });

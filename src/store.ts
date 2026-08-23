@@ -23,13 +23,28 @@ import type {
 } from "./types.js";
 import { Mutex } from "./util.js";
 import { RANK_LABELS } from "./organization.js";
+import {
+  RunTransitionJournal,
+  type RunEffectIntent,
+  type RunTransitionHead,
+  type RunTransitionJournalRecord,
+} from "./runtime/run-transition-journal.js";
 
 interface StateEnvelope {
   schemaVersion: 1;
   revision: number;
   checksum: string;
   generation?: string;
+  transitionSequence?: number;
+  transitionHash?: string;
   state: RunState;
+}
+
+export interface CommitRunTransitionInput {
+  transitionId: string;
+  expectedRevision: number;
+  state: RunState;
+  effects?: readonly RunEffectIntent[];
 }
 
 interface RunManifest {
@@ -97,6 +112,9 @@ export class AtomicRunStore {
   readonly commandsClosedPath: string;
   readonly commandsLockPath: string;
   readonly executionLockPath: string;
+  readonly transitionJournalPath: string;
+  readonly transitionCheckpointPath: string;
+  readonly transitionOutboxCursorPath: string;
   private readonly mutex = new Mutex();
   private readonly eventsMutex = new Mutex();
   private readonly commandsMutex = new Mutex();
@@ -134,6 +152,9 @@ export class AtomicRunStore {
     this.commandsClosedPath = join(this.runDirectory, "commands.closed");
     this.commandsLockPath = join(this.runDirectory, "commands.lock");
     this.executionLockPath = join(this.runDirectory, "execution.lock");
+    this.transitionJournalPath = join(this.runDirectory, "transitions.jsonl");
+    this.transitionCheckpointPath = join(this.runDirectory, "transitions.checkpoint.json");
+    this.transitionOutboxCursorPath = join(this.runDirectory, "transitions.outbox.applied.json");
   }
 
   async init(): Promise<void> {
@@ -170,6 +191,13 @@ export class AtomicRunStore {
         if (diskEnvelope?.generation && diskEnvelope.generation !== manifest.generation) {
           throw new Error(`State generation mismatch in ${this.statePath}`);
         }
+        if (diskEnvelope) {
+          const pending = await this.transitionJournal(manifest.generation)
+            .readSuffix(transitionHead(diskEnvelope));
+          if (pending.length > 0) {
+            throw new Error(`Run ${this.runId} has unreplayed transitions; load before saving state`);
+          }
+        }
         const diskRevision = diskEnvelope?.revision ?? -1;
         if (diskRevision !== this.lastRevision) {
           throw new Error(
@@ -187,12 +215,100 @@ export class AtomicRunStore {
           revision: state.revision,
           checksum: sha256(serializedState),
           generation: manifest.generation,
+          ...(diskEnvelope?.transitionSequence !== undefined ? {
+            transitionSequence: diskEnvelope.transitionSequence,
+            transitionHash: diskEnvelope.transitionHash!,
+          } : {}),
           state,
         };
         await writeAtomicDurable(this.statePath, `${JSON.stringify(envelope, null, 2)}\n`);
         this.lastRevision = state.revision;
       });
     });
+  }
+
+  /**
+   * Durably commits state and its externally projected events as one recoverable transition.
+   * The journal is authoritative: snapshot and event projection can be replayed after a crash.
+   */
+  async commitTransition(input: CommitRunTransitionInput): Promise<RunTransitionJournalRecord> {
+    return this.mutex.run(async () => {
+      if (input.state.runId !== this.runId) {
+        throw new Error(`State runId does not match this run: ${input.state.runId}`);
+      }
+      if (!this.generation) {
+        throw new Error(`Run ${this.runId} must be created or loaded before committing a transition`);
+      }
+      return this.withStateFileLock(async () => {
+        const manifest = await this.readManifest();
+        if (manifest.generation !== this.generation) {
+          throw new Error(`Run generation changed for ${this.runId}; refusing stale writer`);
+        }
+        const envelope = parseStateEnvelope(
+          await readFile(this.statePath, "utf8"), this.statePath, this.runId,
+        );
+        const journal = this.transitionJournal(manifest.generation);
+        const head = transitionHead(envelope);
+        const suffix = await journal.readSuffix(head);
+        const pendingEffects = await journal.readSuffix();
+        const currentState = suffix.at(-1)?.state ?? envelope.state;
+        if (currentState.revision !== input.expectedRevision || this.lastRevision !== input.expectedRevision) {
+          throw new Error(
+            `Refusing stale transition revision for ${this.runId}; expected ${input.expectedRevision}, found ${currentState.revision}`,
+          );
+        }
+        if (input.state.revision !== input.expectedRevision + 1) {
+          throw new Error("Transition state revision must equal expectedRevision + 1");
+        }
+        const record = await journal.append({
+          head,
+          transitionId: input.transitionId,
+          expectedRevision: input.expectedRevision,
+          state: input.state,
+          ...(input.effects ? { effects: input.effects } : {}),
+        });
+        await this.writeSnapshot(record.state, record);
+        try {
+          await this.projectTransitionEffects(journal, [...pendingEffects, record]);
+        } catch {
+          // The journal is authoritative. A later commit/load replays pending
+          // idempotent effects without turning a durable commit into a stale writer.
+        }
+        this.lastRevision = record.revision;
+        return record;
+      });
+    });
+  }
+
+  /** Writes a durable checkpoint and starts a fresh journal suffix. */
+  async compactTransitions(): Promise<void> {
+    await this.mutex.run(async () => this.withStateFileLock(async () => {
+      const manifest = await this.readManifest();
+      if (!this.generation || manifest.generation !== this.generation) {
+        throw new Error(`Run generation changed for ${this.runId}; refusing stale writer`);
+      }
+      const envelope = parseStateEnvelope(
+        await readFile(this.statePath, "utf8"), this.statePath, this.runId,
+      );
+      const journal = this.transitionJournal(manifest.generation);
+      const suffix = await journal.readSuffix(transitionHead(envelope));
+      const latest = suffix.at(-1);
+      const state = latest?.state ?? envelope.state;
+      const head = latest ?? transitionHead(envelope);
+      await this.writeSnapshot(state, head);
+      await this.projectTransitionEffects(journal, await journal.readSuffix());
+      await journal.compact({
+        schemaVersion: 1,
+        runId: this.runId,
+        generation: manifest.generation,
+        sequence: head.sequence,
+        hash: head.hash,
+        revision: state.revision,
+        stateChecksum: sha256(JSON.stringify(state)),
+        compactedAt: new Date().toISOString(),
+      });
+      this.lastRevision = state.revision;
+    }));
   }
 
   async load(): Promise<RunState> {
@@ -203,9 +319,50 @@ export class AtomicRunStore {
         throw new Error(`State generation mismatch in ${this.statePath}`);
       }
       this.generation = manifest.generation;
-      this.lastRevision = envelope.revision;
-      return envelope.state;
+      const journal = this.transitionJournal(manifest.generation);
+      const suffix = await journal.readSuffix(transitionHead(envelope));
+      const latest = suffix.at(-1);
+      if (latest) {
+        await this.writeSnapshot(latest.state, latest);
+      }
+      await this.projectTransitionEffects(journal, await journal.readSuffix());
+      const state = latest?.state ?? envelope.state;
+      this.lastRevision = state.revision;
+      return state;
     }, false));
+  }
+
+  private transitionJournal(generation: string): RunTransitionJournal {
+    return new RunTransitionJournal({
+      journalPath: this.transitionJournalPath,
+      checkpointPath: this.transitionCheckpointPath,
+      outboxCursorPath: this.transitionOutboxCursorPath,
+    }, this.runId, generation);
+  }
+
+  private async writeSnapshot(state: RunState, head: RunTransitionHead): Promise<void> {
+    const envelope: StateEnvelope = {
+      schemaVersion: 1,
+      revision: state.revision,
+      checksum: sha256(JSON.stringify(state)),
+      generation: this.generation!,
+      transitionSequence: head.sequence,
+      transitionHash: head.hash,
+      state,
+    };
+    await writeAtomicDurable(this.statePath, `${JSON.stringify(envelope, null, 2)}\n`);
+  }
+
+  private async projectTransitionEffects(
+    journal: RunTransitionJournal,
+    records: readonly RunTransitionJournalRecord[],
+  ): Promise<void> {
+    if (records.length === 0) return;
+    await this.eventsMutex.run(async () => journal.projectOutbox(
+      records,
+      async (event) => { await this.appendEventDurable(event, true); },
+      async (eventId) => (await persistedEventIds(this.eventsPath)).has(eventId),
+    ));
   }
 
   private async claimNewRun(): Promise<void> {
@@ -359,9 +516,20 @@ export class AtomicRunStore {
       await this.init();
       await this.assertCurrentGenerationIfKnown();
       const persisted = withEventId(event);
-      await appendFile(this.eventsPath, `${JSON.stringify(persisted)}\n`, "utf8");
+      await this.appendEventDurable(persisted);
       return persisted;
     });
+  }
+
+  private async appendEventDurable(event: RunEvent, repairTail = false): Promise<void> {
+    const prefix = repairTail ? eventLinePrefix(await readOptionalFile(this.eventsPath)) : "";
+    const handle = await open(this.eventsPath, "a");
+    try {
+      await handle.writeFile(`${prefix}${JSON.stringify(event)}\n`, "utf8");
+      await handle.datasync();
+    } finally {
+      await handle.close();
+    }
   }
 
   async acquireExecutionLease(): Promise<() => Promise<void>> {
@@ -887,7 +1055,37 @@ function parseStateEnvelope(text: string, path: string, runId: string): StateEnv
   ) {
     throw new Error(`State generation is invalid in ${path}`);
   }
+  if (
+    (envelope.transitionSequence === undefined) !== (envelope.transitionHash === undefined) ||
+    (envelope.transitionSequence !== undefined &&
+      (!Number.isInteger(envelope.transitionSequence) || envelope.transitionSequence < 0)) ||
+    (envelope.transitionHash !== undefined && !/^[0-9a-f]{64}$/.test(envelope.transitionHash))
+  ) {
+    throw new Error(`State transition head is invalid in ${path}`);
+  }
   return envelope;
+}
+
+function transitionHead(envelope: StateEnvelope): RunTransitionHead {
+  return {
+    sequence: envelope.transitionSequence ?? 0,
+    hash: envelope.transitionHash ?? "0".repeat(64),
+  };
+}
+
+async function persistedEventIds(path: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+  const text = await readOptionalFile(path);
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    try {
+      const event = JSON.parse(line) as Partial<RunEvent>;
+      if (typeof event.eventId === "string") ids.add(event.eventId);
+    } catch {
+      // Existing event-tail compatibility: a truncated final line is repaired by idempotent replay.
+    }
+  }
+  return ids;
 }
 
 async function writeAtomicDurable(path: string, contents: string): Promise<void> {

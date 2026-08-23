@@ -116,16 +116,16 @@ test("rollout lifecycle is receipt-gated and promotion requires a signed operato
     reason: "approved",
     operatorApproval: operatorApproval(state, "operator_promoted", f.operator),
   });
-  state = await f.coordinator.advance({
+  await assert.rejects(() => f.coordinator.advance({
     rolloutId: state.rolloutId,
     expectedRevision: state.revision,
     target: "stable",
     actor: "audit-label-only",
     reason: "activate",
     operatorApproval: operatorApproval(state, "stable", f.operator),
-  });
-  assert.equal(state.state, "stable");
-  assert.equal(state.receiptHashes.length, 7);
+  }), /Stable Pointer CAS and active-binding cleanup/);
+  assert.equal(state.state, "operator_promoted");
+  assert.equal(state.receiptHashes.length, 6);
 });
 
 test("operator actor spoofing, expired/tampered approvals, and approval replay fail closed", async (t) => {

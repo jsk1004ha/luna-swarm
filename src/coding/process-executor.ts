@@ -24,6 +24,11 @@ export interface SandboxedProcessExecutorOptions {
   timeoutMs?: number;
   maxInputBytes?: number;
   maxOutputBytes?: number;
+  supportAssets?: readonly Readonly<{
+    path: string;
+    sha256: string;
+    fileName: string;
+  }>[];
 }
 
 /**
@@ -34,24 +39,16 @@ export interface SandboxedProcessExecutorOptions {
  */
 export class SandboxedProcessCodingExecutor {
   readonly #authorityBrand = "luna-sandboxed-process-executor-v1";
-  readonly #options: Required<Omit<SandboxedProcessExecutorOptions, "argv">> & { argv: readonly string[] };
+  readonly #options: NormalizedProcessOptions;
   readonly #runtime: PermissionRuntime;
 
   constructor(options: SandboxedProcessExecutorOptions) {
-    this.#options = Object.freeze({
+    this.#options = normalizedOptions({
       ...options,
-      argv: Object.freeze([...(options.argv ?? [])]),
       timeoutMs: options.timeoutMs ?? 10 * 60_000,
       maxInputBytes: options.maxInputBytes ?? 1024 * 1024,
       maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024,
     });
-    for (const [name, value] of Object.entries({
-      timeoutMs: this.#options.timeoutMs,
-      maxInputBytes: this.#options.maxInputBytes,
-      maxOutputBytes: this.#options.maxOutputBytes,
-    })) if (!Number.isSafeInteger(value) || value < 1) throw new CodingExecutionError(`${name} must be a positive safe integer`);
-    requireHash(this.#options.executableSha256, "executableSha256");
-    requireHash(this.#options.entrySha256, "entrySha256");
     this.#runtime = new PermissionRuntime(this.#options);
     PROCESS_EXECUTOR_AUTHORITIES.add(this);
     Object.freeze(this);
@@ -69,7 +66,7 @@ export class SandboxedProcessCodingExecutor {
     return Object.freeze(await runPermissionModelProcess(
       this.#options,
       this.#runtime,
-      { schemaVersion: 1, workOrder: request.workOrder },
+      { schemaVersion: 2, workOrder: request.workOrder, attemptContext: request.attemptContext },
       request.cwd,
       [request.cwd],
       [request.cwd],
@@ -97,7 +94,7 @@ export class SandboxedProcessCheckAuthority {
   readonly privateKeyPem: string;
   readonly publicKeyPem: string;
   readonly runner: TrustedCommandRunner;
-  readonly #options: Required<Omit<SandboxedProcessExecutorOptions, "argv">> & { argv: readonly string[] };
+  readonly #options: NormalizedProcessOptions;
   readonly #runtime: PermissionRuntime;
 
   constructor(options: SandboxedReceiptAuthorityOptions) {
@@ -106,7 +103,7 @@ export class SandboxedProcessCheckAuthority {
     this.publicKeyPem = options.publicKeyPem;
     this.#options = normalizedOptions(options);
     this.#runtime = new PermissionRuntime(this.#options);
-    this.runner = Object.freeze({ issuer: this.issuer, run: (request: Readonly<RunnerRequest>) => this.run(request) });
+    this.runner = Object.freeze({ issuer: this.issuer, run: (request: Readonly<RunnerRequest>, signal?: AbortSignal) => this.run(request, signal) });
     CHECK_AUTHORITIES.add(this);
     Object.freeze(this);
   }
@@ -115,13 +112,13 @@ export class SandboxedProcessCheckAuthority {
     return exactAuthority(value, SandboxedProcessCheckAuthority.prototype, CHECK_AUTHORITIES);
   }
 
-  private run(request: Readonly<RunnerRequest>): Promise<Readonly<RunnerResult>> {
+  private run(request: Readonly<RunnerRequest>, signal: AbortSignal = new AbortController().signal): Promise<Readonly<RunnerResult>> {
     return runPermissionModelProcess(this.#options, this.#runtime, {
       schemaVersion: 1,
       checkId: request.checkId,
       program: request.program,
       args: request.args,
-    }, request.cwd, [request.cwd], [], request.env, new AbortController().signal, parseRunnerResult);
+    }, request.cwd, [request.cwd], [], request.env, signal, parseRunnerResult);
   }
 
   dispose(): Promise<void> { return this.#runtime.dispose(); }
@@ -132,7 +129,7 @@ export class SandboxedProcessAuditAuthority {
   readonly privateKeyPem: string;
   readonly publicKeyPem: string;
   readonly runner: TrustedAuditRunner;
-  readonly #options: Required<Omit<SandboxedProcessExecutorOptions, "argv">> & { argv: readonly string[] };
+  readonly #options: NormalizedProcessOptions;
   readonly #runtime: PermissionRuntime;
 
   constructor(options: SandboxedReceiptAuthorityOptions) {
@@ -141,7 +138,7 @@ export class SandboxedProcessAuditAuthority {
     this.publicKeyPem = options.publicKeyPem;
     this.#options = normalizedOptions(options);
     this.#runtime = new PermissionRuntime(this.#options);
-    this.runner = Object.freeze({ issuer: this.issuer, review: (request: Readonly<AuditRequest>) => this.review(request) });
+    this.runner = Object.freeze({ issuer: this.issuer, review: (request: Readonly<AuditRequest>, signal?: AbortSignal) => this.review(request, signal) });
     AUDIT_AUTHORITIES.add(this);
     Object.freeze(this);
   }
@@ -150,8 +147,8 @@ export class SandboxedProcessAuditAuthority {
     return exactAuthority(value, SandboxedProcessAuditAuthority.prototype, AUDIT_AUTHORITIES);
   }
 
-  private review(request: Readonly<AuditRequest>): Promise<Readonly<{ outcome: "pass" | "fail"; evidence: unknown }>> {
-    return runPermissionModelProcess(this.#options, this.#runtime, { schemaVersion: 1, request }, tmpdir(), [], [], {}, new AbortController().signal, parseAuditResult);
+  private review(request: Readonly<AuditRequest>, signal: AbortSignal = new AbortController().signal): Promise<Readonly<{ outcome: "pass" | "fail"; evidence: unknown }>> {
+    return runPermissionModelProcess(this.#options, this.#runtime, { schemaVersion: 1, request }, tmpdir(), [], [], {}, signal, parseAuditResult);
   }
 
   dispose(): Promise<void> { return this.#runtime.dispose(); }
@@ -165,7 +162,7 @@ Object.freeze(SandboxedProcessAuditAuthority.prototype);
 Object.freeze(SandboxedProcessAuditAuthority);
 
 async function runPermissionModelProcess<T>(
-  options: Required<Omit<SandboxedProcessExecutorOptions, "argv">> & { argv: readonly string[] },
+  options: NormalizedProcessOptions,
   runtimeAuthority: PermissionRuntime,
   message: unknown,
   cwd: string,
@@ -179,8 +176,10 @@ async function runPermissionModelProcess<T>(
   const input = `${canonicalJson(message)}\n`;
   if (Buffer.byteLength(input) > options.maxInputBytes) throw new CodingExecutionError("Sandboxed process request exceeds maxInputBytes");
   const materialized = await runtimeAuthority.materialize();
+  if (signal.aborted) throw abortReason(signal);
   await verifyPinnedRegularFile(materialized.privateEntry, options.entrySha256, "private executor entry");
   await verifyPinnedRegularFile(materialized.privateExecutable, options.executableSha256, "private executor executable");
+  if (signal.aborted) throw abortReason(signal);
   const invocationDirectory = await mkdtemp(join(materialized.temporaryRoot, "run-"));
   let child: ChildProcessWithoutNullStreams | undefined;
   try {
@@ -188,9 +187,11 @@ async function runPermissionModelProcess<T>(
       "--permission", "--no-warnings",
       ...readPaths.map((path) => `--allow-fs-read=${path}`),
       `--allow-fs-read=${materialized.privateEntry}`,
+      ...materialized.privateSupportAssets.map((path) => `--allow-fs-read=${path}`),
       ...writePaths.map((path) => `--allow-fs-write=${path}`),
       `--allow-fs-write=${invocationDirectory}`,
     ];
+    if (signal.aborted) throw abortReason(signal);
     child = spawn(materialized.privateExecutable, [...permissionArguments, materialized.privateEntry, ...options.argv], {
       cwd,
       env: processEnvironment(environment, invocationDirectory),
@@ -210,13 +211,14 @@ interface MaterializedRuntime {
   root: string;
   privateEntry: string;
   privateExecutable: string;
+  privateSupportAssets: readonly string[];
   temporaryRoot: string;
   releaseExecutable: () => Promise<void>;
 }
 
 class PermissionRuntime {
   #materialized: Promise<MaterializedRuntime> | undefined;
-  constructor(private readonly options: Required<Omit<SandboxedProcessExecutorOptions, "argv">> & { argv: readonly string[] }) {}
+  constructor(private readonly options: NormalizedProcessOptions) {}
 
   materialize(): Promise<MaterializedRuntime> {
     this.#materialized ??= this.create();
@@ -245,7 +247,22 @@ class PermissionRuntime {
       const privateEntry = join(codeDirectory, `entry-${basename(entry.path)}`);
       await writeFile(privateEntry, entry.bytes, { flag: "wx", mode: 0o500 });
       await verifyPinnedRegularFile(privateEntry, this.options.entrySha256, "private executor entry");
-      return { root, privateEntry, privateExecutable: executable.path, temporaryRoot, releaseExecutable: executable.release };
+      const privateSupportAssets: string[] = [];
+      for (const support of this.options.supportAssets) {
+        const source = await verifyPinnedRegularFile(support.path, support.sha256, `support asset ${support.fileName}`);
+        const target = join(codeDirectory, support.fileName);
+        await writeFile(target, source.bytes, { flag: "wx", mode: 0o400 });
+        await verifyPinnedRegularFile(target, support.sha256, `private support asset ${support.fileName}`);
+        privateSupportAssets.push(target);
+      }
+      return {
+        root,
+        privateEntry,
+        privateExecutable: executable.path,
+        privateSupportAssets: Object.freeze(privateSupportAssets),
+        temporaryRoot,
+        releaseExecutable: executable.release,
+      };
     } catch (error) {
       await rm(root, { recursive: true, force: true });
       await executable.release();
@@ -321,6 +338,10 @@ async function supervise<T>(
   maxOutputBytes: number,
   parser: (value: unknown) => T | undefined,
 ): Promise<T> {
+  if (outerSignal.aborted) {
+    await killProcessTree(child);
+    throw abortReason(outerSignal);
+  }
   const output: Buffer[] = [];
   let totalOutputBytes = 0;
   let stderr = "";
@@ -328,6 +349,7 @@ async function supervise<T>(
   const controller = new AbortController();
   const abort = (): void => controller.abort(abortReason(outerSignal));
   outerSignal.addEventListener("abort", abort, { once: true });
+  if (outerSignal.aborted) abort();
   const timer = setTimeout(() => controller.abort(new CodingExecutionError("Sandboxed executor timed out")), timeoutMs);
   child.stdout.on("data", (chunk: Buffer) => {
     totalOutputBytes += chunk.byteLength;
@@ -446,10 +468,23 @@ function requireHash(value: string, name: string): void {
   if (!/^[a-f0-9]{64}$/.test(value)) throw new CodingExecutionError(`${name} must be a SHA-256 digest`);
 }
 
-function normalizedOptions(options: SandboxedProcessExecutorOptions): Required<Omit<SandboxedProcessExecutorOptions, "argv">> & { argv: readonly string[] } {
+interface NormalizedProcessOptions {
+  executablePath: string;
+  executableSha256: string;
+  entryPath: string;
+  entrySha256: string;
+  argv: readonly string[];
+  timeoutMs: number;
+  maxInputBytes: number;
+  maxOutputBytes: number;
+  supportAssets: readonly Readonly<{ path: string; sha256: string; fileName: string }>[];
+}
+
+function normalizedOptions(options: SandboxedProcessExecutorOptions): NormalizedProcessOptions {
   const normalized = Object.freeze({
     ...options,
     argv: Object.freeze([...(options.argv ?? [])]),
+    supportAssets: Object.freeze((options.supportAssets ?? []).map((asset) => Object.freeze({ ...asset }))),
     timeoutMs: options.timeoutMs ?? 10 * 60_000,
     maxInputBytes: options.maxInputBytes ?? 16 * 1024 * 1024,
     maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024,
@@ -459,6 +494,14 @@ function normalizedOptions(options: SandboxedProcessExecutorOptions): Required<O
   }
   requireHash(normalized.executableSha256, "executableSha256");
   requireHash(normalized.entrySha256, "entrySha256");
+  const assetNames = new Set<string>();
+  for (const asset of normalized.supportAssets) {
+    requireHash(asset.sha256, `supportAssets.${asset.fileName}.sha256`);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(asset.fileName) || assetNames.has(asset.fileName)) {
+      throw new CodingExecutionError("supportAssets fileName must be unique and safe");
+    }
+    assetNames.add(asset.fileName);
+  }
   return normalized;
 }
 

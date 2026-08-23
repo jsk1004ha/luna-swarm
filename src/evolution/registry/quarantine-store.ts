@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { link, lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { canonicalJson, canonicalSha256, immutable, type Sha256 } from "../domain/canonical.js";
+import { withEvolutionActivationLock } from "./activation-lock.js";
 import { assertNoLinks, ExecutionBundleStore } from "./bundle-store.js";
 import { OrganizationGenomeStore } from "./genome-store.js";
 
@@ -103,7 +104,7 @@ export class GenomeQuarantineStore {
     if (request.reason.trim().length === 0) throw new Error("Quarantine reason is required");
     if (request.scope.type === "workload" && request.scope.workloadClass.trim().length === 0) throw new Error("workloadClass is required");
     await this.genomeStore.assertRunnable(request.genomeId, request.genomeHash);
-    return this.withLock(async () => {
+    return withEvolutionActivationLock(this.boundary, () => this.withLock(async () => {
       const current = await this.read();
       if (current.revision !== request.expectedRevision) {
         throw new GenomeQuarantineConflictError(`Expected quarantine revision ${request.expectedRevision}, found ${current.revision}`);
@@ -123,7 +124,7 @@ export class GenomeQuarantineStore {
       }
       await this.writeState(next);
       return immutable(next);
-    });
+    }));
   }
 
   /** Fails closed on missing/tampered lineage, quarantine state, or matching quarantine entries. */

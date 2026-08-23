@@ -23,6 +23,24 @@ flowchart TD
 
 App Server는 JSONL stdio로 통신합니다. 클라이언트는 `initialize` → `initialized`를 수행하고, 역할 인스턴스마다 `thread/start` 또는 `thread/resume`, 작업마다 `turn/start`를 보냅니다. `item/completed`의 마지막 agent message와 `turn/completed` 상태가 모두 정상이어야 호출 성공으로 취급합니다.
 
+Orchestrator는 모든 저장소와 정책 구현체를 직접 만들지 않습니다. composition root가 상태 영속화, mission intelligence, verified artifact cache, 검증 다양성 coordinator를 생성해 주입하며 각 coordinator는 RunState를 직접 변경하지 않고 host-owned 결과만 반환합니다. RunState 변경 권위는 persistence coordinator 하나에 있습니다.
+
+## 트랜잭션 journal과 effect outbox
+
+RunState transition은 현재 상태를 직접 수정하지 않고 clone에 적용한 뒤 불변식을 검사합니다. 성공 후보는 expected revision, 전체 state checksum, 이전 record hash, transition ID, bounded effect intent와 함께 `transitions.jsonl`에 먼저 append·fsync됩니다. 그 다음 `state.json` snapshot과 `events.jsonl` outbox projection을 갱신하고 메모리 상태를 교체합니다.
+
+중단 시 snapshot이 journal보다 뒤처지면 suffix를 replay하고, event append 뒤 cursor 저장이 끊기면 deterministic event ID를 조회해 중복 없이 cursor만 전진합니다. 종료 후 최신 snapshot과 outbox를 확정한 다음 checkpoint를 durable하게 쓰고 journal generation을 compaction합니다. 절단 JSON, revision gap, generation 불일치, checksum/hash-chain 손상은 자동 추정하지 않고 fail-closed합니다.
+
+```mermaid
+flowchart LR
+  S["Current RunState"] --> C["Clone + pure transition"]
+  C --> I["Invariant check"]
+  I --> J["Append hash-chain journal"]
+  J --> P["Project state snapshot"]
+  J --> O["Project idempotent event outbox"]
+  P --> M["Replace in-memory state"]
+```
+
 ## 목표별 수직 조직
 
 사용자는 회장입니다. Architect는 목표마다 다음 직급 사다리에서 필요한 단계만 사용합니다.
@@ -127,6 +145,8 @@ flowchart TD
 
 기술 오류나 timeout은 찬반 표가 아니라 abstain입니다. 중복 validator ID는 한 표만 집계합니다.
 
+고위험 G3는 같은 Luna 모델을 단순히 세 번 부르는 표결이 아닙니다. deterministic Oracle, artifact-only Red Team, bounded read/search로 소스를 다시 확인하는 workspace-reproduction reviewer가 서로 다른 agent slot·prompt family·context hash를 사용합니다. host가 실제 artifact/vote/tool/source evidence에서 diversity record를 만들고 G3 evaluator가 이를 다시 계산합니다. 세 방법 중 하나가 없거나 작성자 self-review, 동일 prompt/context 재사용, source identity 불일치가 있으면 표 수와 관계없이 통과하지 못합니다.
+
 감사 호출은 단계적입니다. 기본 고위험 설정 `V=3`, 정족수 `2/3`에서는 manager와 첫 두 blind auditor를 실행합니다. 두 표가 모두 accept이면 세 번째 호출 없이 정족수가 확정되고, split vote이면 세 번째 감사자를 호출합니다. 반대로 남은 표로 결론을 뒤집을 수 없을 때도 조기 종료합니다. 호출하지 않은 감사자는 투표로 기록하지 않으며, `audit_early_stopped` 또는 `audit_escalated` 사건으로 결정 경로를 남깁니다.
 
 ## 수직 보고와 계층 병합
@@ -137,7 +157,7 @@ Leaf 팀장은 자기 팀의 accepted 작업 결과만 받습니다. 그 위 팀
 
 팀별 direct report 수가 제한되므로 100개가 넘는 leaf가 있어도 한 모델이 모든 긴 원문을 한 번에 소화하지 않습니다.
 
-Final judge 전에 독립 `failure-mode-critic`이 루트 synthesis만 보고 요구사항·출처 한계·실패 모드·과도한 확신을 구조화된 표로 red-team합니다. Judge는 이 표의 material issue를 답에서 해결하거나 caveat로 보존해야 합니다. Final judge에도 같은 provenance gate와 requirement ID의 정확한 집합 검사를 적용합니다.
+루트 synthesis가 끝나면 Integration HQ는 먼저 `final-integration-draft`를 불변 `unverified` artifact로 발행합니다. 그 다음 별도 Quality HQ Work Order가 제작자와 다른 critic, owner-team manager, Red Team, 두 명의 blind reviewer를 고정 배정합니다. 이 Work Order는 draft만 입력으로 받아 실제 G0/G2/G3 영수증과 exact vote artifact를 만들며, 만장일치가 필요한 critical Quality 정책을 통과한 decision만 `accepted`로 통합됩니다. Executive Release는 이 accepted Final Quality decision을 직접 입력으로 가지지 않으면 발행할 수 없습니다. 따라서 Integration이 자기 보고서를 스스로 승인하거나, 재개 때 과거 lease·vote를 새 실행처럼 재사용할 수 없습니다. critic이 `NO_GO`를 내린 경우 Quality 검증 과정 자체는 보존되지만 최종 결과는 `partial`이고 release approval은 생성되지 않습니다.
 
 ## 적응형 실행 하네스
 
@@ -168,6 +188,12 @@ Prompt budget 우선순위는 다음과 같습니다.
 4. 전체 길이는 항상 `maxContextChars` 이하이다.
 
 Planning committee 수는 고정 인원이 아니라 상한입니다. Mission Preflight의 요구사항·미해결 항목·위험과 목표의 조사/순차 전달 신호로 `single`, `centralized`, `parallel-research`, `review-loop` 중 하나를 결정하며, 코딩처럼 순차 의존이 강한 작업은 한 planner와 execute → independent verify → repair/stop loop를 우선합니다. 자세한 근거는 [실행 품질 최적화 문서](HARNESS_OPTIMIZATION_2026-08-17.ko.md)를 참고하세요.
+
+Program Knowledge Graph 앞에는 source-aware 증분 index가 있습니다. clean Git 파일은 blob identity로 content-addressed record를 재사용하고 dirty/untracked 파일만 다시 읽으며, source identity·index 설정·TypeScript parser version이 모두 같은 경우 graph 전체를 재사용합니다. 탐색과 읽기는 파일 수·디렉터리 수·entry·개별/전체 byte·동시 read·Git output 상한을 가집니다.
+
+Verified Artifact Cache는 일반 메모리가 아니라 검증된 빌드 캐시입니다. task specification, dependency artifact revision/hash, source identity, Luna build/reasoning, prompt bundle, skill, tool policy, evaluator version을 exact key로 사용합니다. accepted artifact와 G0/G2/G3가 정확히 결합된 경우만 저장하고, hit가 나도 현재 run의 Oracle·Red Team·workspace reproduction·G0/G2/G3·final critic은 다시 실행합니다.
+
+외부 연구는 raw browser를 모델에 주지 않습니다. 자연어가 외부 조사를 요구하면 `external-research` Work Order에만 public-HTTPS `web-fetch` session을 발급합니다. 기본 `allowedOrigins: ["*"]`은 public HTTPS 전체를 뜻하고 exact origin 목록으로 축소할 수 있습니다. host는 redirect별 DNS를 public IP에 pin하며 private/reserved IP와 credential/cookie/script/POST/download를 차단합니다. MIME·byte·deadline 상한을 통과한 응답은 immutable snapshot으로 저장되고 citation은 snapshot hash와 UTF-8 byte span을 참조합니다. 동일 evidence는 네트워크 없이 replay할 수 있습니다.
 
 ## 관찰 전용 레거시 학습과 Evolution Harness v2
 

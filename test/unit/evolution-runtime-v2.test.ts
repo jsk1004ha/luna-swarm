@@ -11,6 +11,7 @@ import { createExecutionBundle } from "../../src/evolution/domain/bundle.js";
 import type { PairedEvaluationReceipt } from "../../src/evolution/evaluation/receipt.js";
 import {
   EVOLUTION_WORKLOAD_CLASSES,
+  baselineGenome,
   environmentDigest,
   initializeEvolutionRuntimeForSource,
   initializeEvolutionRuntime,
@@ -28,11 +29,25 @@ const fingerprint: EvolutionRuntimeFingerprintInput = {
   maxConcurrency: 128,
   harnessPolicyVersion: "luna-harness-v2",
   organizationVersion: "lab-128@2",
+  releaseEpoch: 1,
   sourceCommit: "test-commit",
 };
 const { sourceCommit: _sourceCommit, ...sourceLessFingerprint } = fingerprint;
 const workload = "engineering.bugfix";
 const execFileAsync = promisify(execFile);
+
+test("baseline genome identity binds the organization and harness policy content", () => {
+  const baseline = baselineGenome(fingerprint);
+  assert.equal(baseline.genomeId, baselineGenome(structuredClone(fingerprint)).genomeId);
+  assert.notEqual(
+    baseline.genomeId,
+    baselineGenome({ ...fingerprint, organizationVersion: "company-os@3" }).genomeId,
+  );
+  assert.notEqual(
+    baseline.genomeId,
+    baselineGenome({ ...fingerprint, harnessPolicyVersion: "luna-harness-v3" }).genomeId,
+  );
+});
 
 async function workspaceFixture(t: test.TestContext): Promise<string> {
   const workspace = await mkdtemp(join(tmpdir(), "evolution-runtime-v2-"));
@@ -42,6 +57,18 @@ async function workspaceFixture(t: test.TestContext): Promise<string> {
 
 async function git(workspace: string, ...args: string[]): Promise<void> {
   await execFileAsync("git", ["-C", workspace, ...args], { windowsHide: true });
+}
+
+async function gitOutput(workspace: string, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", workspace, ...args], { windowsHide: true });
+  return stdout.trim();
+}
+
+async function commitSource(workspace: string, content: string, message: string): Promise<string> {
+  await writeFile(join(workspace, "tracked.txt"), `${content}\n`, "utf8");
+  await git(workspace, "add", "tracked.txt");
+  await git(workspace, "commit", "-m", message);
+  return resolveLocalSourceIdentity(workspace);
 }
 
 async function gitWorkspaceFixture(t: test.TestContext): Promise<string> {
@@ -117,7 +144,7 @@ test("ambient GITHUB_SHA cannot silently authorize Evolution provenance", async 
   assert.match(resolved.reason, /concrete source identity is required/);
 });
 
-test("non-Git provenance accepts only an explicitly attributed identity", async (t) => {
+test("plain non-Git provenance remains observation-only without signed release lineage", async (t) => {
   const workspace = await workspaceFixture(t);
   const resolved = await initializeEvolutionRuntimeForSource(
     workspace,
@@ -125,11 +152,24 @@ test("non-Git provenance accepts only an explicitly attributed identity", async 
     { kind: "luna_environment", value: "build:release-2026.08.13" },
     "2026-08-13T00:00:00.000Z",
   );
-  assert.equal(resolved.mode, "pinned");
-  assert.equal(resolved.source.origin, "luna_environment");
-  assert.equal(resolved.source.identity, "build:release-2026.08.13");
-  assert.equal(resolved.state.promotionEligible, true);
-  assert.ok(Object.keys(resolved.state.bundlePins).length > 0);
+  assert.equal(resolved.mode, "observation_only");
+  assert.equal(resolved.state.promotionEligible, false);
+  assert.deepEqual(resolved.state.bundlePins, {});
+  assert.match(resolved.reason, /signed release-lineage authority/);
+});
+
+test("dirty Git worktrees execute only in observation mode", async (t) => {
+  const workspace = await gitWorkspaceFixture(t);
+  await writeFile(join(workspace, "tracked.txt"), "dirty\n", "utf8");
+  const resolved = await initializeEvolutionRuntimeForSource(
+    workspace,
+    sourceLessFingerprint,
+    undefined,
+    "2026-08-13T00:00:00.000Z",
+  );
+  assert.equal(resolved.mode, "observation_only");
+  assert.equal(resolved.state.promotionEligible, false);
+  assert.match(resolved.reason, /Dirty Git worktrees/);
 });
 
 test("build-manifest provenance requires a valid signature from a trusted key", async (t) => {
@@ -170,11 +210,10 @@ test("concurrent baseline bootstrap converges to one complete workload pin set",
 });
 
 test("a new binary source advances only the shipped baseline while preserving old run pins", async (t) => {
-  const workspace = await workspaceFixture(t);
-  const sourceA = { ...fingerprint, sourceCommit: "source-commit-a" };
-  const sourceB = { ...fingerprint, sourceCommit: "source-commit-b" };
+  const workspace = await gitWorkspaceFixture(t);
+  const sourceA = { ...fingerprint, sourceCommit: await resolveLocalSourceIdentity(workspace) };
   const first = await initializeEvolutionRuntime(workspace, sourceA, "2026-08-13T01:00:00.000Z");
-
+  const sourceB = { ...fingerprint, sourceCommit: await commitSource(workspace, "second", "second"), releaseEpoch: 2 };
   const next = await initializeEvolutionRuntime(workspace, sourceB, "2026-08-13T02:00:00.000Z");
 
   assert.ok(Object.values(next.bundles).every((bundle) => bundle.sourceCommit === sourceB.sourceCommit));
@@ -192,10 +231,84 @@ test("a new binary source advances only the shipped baseline while preserving ol
   assert.deepEqual(restored.pins, first.pins, "an in-flight or resumed run retains its original immutable pins");
 });
 
+test("a legacy dirty baseline can recover to the same clean Git HEAD without becoming promotion evidence", async (t) => {
+  const workspace = await gitWorkspaceFixture(t);
+  await writeFile(join(workspace, "tracked.txt"), "local development change\n", "utf8");
+  const dirtySource = await resolveLocalSourceIdentity(workspace);
+  assert.match(dirtySource, /:dirty:/);
+  const legacy = await initializeEvolutionRuntime(
+    workspace,
+    { ...fingerprint, sourceCommit: dirtySource, releaseEpoch: 1 },
+    "2026-08-13T01:00:00.000Z",
+  );
+
+  await git(workspace, "reset", "--hard", "HEAD");
+  const cleanSource = await resolveLocalSourceIdentity(workspace);
+  assert.match(cleanSource, /:clean$/);
+  const recovered = await initializeEvolutionRuntime(
+    workspace,
+    { ...fingerprint, sourceCommit: cleanSource, releaseEpoch: 2 },
+    "2026-08-13T02:00:00.000Z",
+  );
+
+  for (const workloadClass of EVOLUTION_WORKLOAD_CLASSES) {
+    assert.equal(legacy.pins[workloadClass]?.pointerGeneration, 1);
+    assert.equal(recovered.pins[workloadClass]?.pointerGeneration, 2);
+    assert.equal(recovered.bundles[workloadClass]?.sourceCommit, cleanSource);
+  }
+});
+
+test("shipped baseline upgrade rejects replaying a previously activated binary", async (t) => {
+  const workspace = await gitWorkspaceFixture(t);
+  const sourceA = { ...fingerprint, sourceCommit: await resolveLocalSourceIdentity(workspace) };
+  await initializeEvolutionRuntime(workspace, sourceA, "2026-08-13T01:00:00.000Z");
+  const sourceB = { ...fingerprint, sourceCommit: await commitSource(workspace, "second", "second"), releaseEpoch: 2 };
+  await initializeEvolutionRuntime(workspace, sourceB, "2026-08-13T02:00:00.000Z");
+
+  await assert.rejects(
+    () => initializeEvolutionRuntime(workspace, { ...sourceA, releaseEpoch: 3 }, "2026-08-13T03:00:00.000Z"),
+    /not a descendant|strict Git descendant/,
+  );
+});
+
+test("shipped baseline upgrade rejects a replayed source even when runtime configuration changes its bundle ID", async (t) => {
+  const workspace = await gitWorkspaceFixture(t);
+  const sourceA = { ...fingerprint, sourceCommit: await resolveLocalSourceIdentity(workspace) };
+  await initializeEvolutionRuntime(workspace, sourceA, "2026-08-13T01:00:00.000Z");
+  const sourceB = { ...fingerprint, sourceCommit: await commitSource(workspace, "second", "second"), releaseEpoch: 2 };
+  await initializeEvolutionRuntime(workspace, sourceB, "2026-08-13T02:00:00.000Z");
+
+  await assert.rejects(
+    () => initializeEvolutionRuntime(
+      workspace,
+      { ...sourceA, releaseEpoch: 3, maxConcurrency: sourceA.maxConcurrency / 2 },
+      "2026-08-13T03:00:00.000Z",
+    ),
+    /not a descendant|strict Git descendant/,
+  );
+});
+
+test("shipped baseline upgrade rejects an unseen sibling even with a higher epoch", async (t) => {
+  const workspace = await gitWorkspaceFixture(t);
+  const sourceA = { ...fingerprint, sourceCommit: await resolveLocalSourceIdentity(workspace), releaseEpoch: 1 };
+  const branch = await gitOutput(workspace, "branch", "--show-current");
+  await initializeEvolutionRuntime(workspace, sourceA, "2026-08-13T01:00:00.000Z");
+  const sourceB = { ...fingerprint, sourceCommit: await commitSource(workspace, "second", "second"), releaseEpoch: 2 };
+  await initializeEvolutionRuntime(workspace, sourceB, "2026-08-13T02:00:00.000Z");
+  await git(workspace, "checkout", "-b", "unseen-sibling", "HEAD~1");
+  const sibling = await commitSource(workspace, "sibling", "sibling");
+  await git(workspace, "checkout", branch);
+
+  await assert.rejects(
+    () => initializeEvolutionRuntime(workspace, { ...fingerprint, sourceCommit: sibling, releaseEpoch: 3 }, "2026-08-13T03:00:00.000Z"),
+    /not a descendant/,
+  );
+});
+
 test("a new binary source never replaces a manually evaluated Stable Pointer", async (t) => {
   const workspace = await workspaceFixture(t);
   const sourceA = { ...fingerprint, sourceCommit: "source-commit-a" };
-  const sourceB = { ...fingerprint, sourceCommit: "source-commit-b" };
+  const sourceB = { ...fingerprint, sourceCommit: "source-commit-b", releaseEpoch: 2 };
   const runtime = await initializeEvolutionRuntime(workspace, sourceA, "2026-08-13T01:00:00.000Z");
   const protectedWorkload = EVOLUTION_WORKLOAD_CLASSES[0];
   const champion = runtime.bundles[protectedWorkload]!;
@@ -281,6 +394,15 @@ test("a mid-run manual promotion affects only the next run snapshot", async (t) 
   const next = await initializeEvolutionRuntime(workspace, fingerprint, "2026-08-13T04:00:00.000Z");
   assert.equal(next.pins[workload]?.bundleId, challenger.bundleId, "only a new run observes promotion");
   assert.equal(next.pins[workload]?.pointerGeneration, 2);
+  await first.pointerStore.rollback(workload, 2, {
+    actor: "safety-operator",
+    reason: "candidate regression after the next run pinned it",
+  });
+  await assert.rejects(
+    () => restoreEvolutionRuntime(workspace, fingerprint, structuredClone(next.pins)),
+    /quarantined and cannot be resumed/,
+    "a run pinned to a rolled-back bundle must not continue after restart",
+  );
 });
 
 test("restore rejects missing, tampered, or environment-incompatible run pins", async (t) => {

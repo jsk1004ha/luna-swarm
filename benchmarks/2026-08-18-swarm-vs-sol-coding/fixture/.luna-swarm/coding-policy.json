@@ -1,0 +1,49 @@
+{
+  "baseCommit": "b8db554d6952f42f2e82758eaa00cae21f754302",
+  "targetRef": "refs/heads/luna-candidate",
+  "commitMessage": "benchmark: implement AsyncTaskPool with Luna Swarm",
+  "objective": "Implement the complete production-grade AsyncTaskPool contract in src/task-pool.mjs.",
+  "requirementIds": ["REQ-ASYNC-POOL"],
+  "acceptanceCriteria": [
+    {
+      "id": "AC-PUBLIC",
+      "requirementIds": ["REQ-ASYNC-POOL"],
+      "statement": "All policy-pinned public contract tests pass without modifying tests or package metadata."
+    },
+    {
+      "id": "AC-SCOPE",
+      "requirementIds": ["REQ-ASYNC-POOL"],
+      "statement": "The accepted implementation changes only src/task-pool.mjs."
+    }
+  ],
+  "constraints": [
+    "No network access or dependency installation.",
+    "Do not weaken or modify tests.",
+    "The workspace-change worker must author the implementation manifest."
+  ],
+  "contextReferences": [
+    {
+      "path": "README.md",
+      "sha256": "sha256:5f7eb5443ccbcab4bf2aba24e586ac39f60a4761a26587bb27249ad6c81cddf4",
+      "purpose": "Frozen implementation contract"
+    },
+    {
+      "path": "test/public/task-pool.public.test.mjs",
+      "sha256": "sha256:74dae4ae19c50a5164c6c9526879965fa844a138db54c25796bddeecf1ec5b75",
+      "purpose": "Public acceptance tests"
+    }
+  ],
+  "readScopes": ["README.md", "package.json", "src/task-pool.mjs", "test/public/task-pool.public.test.mjs"],
+  "writeScopes": ["src/task-pool.mjs"],
+  "checks": [
+    {
+      "id": "public-contract",
+      "testFiles": ["test/public/task-pool.public.test.mjs"]
+    }
+  ],
+  "limits": {
+    "maxFiles": 1,
+    "maxFileBytes": 65536,
+    "maxTotalBytes": 65536
+  }
+}

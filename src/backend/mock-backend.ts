@@ -8,6 +8,7 @@ import type {
   TaskRecord,
 } from "../types.js";
 import type { MissionPreflightInput } from "../harness-v2/preflight.js";
+import { RED_TEAM_ATTACK_CRITERIA } from "../adversarial-assurance/index.js";
 
 export type MockHandler = (
   request: AgentRequest,
@@ -83,6 +84,19 @@ export async function demoHandler(request: AgentRequest): Promise<unknown> {
     };
     return result;
   }
+  if (request.purpose === "red_team_attack" || request.purpose === "red_team_reattack") {
+    return {
+      validatorId: String(data.validatorId),
+      verdict: "accept",
+      criteria: RED_TEAM_ATTACK_CRITERIA.map((criterion) => ({
+        criterion,
+        passed: true,
+        note: `mock Red Team attack passed: ${criterion}`,
+      })),
+      issues: [],
+      confidence: 0.9,
+    };
+  }
   if (request.purpose === "validate_task" || request.purpose === "manager_review") {
     return {
       validatorId: String(data.validatorId),
@@ -96,7 +110,10 @@ export async function demoHandler(request: AgentRequest): Promise<unknown> {
       confidence: 0.9,
     };
   }
-  if (request.purpose === "critic_review") {
+  if (request.purpose === "validate_artifact_visual") {
+    return { status: "pass", findings: [] };
+  }
+  if (request.purpose === "critic_review" || request.purpose === "final_critic_review") {
     return {
       validatorId: String(data.validatorId),
       verdict: "accept",

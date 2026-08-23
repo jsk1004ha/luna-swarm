@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import { MockAgentBackend, demoHandler } from "../../src/backend/mock-backend.js";
 import { HARNESS_POLICY_VERSION } from "../../src/capabilities.js";
@@ -24,6 +26,7 @@ import {
 import { PromptModuleStore } from "../../src/evolution/components/prompt-module-store.js";
 import {
   initializeEvolutionRuntime,
+  resolveLocalSourceIdentity,
   restoreEvolutionRuntime,
   verifyRunnableEvolutionBundle,
   type EvolutionRuntimeFingerprintInput,
@@ -31,7 +34,7 @@ import {
 import { AgentGateway } from "../../src/runtime/gateway.js";
 import { SwarmOrchestrator } from "../../src/orchestrator.js";
 import { AtomicRunStore } from "../../src/store.js";
-import { HARNESS_V2_ORG_VERSION } from "../../src/harness-v2/contracts.js";
+import { COMPANY_OS_ORG_VERSION } from "../../src/harness-v2/contracts.js";
 
 const behaviorConfig = {
   ...DEFAULT_CONFIG,
@@ -49,15 +52,29 @@ const input: EvolutionRuntimeFingerprintInput = {
   maxContextChars: behaviorConfig.maxContextChars,
   maxConcurrency: behaviorConfig.maxConcurrency,
   harnessPolicyVersion: HARNESS_POLICY_VERSION,
-  organizationVersion: HARNESS_V2_ORG_VERSION,
+  organizationVersion: COMPANY_OS_ORG_VERSION,
+  releaseEpoch: 1,
   sourceCommit: "test-component-source",
 };
 const workload = "research.deep-synthesis";
+const execFileAsync = promisify(execFile);
+
+async function initializeCleanGitWorkspace(workspace: string): Promise<string> {
+  await execFileAsync("git", ["-C", workspace, "init"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "config", "user.email", "luna-swarm@example.invalid"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "config", "user.name", "Luna Swarm Test"], { windowsHide: true });
+  await writeFile(join(workspace, ".gitignore"), ".luna-swarm/\n.state/\n", "utf8");
+  await writeFile(join(workspace, "tracked.txt"), "baseline\n", "utf8");
+  await execFileAsync("git", ["-C", workspace, "add", ".gitignore", "tracked.txt"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "commit", "-m", "baseline"], { windowsHide: true });
+  return resolveLocalSourceIdentity(workspace);
+}
 
 test("a registered prompt-module challenger changes actual prompts only after the next run pin", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-evolution-component-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  const current = await initializeEvolutionRuntime(workspace, input, "2026-08-13T01:00:00.000Z");
+  const runtimeInput = { ...input, sourceCommit: await initializeCleanGitWorkspace(workspace) };
+  const current = await initializeEvolutionRuntime(workspace, runtimeInput, "2026-08-13T01:00:00.000Z");
   const champion = current.bundles[workload]!;
   const championGenome = await current.genomeStore.read(champion.genomeId);
   const challengerPrompt = createPromptModuleV1({
@@ -112,7 +129,7 @@ test("a registered prompt-module challenger changes actual prompts only after th
     status: "challenger",
   });
   await assert.rejects(
-    () => verifyRunnableEvolutionBundle(current.genomeStore, incompatible, input, current.promptModuleStore),
+    () => verifyRunnableEvolutionBundle(current.genomeStore, incompatible, runtimeInput, current.promptModuleStore),
     /component workflow is not runnable/,
   );
 
@@ -209,7 +226,6 @@ test("a registered prompt-module challenger changes actual prompts only after th
     store: shadowStore,
     config: behaviorConfig,
     workspace,
-    sourceIdentity: "test-component-source",
     deploymentRuntime: shadowRouter,
   }).start("shadow candidate reaches a detached model boundary before promotion");
   await shadowRouter.drain();
@@ -250,8 +266,8 @@ test("a registered prompt-module challenger changes actual prompts only after th
     evaluationReceipt: { receiptId: receipt.receiptId, contentHash: receipt.recordHash },
   });
 
-  const restored = await restoreEvolutionRuntime(workspace, input, structuredClone(current.pins));
-  const next = await initializeEvolutionRuntime(workspace, input, "2026-08-13T03:00:00.000Z");
+  const restored = await restoreEvolutionRuntime(workspace, runtimeInput, structuredClone(current.pins));
+  const next = await initializeEvolutionRuntime(workspace, runtimeInput, "2026-08-13T03:00:00.000Z");
   assert.equal(current.behaviors[workload]!.promptModule.contentHash, restored.behaviors[workload]!.promptModule.contentHash);
   assert.notEqual(current.behaviors[workload]!.promptModule.contentHash, next.behaviors[workload]!.promptModule.contentHash);
   assert.equal(next.behaviors[workload]!.promptModule.contentHash, challengerPrompt.contentHash);
@@ -284,7 +300,6 @@ test("a registered prompt-module challenger changes actual prompts only after th
     store: orchestrationStore,
     config: behaviorConfig,
     workspace,
-    sourceIdentity: "test-component-source",
   }).start("prompt component behavior reaches the actual model boundary");
   assert.equal(state.status, "completed", state.error);
   const challengerCalls = orchestrationBackend.calls.filter((call) => call.taskId === "T1");
@@ -367,7 +382,6 @@ test("a registered prompt-module challenger changes actual prompts only after th
     store: rejectedStore,
     config: behaviorConfig,
     workspace,
-    sourceIdentity: "test-component-source",
   }).start("an oversized promoted prompt component fails before the gateway");
   assert.equal(
     rejectedState.status,

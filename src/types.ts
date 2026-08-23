@@ -4,12 +4,9 @@ import type {
   StructuredMessageType,
 } from "./harness-v2/contracts.js";
 import type { EvolutionAttemptRecord, EvolutionRunState } from "./evolution/domain/bundle.js";
+import type { JsonPrimitive, JsonValue } from "./json.js";
 
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue =
-  | JsonPrimitive
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+export type { JsonPrimitive, JsonValue } from "./json.js";
 
 export type AgentRole =
   | "planner"
@@ -65,6 +62,7 @@ export const TASK_CAPABILITIES = [
   "external-network",
   "workspace-write",
   "command-execution",
+  "artifact-render",
 ] as const;
 export type TaskCapability = (typeof TASK_CAPABILITIES)[number];
 export const TASK_EXECUTION_MODES = [
@@ -74,6 +72,7 @@ export const TASK_EXECUTION_MODES = [
   "command-verification",
   "workspace-change",
   "external-research-and-workspace-change",
+  "artifact-production",
 ] as const;
 export type TaskExecutionMode = (typeof TASK_EXECUTION_MODES)[number];
 
@@ -99,6 +98,8 @@ export const TASK_EXECUTION_MODE_CAPABILITIES = {
     "workspace-write",
     "command-execution",
   ],
+  /** Host-rendered files from a bounded declarative manifest; no model file, shell, or network authority. */
+  "artifact-production": ["artifact-render"],
 } as const satisfies Readonly<Record<TaskExecutionMode, readonly TaskCapability[]>>;
 
 export function taskCapabilitiesForExecutionMode(
@@ -233,6 +234,84 @@ export interface AgentResult {
   checks: string[];
   uncertainties: string[];
   confidence: number;
+  /** Present only for a host-authorized workspace-change task. The Swarm worker authors these exact bytes. */
+  implementationManifest?: import("./coding/contracts.js").ImplementationManifest;
+  /** Present only for a host-authorized artifact-production task. The host validates and renders it. */
+  artifactManifest?: import("./artifact-production/runtime.js").ArtifactProductionManifest;
+  /** Present only for external-research. The model proposes queries and exact citation plans; the host finalizes them. */
+  researchPlan?: import("./research/company-os-research-contracts.js").CompanyResearchExecutionInput;
+  /** Host-added immutable accepted research envelope. Models cannot author this binding. */
+  researchEnvelopeRef?: import("./harness-v2/contracts.js").ArtifactRef;
+}
+
+export interface TaskArtifactProductionProof {
+  schemaVersion: 1;
+  manifestArtifact: { artifactId: string; revision: number; contentHash: string };
+  deliverableArtifacts: Array<{ artifactId: string; revision: number; contentHash: string }>;
+  validationArtifacts: Array<{ artifactId: string; revision: number; contentHash: string }>;
+  /** Receipt-bound binary CAS descriptors. Optional only for backward-compatible replay of older runs. */
+  files?: import("./artifact-production/contracts.js").StoredArtifactRef[];
+  /** Present for a staged coding + artifact run; binds rendering to the selected integrated commit. */
+  upstreamCodingProofs?: Array<{ artifactId: string; revision: number; contentHash: string }>;
+  manifestHash: string;
+  receiptHash: string;
+  integrationHash: string;
+  integratedAt: string;
+}
+
+export interface TaskCodingProof {
+  schemaVersion: 1;
+  sourceArtifact: { artifactId: string; revision: number; contentHash: string };
+  verificationArtifacts: Array<{ artifactId: string; revision: number; contentHash: string }>;
+  workOrderHash: string;
+  treeHash: string;
+  receiptHashes: string[];
+  commit: string;
+  targetRef: string;
+  integratedAt: string;
+  /** Host-selected candidate matrix; raw logs and file contents are never persisted here. */
+  candidateSelection?: {
+    schemaVersion: 1;
+    mode: "repair" | "genesis";
+    selectionHash?: string;
+    selectedTaskId: string;
+    evaluatedTaskIds: string[];
+    evaluationReceiptHashes: string[];
+    evaluationArtifacts?: Array<{ artifactId: string; revision: number; contentHash: string }>;
+    selectionArtifact?: { artifactId: string; revision: number; contentHash: string };
+  };
+}
+
+/**
+ * Durable pre-integration selector/composition decision. This is committed
+ * before the protected integration call so resume never re-runs candidate
+ * checks under a new ephemeral receipt authority.
+ */
+export interface TaskCodingSelectionState {
+  schemaVersion: 1;
+  mode: "repair" | "genesis";
+  status: "selected" | "integrated";
+  selectionHash: string;
+  strategyHash: string;
+  selectedTaskId: string;
+  selectedSourceArtifact: { artifactId: string; revision: number; contentHash: string };
+  evaluatedTaskIds: string[];
+  evaluationReceiptHashes: string[];
+  evaluationArtifacts: Array<{ artifactId: string; revision: number; contentHash: string }>;
+  selectionArtifact: { artifactId: string; revision: number; contentHash: string };
+}
+
+export interface TaskCodingRepairState {
+  schemaVersion: 1;
+  rounds: number;
+  status: "rework-required" | "resolved" | "exhausted";
+  failedSourceArtifact: { artifactId: string; revision: number; contentHash: string };
+  latestFailureArtifact: { artifactId: string; revision: number; contentHash: string };
+  latestWorkOrderHash: string;
+  failedManifestContentHash: string;
+  latestFinding: import("./coding/contracts.js").CodingRepairFinding;
+  protectedCheck: { id: string; testFiles: string[] };
+  resolvedBySourceArtifact?: { artifactId: string; revision: number; contentHash: string };
 }
 
 export type VoteVerdict = "accept" | "revise" | "reject";
@@ -245,11 +324,36 @@ export interface ValidationVote {
   confidence: number;
 }
 
+export interface TaskAdversarialAssurance {
+  schemaVersion: 1;
+  reviewRounds: number;
+  latestPhase: "attack" | "reattack";
+  latestVerdict: VoteVerdict;
+  latestFindingCount: number;
+  reattackRequired: boolean;
+  reviewedArtifactId: string;
+  reviewedArtifactRevision: number;
+  reviewedArtifactContentHash: string;
+  latestAttackArtifactId: string;
+  latestAttackArtifactRevision: number;
+  latestAttackArtifactContentHash: string;
+  latestRepairArtifactId?: string;
+  latestRepairArtifactRevision?: number;
+  latestRepairArtifactContentHash?: string;
+  latestDecisionArtifactId: string;
+  latestDecisionArtifactRevision: number;
+  latestDecisionArtifactContentHash: string;
+  redTeamAgentId: string;
+  redTeamTeamId: string;
+}
+
 export interface TaskRecord extends TaskSpec {
   status: TaskStatus;
   attempts: number;
   /** Immutable Host Tool Broker receipt artifacts collected across this task attempt. */
   hostToolReceiptArtifactIds?: string[];
+  /** Host-finalized source-isolated research envelope used as an input to the task result artifact. */
+  researchEnvelopeRef?: import("./harness-v2/contracts.js").ArtifactRef;
   validationRound: number;
   leaseId?: string;
   threadId?: string;
@@ -272,6 +376,37 @@ export interface TaskRecord extends TaskSpec {
     rolloutRevision?: number;
     rolloutGeneration?: number;
   };
+  /** Host-verified causal proof from the accepted Swarm artifact to the Single Committer integration. */
+  coding?: TaskCodingProof;
+  /** Host-verified proof that a bounded worker manifest was rendered and published outside Blackboard binary storage. */
+  artifactProduction?: TaskArtifactProductionProof;
+  /** Restart-stable candidate selection or Genesis composition awaiting integration. */
+  codingSelection?: TaskCodingSelectionState;
+  /** Bounded receipt-backed protected-check feedback and its latest repair disposition. */
+  codingRepair?: TaskCodingRepairState;
+  /** Mandatory Blue/Red assurance state for the latest immutable artifact revision. */
+  adversarial?: TaskAdversarialAssurance;
+  /** Exact, hash-only cache identity for this task execution attempt. */
+  artifactCache?: {
+    schemaVersion: 1;
+    key: TaskArtifactCacheKey;
+    keyHash: string;
+    hit: boolean;
+    entryHash?: string;
+  };
+}
+
+/** Persisted structural cache key; kept dependency-free so RunState does not import cache services. */
+export interface TaskArtifactCacheKey {
+  taskSpecificationHash: string;
+  dependencyArtifacts: readonly { artifactId: string; revision: number; contentHash: string }[];
+  sourceIdentity: string;
+  model: { id: string; build: string };
+  reasoningLevel: string;
+  promptBundleHash: string;
+  skillHashes: readonly string[];
+  toolPolicyHash: string;
+  evaluatorVersion: string;
 }
 
 export interface SynthesisPacket {
@@ -383,6 +518,27 @@ export interface RunHarnessState {
   learningPolicyHoldoutSamples?: number;
   learningPolicyImprovement?: number;
   learningPolicyRollbacks?: number;
+  /** Harness v3 task-level portfolios. Full skill bodies remain in the catalog. */
+  skillPortfolios?: RunSkillPortfolioState[];
+  skillPortfolioCount?: number;
+  /** Exact raw instruction characters avoided before bounded rendering; not a token estimate. */
+  rawSkillInstructionCharsAvoided?: number;
+}
+
+export interface RunSkillPortfolioState {
+  schemaVersion: 1;
+  taskId: string;
+  portfolioId: string;
+  policyVersion: string;
+  maxUniqueSkills: number;
+  uniqueSkillIds: string[];
+  rawInstructionCharsAvoided: number;
+  assignments: Array<{
+    ownerId: string;
+    role: AgentRole;
+    specialistId: string;
+    skills: Array<{ id: string; version: string; contentHash: string }>;
+  }>;
 }
 
 export interface RunState {
@@ -403,11 +559,21 @@ export interface RunState {
   final?: FinalReport;
   error?: string;
   metrics: RunMetrics;
+  /** Last durable clone-save-swap transition; additive for legacy run compatibility. */
+  lastTransition?: RunStateTransitionRecord;
   harness?: RunHarnessState;
   /** Harness v2 is additive so company-v1 runs remain resumable without migration. */
   harnessV2?: HarnessV2RunState;
   /** Additive Evolution Harness state. Legacy runs remain explicitly unpinned. */
   evolution?: EvolutionRunState;
+}
+
+export interface RunStateTransitionRecord {
+  schemaVersion: 1;
+  transitionId: string;
+  expectedRevision: number;
+  revision: number;
+  committedAt: string;
 }
 
 export interface SwarmConfig {
@@ -416,11 +582,25 @@ export interface SwarmConfig {
   organizationHeadcount: number | "auto";
   /** Concrete CI/build identity for non-Git workspaces. Placeholder values are rejected. */
   sourceIdentity?: string;
+  /** Shipped-baseline release metadata. Clean Git ancestry, not this number, authorizes forward activation. */
+  evolutionReleaseEpoch: number;
   /** Public verification keys for protected benchmark quality receipts. Private keys never belong here. */
   evolutionBenchmarkAuthorities?: Record<string, {
     evaluatorVersion: string;
     publicKeyPem: string;
     benchmarkSuites: Record<string, string>;
+    /** Host-side authorities that attest the exact evaluator and runner process closure. */
+    protectedProcessAuthorities?: Record<string, {
+      publicKeyPem: string;
+      policy: {
+        evaluatorExecutableSha256: string;
+        evaluatorCommandSha256: string;
+        evaluatorIntegritySha256: string;
+        trustedRunnerExecutableSha256: string;
+        trustedRunnerCommandSha256: string;
+        trustedRunnerIntegritySha256: string;
+      };
+    }>;
   }>;
   /** Public trust roots for rollout evidence and runtime routing authorization. */
   evolutionRolloutAuthorities?: Record<string, {
@@ -453,6 +633,17 @@ export interface SwarmConfig {
   rateLimitCooldownMs: number;
   schedulerAgingMs: number;
   allowNetwork: boolean;
+  /** Host-mediated, credential-free external research. Raw model network remains disabled. */
+  webResearch: {
+    enabled: boolean;
+    /** Exact HTTPS origins, or ["*"] for any public HTTPS origin through the host broker. */
+    allowedOrigins: string[];
+    maxCallsPerSession: number;
+    maxRedirects: number;
+    maxResponseBytes: number;
+    maxDeadlineMs: number;
+    allowedMimeTypes: string[];
+  };
   ephemeralThreads: boolean;
   stateDirectory: string;
   /** Bounded, lossless cold-storage policy for the workspace state directory. */
@@ -472,6 +663,16 @@ export interface SwarmConfig {
     maxArchiveBytes: number;
   };
   harnessEnabled: boolean;
+  /** Task-level skill distribution. Bodies are unique across the cohort. */
+  skillPortfolio: {
+    enabled: boolean;
+    /** Unique procedures owned across worker, manager, and independent validators. */
+    maxUniquePerTask: number;
+    /** Full procedural bodies injected into any one agent. */
+    maxPerAgent: number;
+    /** Per-owner rendering budget; companion agents receive identities only. */
+    maxInstructionCharsPerAgent: number;
+  };
   maxSkillsPerCall: number;
   maxSkillChars: number;
   learningEnabled: boolean;
@@ -487,6 +688,10 @@ export interface RunEvent {
   eventId?: string;
   at: string;
   runId: string;
+  /** State snapshot revision observed when this event was appended. */
+  stateRevision?: number;
+  /** Transition lineage observed when this event was appended. */
+  transitionId?: string;
   type: string;
   messageType?: StructuredMessageType;
   workOrderId?: string;
@@ -507,6 +712,8 @@ export interface RunEvent {
   memoryIds?: string[];
   harnessPolicyVersion?: string;
   harnessDecisionId?: string;
+  harnessPortfolioId?: string;
+  harnessPortfolioOwner?: string;
   harnessRisk?: "low" | "medium" | "high";
   harnessSelectionReasons?: string[];
   harnessGates?: Array<
@@ -516,6 +723,9 @@ export interface RunEvent {
     | "test-or-verification"
     | "counterexample-search"
     | "independent-review"
+    | "authorized-security-scope"
+    | "remediation-regression"
+    | "untrusted-observation"
   >;
   learnedExperiences?: number;
   learningPolicyVersion?: string;

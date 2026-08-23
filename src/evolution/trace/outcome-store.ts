@@ -1,14 +1,15 @@
-import { lstat, mkdir, open, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { BlackboardStore } from "../../harness-v2/blackboard.js";
 import { evaluateGateSet, type GateReceiptArtifact } from "../../harness-v2/gates.js";
-import { organizationRegistryV2 } from "../../harness-v2/organization-registry.js";
-import type { ArtifactRef, ArtifactRevision, GateReceiptContent } from "../../harness-v2/contracts.js";
+import { organizationRegistryCompanyOsV3, organizationRegistryV2 } from "../../harness-v2/organization-registry.js";
+import { COMPANY_OS_ORG_VERSION, type ArtifactRef, type ArtifactRevision, type GateReceiptContent } from "../../harness-v2/contracts.js";
 import { forgeOracleSuite } from "../../harness-v2/oracle-forge.js";
 import { taskResultArtifactId } from "../../harness-v2/work-orders.js";
 import { AtomicRunStore } from "../../store.js";
 import { ExecutionBundleStore, assertNoLinks } from "../registry/bundle-store.js";
+import { durableCreateText } from "../registry/durable-file.js";
 import { deepFreezeEvolution, evolutionHash } from "./integrity.js";
 import { verifyObjectiveOutcomeReceipt } from "./outcome-label.js";
 import type { ImmutableTraceRef, ObjectiveOutcomeReceipt } from "./types.js";
@@ -16,6 +17,11 @@ import { DecisionTraceStore } from "./store.js";
 
 export class ObjectiveOutcomeReceiptConflictError extends Error {}
 export class ObjectiveOutcomeReceiptIntegrityError extends Error {}
+
+export interface ObjectiveOutcomeReceiptInspection {
+  valid: ReadonlyArray<Readonly<ObjectiveOutcomeReceipt>>;
+  invalid: ReadonlyArray<Readonly<{ fileName: string; reason: string }>>;
+}
 
 export class ObjectiveOutcomeReceiptStore {
   readonly directory: string;
@@ -34,9 +40,9 @@ export class ObjectiveOutcomeReceiptStore {
     if (!verifyObjectiveOutcomeReceipt(receipt)) throw new ObjectiveOutcomeReceiptIntegrityError("Objective outcome receipt integrity check failed");
     await this.init();
     await this.verifySourceTrace(receipt);
-    await this.verifyAuthoritativeEvidence(receipt);
+    await this.verifyAuthoritativeEvidence(receipt, "current");
     try {
-      await writeFile(this.path(receipt.receiptId), `${JSON.stringify(receipt)}\n`, { encoding: "utf8", flag: "wx" });
+      await durableCreateText(this.path(receipt.receiptId), `${JSON.stringify(receipt)}\n`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         throw new ObjectiveOutcomeReceiptConflictError(`Objective outcome receipt already exists: ${receipt.receiptId}`);
@@ -53,26 +59,53 @@ export class ObjectiveOutcomeReceiptStore {
       throw new ObjectiveOutcomeReceiptIntegrityError("Objective outcome receipt integrity check failed");
     }
     await this.verifySourceTrace(receipt);
-    await this.verifyAuthoritativeEvidence(receipt);
+    await this.verifyAuthoritativeEvidence(receipt, "historical");
     return deepFreezeEvolution(receipt);
   }
 
   async list(): Promise<Readonly<ObjectiveOutcomeReceipt>[]> {
     await this.init();
     const names = (await readdir(this.directory)).filter((name) => name.endsWith(".json")).sort();
-    return Promise.all(names.map(async (name) => {
-      const receipt = JSON.parse(await readRegularOutcomeFile(join(this.directory, name))) as ObjectiveOutcomeReceipt;
-      if (name !== `${evolutionHash(receipt.receiptId)}.json` || !verifyObjectiveOutcomeReceipt(receipt)) {
-        throw new ObjectiveOutcomeReceiptIntegrityError("Objective outcome receipt integrity check failed");
+    return Promise.all(names.map((name) => this.readNamed(name)));
+  }
+
+  /**
+   * Lists authoritative receipts without allowing one invalid historical file
+   * to hide the health of the rest of the registry. Invalid entries are never
+   * returned as evidence and remain fail-closed for read()/list().
+   */
+  async inspect(): Promise<Readonly<ObjectiveOutcomeReceiptInspection>> {
+    await this.init();
+    const names = (await readdir(this.directory)).filter((name) => name.endsWith(".json")).sort();
+    const valid: Readonly<ObjectiveOutcomeReceipt>[] = [];
+    const invalid: Array<Readonly<{ fileName: string; reason: string }>> = [];
+    for (const name of names) {
+      try {
+        valid.push(await this.readNamed(name));
+      } catch (error) {
+        invalid.push(Object.freeze({
+          fileName: name,
+          reason: error instanceof ObjectiveOutcomeReceiptIntegrityError
+            ? error.message
+            : "Objective outcome receipt could not be verified",
+        }));
       }
-      await this.verifySourceTrace(receipt);
-      await this.verifyAuthoritativeEvidence(receipt);
-      return deepFreezeEvolution(receipt);
-    }));
+    }
+    return deepFreezeEvolution({ valid, invalid });
   }
 
   private path(receiptId: string): string {
     return join(this.directory, `${evolutionHash(receiptId)}.json`);
+  }
+
+  private async readNamed(name: string): Promise<Readonly<ObjectiveOutcomeReceipt>> {
+    const receipt = JSON.parse(await readRegularOutcomeFile(join(this.directory, name))) as ObjectiveOutcomeReceipt;
+    if (name !== `${evolutionHash(receipt.receiptId)}.json` || !verifyObjectiveOutcomeReceipt(receipt)) {
+      throw new ObjectiveOutcomeReceiptIntegrityError("Objective outcome receipt integrity check failed");
+    }
+    await this.verifySourceTrace(receipt);
+    await this.verifyAuthoritativeEvidence(receipt, "historical");
+    return deepFreezeEvolution(receipt);
   }
 
   private async init(): Promise<void> {
@@ -104,7 +137,10 @@ export class ObjectiveOutcomeReceiptStore {
     }
   }
 
-  private async verifyAuthoritativeEvidence(receipt: ObjectiveOutcomeReceipt): Promise<void> {
+  private async verifyAuthoritativeEvidence(
+    receipt: ObjectiveOutcomeReceipt,
+    mode: "current" | "historical",
+  ): Promise<void> {
     let stateDirectory: string;
     let stateRoot: string;
     try {
@@ -135,13 +171,16 @@ export class ObjectiveOutcomeReceiptStore {
       if (requiredGateIds.join(",") !== "G0,G2,G3") throw new Error("Objective evolution evidence requires exact G0, G2, and G3 gates");
       const taskAccepted = task.status === "accepted";
       const workOrderAccepted = record.state === "ACCEPTED" || record.state === "INTEGRATED";
-      if (taskAccepted !== workOrderAccepted || receipt.accepted !== taskAccepted ||
-          (receipt.terminalState === "accepted") !== receipt.accepted) {
+      if (taskAccepted !== workOrderAccepted ||
+          (receipt.terminalState === "accepted") !== receipt.accepted ||
+          (mode === "current" && receipt.accepted !== taskAccepted) ||
+          (mode === "historical" && receipt.accepted && !taskAccepted)) {
         throw new Error("Outcome acceptance is not bound to the persisted task and Work Order state");
       }
       const trace = await this.traces.read(receipt.sourceTraceRef.id);
       const runEvolution = state.evolution;
       const attempt = task.evolution;
+      let supersededAttempt = false;
       if (!runEvolution || runEvolution.mode !== "pinned" || !runEvolution.traceIds.includes(trace.traceId)) {
         throw new Error("Run evolution state is not pinned to the source trace");
       }
@@ -151,13 +190,27 @@ export class ObjectiveOutcomeReceiptStore {
         throw new Error("Run bundle pin does not match the objective outcome");
       }
       if (!attempt || attempt.runId !== receipt.runId || attempt.workOrderId !== receipt.workOrderId ||
-          attempt.workOrderRevision !== receipt.workOrderRevision || attempt.attemptId !== receipt.attemptId ||
-          attempt.executionAttempt !== trace.executionAttempt || attempt.validationAttempt !== trace.validationAttempt ||
-          attempt.fencingToken !== trace.fencingToken || attempt.workloadClass !== trace.workloadClass ||
+          attempt.workOrderRevision !== receipt.workOrderRevision || attempt.workloadClass !== trace.workloadClass ||
           attempt.bundleId !== receipt.bundleId || attempt.bundleHash !== receipt.bundleHash ||
           attempt.environmentDigest !== receipt.environmentDigest || attempt.budgetDigest !== receipt.budgetDigest ||
           attempt.pointerGeneration !== pin.pointerGeneration) {
         throw new Error("Task evolution attempt does not match the source trace and run pin");
+      }
+      if (mode === "current") {
+        if (attempt.attemptId !== receipt.attemptId ||
+            attempt.executionAttempt !== trace.executionAttempt || attempt.validationAttempt !== trace.validationAttempt ||
+            attempt.fencingToken !== trace.fencingToken) {
+          throw new Error("Task evolution attempt does not match the source trace and run pin");
+        }
+      } else {
+        const activePrecedesTrace = attempt.executionAttempt < trace.executionAttempt ||
+          (attempt.executionAttempt === trace.executionAttempt && attempt.validationAttempt < trace.validationAttempt);
+        const sameAttemptOrdinal = attempt.executionAttempt === trace.executionAttempt &&
+          attempt.validationAttempt === trace.validationAttempt;
+        if (activePrecedesTrace || (sameAttemptOrdinal && attempt.attemptId !== receipt.attemptId)) {
+          throw new Error("Historical task evolution attempt is not ordered before the active attempt");
+        }
+        supersededAttempt = !sameAttemptOrdinal;
       }
 
       const blackboard = new BlackboardStore(runStore.runDirectory, receipt.runId);
@@ -173,7 +226,7 @@ export class ObjectiveOutcomeReceiptStore {
           throw new Error("Output artifact identity does not match the Work Order");
         }
       }
-      assertStateArtifactIdentity(state.harnessV2!.artifactHeads[expectedOutputId], outputs[0]!);
+      if (!supersededAttempt) assertStateArtifactIdentity(state.harnessV2!.artifactHeads[expectedOutputId], outputs[0]!);
       if (!record.artifactIds.includes(expectedOutputId)) throw new Error("Work Order does not retain the canonical output artifact ID");
 
       if (receipt.requiredValidationCount !== requiredGateIds.length || receipt.validationReceipts.length !== requiredGateIds.length) {
@@ -200,7 +253,7 @@ export class ObjectiveOutcomeReceiptStore {
             !sameStringSet(artifact.requirementIds, order.requirementIds)) {
           throw new Error(`${ref.gateId} receipt provenance or content mismatch`);
         }
-        assertStateArtifactIdentity(state.harnessV2!.artifactHeads[expectedGateId], artifact);
+        if (!supersededAttempt) assertStateArtifactIdentity(state.harnessV2!.artifactHeads[expectedGateId], artifact);
         if (receipt.accepted && !record.artifactIds.includes(expectedGateId)) throw new Error(`Work Order does not retain canonical ${ref.gateId} artifact ID`);
         if (outputs.some((output) => output.createdBy.agentId === artifact.content.verifier.agentId ||
           output.createdBy.teamId === artifact.content.verifier.teamId)) {
@@ -212,29 +265,69 @@ export class ObjectiveOutcomeReceiptStore {
 
       const persistedOracle = state.harnessV2?.oracleSuites?.[order.id];
       if (!persistedOracle) throw new Error("Persisted sealed Oracle suite summary is required");
-      const forgedOracle = forgeOracleSuite({
-        workOrder: order,
-        preflight: { phase: "pre-implementation", implementationRevision: 0 },
-      });
-      if (persistedOracle.suiteId !== forgedOracle.suite.id ||
+      if (mode === "historical" && !persistedOracle.sealedSuite) {
+        throw new Error("Legacy Oracle summary lacks its sealed suite and is not promotion-authoritative");
+      }
+      const g2Oracle = gates.get("G2")?.content.oracle;
+      if (!g2Oracle || persistedOracle.suiteId !== g2Oracle.suiteId || persistedOracle.suiteHash !== g2Oracle.suiteHash) {
+        throw new Error("Persisted Oracle suite summary does not match the sealed G2 commitment");
+      }
+      const forgedOracle = mode === "current"
+        ? forgeOracleSuite({
+            workOrder: order,
+            preflight: { phase: "pre-implementation", implementationRevision: 0 },
+          })
+        : undefined;
+      if (forgedOracle && (persistedOracle.suiteId !== forgedOracle.suite.id ||
           persistedOracle.suiteHash !== forgedOracle.suite.suiteHash ||
           persistedOracle.sourceHash !== forgedOracle.suite.sourceHash ||
-          persistedOracle.oracleCount !== forgedOracle.suite.oracles.length) {
+          persistedOracle.oracleCount !== forgedOracle.suite.oracles.length)) {
         throw new Error("Persisted Oracle suite summary does not match the pre-implementation suite");
+      }
+      if (!/^[a-f0-9]{64}$/u.test(persistedOracle.suiteHash) ||
+          !/^[a-f0-9]{64}$/u.test(persistedOracle.sourceHash) ||
+          !Number.isSafeInteger(persistedOracle.oracleCount) || persistedOracle.oracleCount < 1 ||
+          !Number.isSafeInteger(persistedOracle.hiddenCount) || persistedOracle.hiddenCount < 0 ||
+          persistedOracle.hiddenCount > persistedOracle.oracleCount) {
+        throw new Error("Persisted Oracle suite summary is malformed");
+      }
+      if (persistedOracle.sealedSuite && (
+        persistedOracle.sealedSuite.id !== persistedOracle.suiteId ||
+        persistedOracle.sealedSuite.suiteHash !== persistedOracle.suiteHash ||
+        persistedOracle.sealedSuite.sourceHash !== persistedOracle.sourceHash ||
+        persistedOracle.sealedSuite.oracles.length !== persistedOracle.oracleCount ||
+        JSON.stringify([...new Set(persistedOracle.sealedSuite.oracles.map((oracle) => oracle.kind))].sort()) !== JSON.stringify([...persistedOracle.kinds].sort()) ||
+        persistedOracle.sealedSuite.oracles.filter((oracle) => oracle.kind === "hidden").length !== persistedOracle.hiddenCount
+      )) {
+        throw new Error("Persisted Oracle suite summary does not match its sealed suite");
       }
       const gateEvaluation = await evaluateGateSet({
         workOrder: order,
         outputArtifacts: outputs,
         receipts: [...gates.values()],
         blackboard,
-        registry: organizationRegistryV2({
+        registry: (state.harnessV2?.orgVersion === COMPANY_OS_ORG_VERSION
+          ? organizationRegistryCompanyOsV3
+          : organizationRegistryV2)({
           headcount: state.harnessV2?.organizationHeadcount ?? 128,
           reviewerSlots: state.harnessV2?.organizationReviewerSlots ?? 3,
         }),
-        oracle: {
-          suite: forgedOracle.suite,
-          ...(forgedOracle.reveal ? { reveal: forgedOracle.reveal } : {}),
-        },
+        oracle: forgedOracle
+          ? {
+              suite: forgedOracle.suite,
+              ...(forgedOracle.reveal ? { reveal: forgedOracle.reveal } : {}),
+            }
+          : {
+              commitment: {
+                suiteId: persistedOracle.suiteId,
+                suiteHash: persistedOracle.suiteHash,
+                workOrderId: order.id,
+                workOrderRevision: order.revision,
+                requirementIds: [...order.requirementIds],
+                suite: structuredClone(persistedOracle.sealedSuite!),
+              },
+            },
+        allowHistoricalRevisions: supersededAttempt,
       });
 
       const facts = {
@@ -245,7 +338,7 @@ export class ObjectiveOutcomeReceiptStore {
           !gateEvaluation.blockers.some((blocker) => blocker.startsWith("G3:")) &&
           outputs.every((output) => sameStringSet(output.requirementIds, order.requirementIds)) &&
           [...gates.values()].every((gate) => sameStringSet(gate.content.requirementIds, order.requirementIds)),
-        criticalRegression: !gateEvaluation.passed,
+        criticalRegression: !gateEvaluation.passed || (gates.get("G2")?.content.findingIds.length ?? 0) > 0,
       };
       if (facts.hardGatesPassed !== receipt.facts.hardGatesPassed ||
           facts.requirementsRetained !== receipt.facts.requirementsRetained ||

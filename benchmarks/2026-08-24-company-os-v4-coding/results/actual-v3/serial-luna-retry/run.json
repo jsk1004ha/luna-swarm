@@ -1,0 +1,148 @@
+{
+  "schemaVersion": 2,
+  "comparisonId": "actual-v3",
+  "diagnosticSeed": "smoke-1",
+  "arm": "serial-luna-retry",
+  "system": "two-serial-codex-luna-sessions-with-public-test-feedback",
+  "model": "gpt-5.6-luna",
+  "baseCommit": "8ef24a10550311e60658fcb36ba84cb12e09e64f",
+  "candidateRef": "refs/heads/serial-luna-retry-candidate",
+  "candidateCommit": "49f7879f0768339572e4cbd3b038f5ced0fc9be8",
+  "startedAt": "2026-08-23T19:36:18.897Z",
+  "wallMs": 438779,
+  "timeBudgetMs": 3600000,
+  "exitCode": 0,
+  "timedOut": false,
+  "changedPaths": [
+    "src/crash-safe-lease-log.mjs"
+  ],
+  "completion": {
+    "complete": true,
+    "status": "candidate-frozen",
+    "completedAt": "2026-08-23T19:43:37.678Z",
+    "attemptCount": 2,
+    "attempts": [
+      {
+        "index": 1,
+        "mode": "initial",
+        "startedAt": "2026-08-23T19:36:18.966Z",
+        "completedAt": "2026-08-23T19:40:50.594Z",
+        "wallMs": 271591,
+        "exitCode": 0,
+        "timedOut": false,
+        "completionStatus": "completed",
+        "metrics": {
+          "sessionCount": 1,
+          "subagentSignals": 0,
+          "networkToolSignals": 0,
+          "modelCalls": 1,
+          "eventCount": 1,
+          "tokenUsage": {
+            "totalTokens": 39263,
+            "inputTokens": 24452,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 14811,
+            "reasoningOutputTokens": 8286
+          },
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsageComplete": true,
+          "costUsd": null,
+          "costReportedCalls": 0,
+          "costUnreportedCalls": 1,
+          "costComplete": false
+        },
+        "manifestSha256": "sha256:e620300d91d1a06f7f21c93f6453868e3354e913d376b11db81782a3480186d1",
+        "sourceSha256": "sha256:2b5dcc5fb4816cf6fe3974bd3c023939ff71493ffaba8436b0a5b8fcb3b4ef43",
+        "sourceBytes": 24350,
+        "publicTestsExitCode": 1,
+        "publicTestsTimedOut": false,
+        "publicTestsTrajectorySha256": "sha256:1c6c65d1a29a65d85edcb5782741018d0bdf36f56be78c04d4beb4ade0edb861"
+      },
+      {
+        "index": 2,
+        "mode": "public-test-repair",
+        "startedAt": "2026-08-23T19:40:50.805Z",
+        "completedAt": "2026-08-23T19:43:36.745Z",
+        "wallMs": 165924,
+        "exitCode": 0,
+        "timedOut": false,
+        "completionStatus": "completed",
+        "metrics": {
+          "sessionCount": 1,
+          "subagentSignals": 0,
+          "networkToolSignals": 0,
+          "modelCalls": 1,
+          "eventCount": 1,
+          "tokenUsage": {
+            "totalTokens": 37870,
+            "inputTokens": 28905,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 8965,
+            "reasoningOutputTokens": 2328
+          },
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsageComplete": true,
+          "costUsd": null,
+          "costReportedCalls": 0,
+          "costUnreportedCalls": 1,
+          "costComplete": false
+        },
+        "manifestSha256": "sha256:2fddc959c9fcf72a225bf7e4d1ff34cb5bb2d5b820d2e86c7f8a505dc45205f0",
+        "sourceSha256": "sha256:e8ef9cc4c486503e5e90bbcdb187766a164d59d40da70678d30d4904be4ff936",
+        "sourceBytes": 24761,
+        "publicTestsExitCode": 1,
+        "publicTestsTimedOut": false,
+        "publicTestsTrajectorySha256": "sha256:b3ee1883915adc62eeb4d4bd91bbb1ede20b9fed3625bae51ad51c77b3d55a25"
+      }
+    ]
+  },
+  "frozenInputs": {
+    "missionSha256": "sha256:3c6ddc44078f783a99ca54c0e3e3ab3f361dbff26b359dce054c4a76ca7d733b",
+    "fixtureBundleSha256": "sha256:8af456d4a71aa12a0edc4d4cc70a12c92a882525d2f69d28f287ff7a734d864a",
+    "contractSha256": "sha256:57253c64523d8f1c87217630a63b7029280d2a3aa864ec6a9f05a35b0db057b9",
+    "packageSha256": "sha256:dc47a053e585155207b3b1a7bfa8db2893bc5ee5985ea9fe8cd02b7c93a22b3a",
+    "publicTestsSha256": [
+      "sha256:f834d3e181d33720b859f0f567154437cf2cc68cb6d1844169d39c0cf92f3019",
+      "sha256:823fca41f845e68761f0c39c816e4e6956947db2e81f7c5fe0f8644097590cc4"
+    ],
+    "hiddenSuiteSha256": "sha256:f904888908b67d007e435b2465dc22b1e1ba8cb2f36f66e22be09bbbe6a3239d",
+    "configSha256": null,
+    "codingPolicySha256": null
+  },
+  "candidate": {
+    "patchSha256": "sha256:8b7c45055f4e4db64429f5c18fa911bc7cd54d6a54ef11e085e520c92b1e87d0",
+    "sourceSha256": "sha256:e8ef9cc4c486503e5e90bbcdb187766a164d59d40da70678d30d4904be4ff936",
+    "bundleSha256": "sha256:f31cae09d53e094970178f04e29982bc1845c2e3ba34d4a326fe7e0ba4626a13"
+  },
+  "isolation": "remote-less-disposable-clone; hidden suite absent from candidate workspace/context; model read-only and tool-less; host writes only exact structured sourcePath; no network authorized",
+  "qualityEvaluated": false,
+  "promotionEligible": false,
+  "metrics": {
+    "sessionCount": 2,
+    "subagentSignals": 0,
+    "networkToolSignals": 0,
+    "modelCalls": 2,
+    "eventCount": 2,
+    "tokenUsage": {
+      "totalTokens": 77133,
+      "inputTokens": 53357,
+      "cachedInputTokens": 0,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 23776,
+      "reasoningOutputTokens": 10614
+    },
+    "tokenMeteredCalls": 2,
+    "tokenUnmeteredCalls": 0,
+    "costUsd": null,
+    "costReportedCalls": 0,
+    "costUnreportedCalls": 2,
+    "tokenUsageComplete": true,
+    "costComplete": false
+  },
+  "telemetryComplete": true,
+  "directProtocol": "company-os-v4/direct-full-source@1"
+}

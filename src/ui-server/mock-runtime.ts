@@ -56,6 +56,7 @@ export class MockUiRuntime {
   }
 
   async control(command: UiControlCommand): Promise<UiControlResult> {
+    if (command.action === "recover") return rejected("MOCK_RECOVERY_UNAVAILABLE", "Mock 실행은 복구할 persisted runtime이 없습니다.");
     if (command.action === "start") {
       this.mode = "running";
       this.clock = Date.now();

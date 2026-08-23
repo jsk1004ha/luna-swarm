@@ -1,0 +1,797 @@
+{
+  "schemaVersion": 1,
+  "revision": 9,
+  "checksum": "cbced9684197f42b62dbfacfe6dc65ff5fc20af36da240a11265e392c0c54ca7",
+  "generation": "744d6153-8745-45f0-b519-acfcd4b4ba21",
+  "state": {
+    "schemaVersion": 1,
+    "revision": 9,
+    "runId": "2026-08-17T18-52-42-928Z-6696e3c0",
+    "status": "failed",
+    "goal": "# Coding mission: production-grade asynchronous task pool\n\nImplement the complete contract in `src/task-pool.mjs`.\n\nRead `README.md` and the public tests. Run the policy-pinned public test and syntax check. You may modify only `src/task-pool.mjs`; do not alter tests or package metadata.\n\nDo not access the network, install dependencies, use subagents, or read files outside this workspace. Do not weaken or disable tests. Finish with a short summary of the implementation and commands actually run.\n",
+    "workspace": "C:\\Users\\js100\\AppData\\Local\\Temp\\luna-swarm-actual-v1-luna-rRen64",
+    "createdAt": "2026-08-17T18:52:43.373Z",
+    "updatedAt": "2026-08-17T18:58:48.687Z",
+    "config": {
+      "model": "gpt-5.6-luna",
+      "organizationHeadcount": "auto",
+      "evolutionReleaseEpoch": 1,
+      "maxConcurrency": 4,
+      "appServerShardCount": 1,
+      "initialConcurrency": 2,
+      "minConcurrency": 1,
+      "maxTasks": 6,
+      "maxTeams": 4,
+      "maxHierarchyDepth": 3,
+      "maxDirectReports": 4,
+      "maxAgentTurns": 96,
+      "planningCommitteeSize": 3,
+      "validatorsLowRisk": 2,
+      "validatorsHighRisk": 3,
+      "validationQuorum": 0.6666666666666666,
+      "maxAttempts": 2,
+      "maxRepairRounds": 1,
+      "maxContextChars": 60000,
+      "callTimeoutMs": 600000,
+      "retryBaseMs": 1000,
+      "retryMaxMs": 15000,
+      "gatewayMaxAttempts": 2,
+      "growthEverySuccesses": 8,
+      "growthIncrement": 1,
+      "rateLimitCooldownMs": 15000,
+      "schedulerAgingMs": 1000,
+      "allowNetwork": false,
+      "ephemeralThreads": true,
+      "stateDirectory": ".luna-swarm",
+      "storageMaintenance": {
+        "enabled": false,
+        "autoCompact": false,
+        "maxStateBytes": 5368709120,
+        "minArchiveAgeHours": 168,
+        "keepRecentRuns": 20,
+        "maxRunsPerPass": 2,
+        "maxArchiveFiles": 100000,
+        "maxArchiveBytes": 2147483648
+      },
+      "harnessEnabled": true,
+      "skillPortfolio": {
+        "enabled": true,
+        "maxUniquePerTask": 8,
+        "maxPerAgent": 2,
+        "maxInstructionCharsPerAgent": 4000
+      },
+      "maxSkillsPerCall": 3,
+      "maxSkillChars": 6000,
+      "learningEnabled": false,
+      "learningAutoApply": false,
+      "maxMemoriesPerCall": 0,
+      "maxMemoryChars": 0,
+      "learningHistoryRuns": 20,
+      "learningMinSamples": 3,
+      "reasoning": {
+        "planner": "high",
+        "architect": "high",
+        "manager": "high",
+        "worker": "high",
+        "validator": "high",
+        "reducer": "high",
+        "judge": "high"
+      }
+    },
+    "organization": {
+      "template": "company-v1",
+      "roles": [
+        {
+          "id": "user_ceo",
+          "title": "회장 / 의뢰인",
+          "department": "executive",
+          "level": 0,
+          "reportsTo": null,
+          "mission": "목표와 최종 의사결정 기준을 정한다.",
+          "decisionRights": [
+            "목표 승인",
+            "최종 결과 채택",
+            "쓰기 권한 승인"
+          ],
+          "contextPolicy": "전체 목표와 최종 결과를 본다."
+        },
+        {
+          "id": "chief_of_staff",
+          "title": "부회장 / 수석 아키텍트",
+          "department": "executive",
+          "level": 1,
+          "reportsTo": "user_ceo",
+          "mission": "부서별 기획을 하나의 충돌 없는 실행 DAG로 통합한다.",
+          "decisionRights": [
+            "작업 분해",
+            "부서 배정",
+            "의존성 승인"
+          ],
+          "contextPolicy": "독립 기획안을 모두 보되 실무 결과를 대신 작성하지 않는다."
+        },
+        {
+          "id": "executive_judge",
+          "title": "최종 심의관",
+          "department": "executive",
+          "level": 1,
+          "reportsTo": "user_ceo",
+          "mission": "검증된 결과가 의뢰인의 요구를 실제로 충족하는지 최종 판정한다.",
+          "decisionRights": [
+            "최종 커버리지 판정",
+            "한정사항 공개 요구"
+          ],
+          "contextPolicy": "병합 결과와 감사 상태는 보지만 실무 초안의 권위에는 기대지 않는다."
+        },
+        {
+          "id": "strategy_director",
+          "title": "전략 부서장",
+          "department": "strategy",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "목표, 우선순위, 의사결정 기준을 구조화한다.",
+          "decisionRights": [
+            "전략 작업 제안",
+            "우선순위 권고"
+          ],
+          "contextPolicy": "사용자 목표와 전략 관련 증거에 집중한다."
+        },
+        {
+          "id": "research_director",
+          "title": "리서치 부서장",
+          "department": "research",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "사실, 출처, 알려지지 않은 점을 분리해 조사 계획을 만든다.",
+          "decisionRights": [
+            "조사 범위 제안",
+            "근거 품질 기준 설정"
+          ],
+          "contextPolicy": "출처와 사실성에 집중하고 구현 편의에 맞춰 결론을 바꾸지 않는다."
+        },
+        {
+          "id": "engineering_director",
+          "title": "엔지니어링 부서장",
+          "department": "engineering",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "구현 가능성, 인터페이스, 테스트 가능한 산출물을 설계한다.",
+          "decisionRights": [
+            "기술 작업 제안",
+            "구현 계약 설정"
+          ],
+          "contextPolicy": "명시된 기술 계약과 의존 산출물만 권위 있는 입력으로 취급한다."
+        },
+        {
+          "id": "risk_director",
+          "title": "레드팀 / 리스크 부서장",
+          "department": "risk",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "반례, 실패 조건, 보안 및 운영 위험을 독립적으로 찾는다.",
+          "decisionRights": [
+            "위험 작업 제안",
+            "고위험 분류 권고"
+          ],
+          "contextPolicy": "다른 부서의 낙관적 결론을 전제로 삼지 않는다."
+        },
+        {
+          "id": "quality_director",
+          "title": "품질감사 부서장",
+          "department": "quality",
+          "level": 2,
+          "reportsTo": "user_ceo",
+          "mission": "경영 라인과 독립적으로 산출물의 증거와 기준 충족 여부를 감사한다.",
+          "decisionRights": [
+            "재작업 요구",
+            "검증표 발행"
+          ],
+          "contextPolicy": "실무자의 자기평가와 다른 감사자의 표를 보지 않는다."
+        },
+        {
+          "id": "integration_director",
+          "title": "통합 이사",
+          "department": "integration",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "승인된 산출물을 출처 손실 없이 계층적으로 병합한다.",
+          "decisionRights": [
+            "중복 제거",
+            "충돌 및 공백 표면화"
+          ],
+          "contextPolicy": "accepted 결과만 입력으로 받고 새로운 사실을 만들지 않는다."
+        },
+        {
+          "id": "strategy_analyst",
+          "title": "전략 분석 담당",
+          "department": "strategy",
+          "level": 3,
+          "reportsTo": "strategy_director",
+          "mission": "배정된 전략 계약을 근거와 함께 수행한다.",
+          "decisionRights": [
+            "전략 초안 제출"
+          ],
+          "contextPolicy": "자신의 작업과 승인된 의존 결과만 본다."
+        },
+        {
+          "id": "research_specialist",
+          "title": "리서치 담당",
+          "department": "research",
+          "level": 3,
+          "reportsTo": "research_director",
+          "mission": "배정된 조사 계약을 출처 중심으로 수행한다.",
+          "decisionRights": [
+            "조사 결과 제출"
+          ],
+          "contextPolicy": "자신의 조사 범위와 승인된 의존 결과만 본다."
+        },
+        {
+          "id": "software_engineer",
+          "title": "구현 담당",
+          "department": "engineering",
+          "level": 3,
+          "reportsTo": "engineering_director",
+          "mission": "테스트 가능한 기술 산출물이나 구현안을 만든다.",
+          "decisionRights": [
+            "구현안 제출",
+            "테스트 결과 보고"
+          ],
+          "contextPolicy": "작업 계약과 승인된 인터페이스만 본다. 기본 권한은 읽기 전용이다."
+        },
+        {
+          "id": "risk_analyst",
+          "title": "레드팀 분석 담당",
+          "department": "risk",
+          "level": 3,
+          "reportsTo": "risk_director",
+          "mission": "배정된 결과의 반례와 실패 경로를 적극적으로 찾는다.",
+          "decisionRights": [
+            "위험 보고",
+            "반례 제출"
+          ],
+          "contextPolicy": "합의 유도 문구와 자기평가를 증거로 취급하지 않는다."
+        },
+        {
+          "id": "quality_auditor",
+          "title": "독립 감사 담당",
+          "department": "quality",
+          "level": 3,
+          "reportsTo": "quality_director",
+          "mission": "사전에 정한 기준으로 결과를 블라인드 검증한다.",
+          "decisionRights": [
+            "accept/revise/reject 투표"
+          ],
+          "contextPolicy": "다른 감사표, 투표 수, 실무자의 내부 추론을 보지 않는다."
+        }
+      ]
+    },
+    "teams": {},
+    "tasks": {},
+    "threadIds": {
+      "mission-preflight": "01a01111-a825-7000-9afa-2289f1469547",
+      "planner:research_director:2": "01a01112-d1bf-7b20-ae02-0727c2a15419",
+      "planner:strategy_director:1": "01a01112-d1d4-7f50-a065-3f420c6ab811",
+      "planner:risk_director:3": "01a01113-fe9c-7fe1-bfee-c11e9ba162cd",
+      "architect": "01a01115-84f1-7e93-9535-ea1163f3b6c7"
+    },
+    "metrics": {
+      "modelCalls": 6,
+      "retries": 0,
+      "rateLimitEvents": 0,
+      "maxActiveCalls": 2,
+      "maxQueueWaitMs": 77289,
+      "queueP95Ms": 77289,
+      "priorityDispatches": 0,
+      "threadLocks": 0,
+      "tokenUsage": {
+        "totalTokens": 197775,
+        "inputTokens": 173231,
+        "cachedInputTokens": 30464,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 24544,
+        "reasoningOutputTokens": 11754
+      },
+      "tokenMeteredCalls": 6,
+      "tokenUnmeteredCalls": 0,
+      "callBreakdown": [
+        {
+          "role": "architect",
+          "purpose": "architect_plan",
+          "calls": 1,
+          "promptCharacters": 46186,
+          "promptUtf8Bytes": 46395,
+          "totalDurationMs": 58350,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 34146,
+            "inputTokens": 31076,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 3070,
+            "reasoningOutputTokens": 781
+          }
+        },
+        {
+          "role": "architect",
+          "purpose": "architect_repair",
+          "calls": 1,
+          "promptCharacters": 47048,
+          "promptUtf8Bytes": 47257,
+          "totalDurationMs": 52111,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 46408,
+            "inputTokens": 43581,
+            "cachedInputTokens": 30464,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 2827,
+            "reasoningOutputTokens": 765
+          }
+        },
+        {
+          "role": "planner",
+          "purpose": "candidate_plan",
+          "calls": 3,
+          "promptCharacters": 47496,
+          "promptUtf8Bytes": 48138,
+          "totalDurationMs": 276626,
+          "totalQueueWaitMs": 77289,
+          "tokenMeteredCalls": 3,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 90363,
+            "inputTokens": 75622,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 14741,
+            "reasoningOutputTokens": 8470
+          }
+        },
+        {
+          "role": "planner",
+          "purpose": "mission_preflight",
+          "calls": 1,
+          "promptCharacters": 5381,
+          "promptUtf8Bytes": 5575,
+          "totalDurationMs": 74870,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 26858,
+            "inputTokens": 22952,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 3906,
+            "reasoningOutputTokens": 1738
+          }
+        }
+      ]
+    },
+    "harness": {
+      "enabled": true,
+      "learningEnabled": false,
+      "catalogSkills": 12,
+      "selections": 6,
+      "specialistIds": [
+        "adversarial-planner",
+        "critical-path-operator",
+        "requirements-strategist",
+        "systems-architect"
+      ],
+      "skillIds": [
+        "adversarial-risk-review",
+        "critical-path-planning",
+        "evidence-first-research",
+        "implementation-test-loop",
+        "requirements-traceability",
+        "security-threat-modeling"
+      ],
+      "skillUses": 16,
+      "memoriesRecalled": 0,
+      "learnedExperiences": 0,
+      "policyVersion": "luna-harness-v3",
+      "learningPolicyVersion": "lp-baseline-v1",
+      "learningPolicyStatus": "collecting",
+      "learningPolicySamples": 0,
+      "learningPolicyHoldoutSamples": 0,
+      "learningPolicyImprovement": 0,
+      "learningPolicyRollbacks": 0,
+      "highRiskSelections": 0,
+      "independentReviewSelections": 0,
+      "gateApplications": 19,
+      "skillPortfolioCount": 0,
+      "rawSkillInstructionCharsAvoided": 0,
+      "skillPortfolios": []
+    },
+    "harnessV2": {
+      "orgVersion": "lab-128@2",
+      "organizationReviewerSlots": 3,
+      "workOrders": {},
+      "artifactHeads": {},
+      "councils": {},
+      "missionCells": {},
+      "messages": [],
+      "oracleSuites": {},
+      "experiments": {},
+      "knowledgeCapsules": {},
+      "missionPreflight": {
+        "schemaVersion": 1,
+        "missionId": "mission:2026-08-17T18-52-42-928Z-6696e3c0",
+        "objective": "# Coding mission: production-grade asynchronous task pool Implement the complete contract in `src/task-pool.mjs`. Read `README.md` and the public tests. Run the policy-pinned public test and syntax check. You may modify only `src/task-pool.mjs`; do not alter tests or package metadata. Do not access the network, install dependencies, use subagents, or read files outside this workspace. Do not weaken or disable tests. Finish with a short summary of the implementation and commands actually run.",
+        "assumptions": [
+          {
+            "evidence": "The user explicitly requires reading README.md and the public tests before implementation.",
+            "id": "AS-001",
+            "statement": "README.md and the public tests are the available authoritative sources for the task-pool contract.",
+            "classification": "fact",
+            "falsification": "Workspace inspection shows either source is absent, inaccessible, or not relevant to src/task-pool.mjs."
+          },
+          {
+            "evidence": "The user explicitly prohibits modifying tests and package metadata and limits modifications to one source file.",
+            "id": "AS-002",
+            "statement": "Only src/task-pool.mjs may be modified.",
+            "classification": "constraint",
+            "falsification": "Final repository diff contains any changed path other than src/task-pool.mjs."
+          },
+          {
+            "evidence": "The user explicitly prohibits each activity.",
+            "id": "AS-003",
+            "statement": "Network access, dependency installation, subagents, and reads outside the workspace are unauthorized.",
+            "classification": "constraint",
+            "falsification": "Command history, tool audit, or repository evidence shows any prohibited activity occurred."
+          },
+          {
+            "evidence": "The prompt names a complete contract but does not state API signatures, scheduling semantics, error behavior, or lifecycle rules.",
+            "id": "AS-004",
+            "statement": "The exact task-pool semantics are not yet known from the supplied prompt alone.",
+            "classification": "inference",
+            "falsification": "README.md and public tests fully specify those semantics without unresolved gaps."
+          },
+          {
+            "evidence": "The user requires a syntax check and test execution, and the role contract prioritizes cheap falsification before expensive work.",
+            "id": "AS-005",
+            "statement": "A syntax check and contract inventory are low-cost preconditions for implementation and verification.",
+            "classification": "preference",
+            "falsification": "The repository provides no executable syntax check or the required policy-pinned test necessarily performs equivalent validation."
+          }
+        ],
+        "findings": [
+          {
+            "id": "A-001",
+            "kind": "ambiguity",
+            "statement": "“Complete contract” does not identify the required API surface or exact semantics before repository inspection.",
+            "relatedIds": [
+              "Both sources must agree; disagreements require preserving observable tests and recording the discrepancy.],",
+              "Public tests define behavior absent or beyond README.md.",
+              "README.md defines the authoritative contract.",
+              "resolution in schema? no invalid. Need fix."
+            ],
+            "resolved": true,
+            "resolution": "Inspect README.md and public tests first; any remaining discrepancy stays unresolved rather than being inferred."
+          },
+          {
+            "id": "A-002",
+            "kind": "ambiguity",
+            "statement": "The exact command represented by “policy-pinned public test” is not supplied.",
+            "relatedIds": [
+              "A harness-specific command is supplied by the execution environment.",
+              "A package-script command is pinned by package metadata.",
+              "The required test command cannot be identified without additional repository evidence."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "A-003",
+            "kind": "ambiguity",
+            "statement": "“Production-grade” is not operationally defined for concurrency, backpressure, cancellation, fairness, cleanup, or observability.",
+            "relatedIds": [
+              "Additional quality properties are expected but unspecified.",
+              "Only behaviors explicitly documented or publicly tested are in scope.",
+              "The phrase is descriptive and imposes no additional testable behavior."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "A-004",
+            "kind": "ambiguity",
+            "statement": "The required syntax-check command is unspecified.",
+            "relatedIds": [
+              "No valid syntax check is available without installing tools, which is prohibited.",
+              "Use a package-provided lint or check script if it is explicitly a syntax gate.",
+              "Use the runtime syntax check appropriate to .mjs."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "A-005",
+            "kind": "ambiguity",
+            "statement": "“Short summary” has no defined length or format.",
+            "relatedIds": [
+              "A few concise bullets.",
+              "A machine-readable summary is required, but no such format is specified.",
+              "One concise paragraph."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "C-001",
+            "kind": "conflict",
+            "statement": "The requirement to run the mandated public test may become operationally incompatible with the prohibition on installing dependencies if the test environment lacks already-installed dependencies.",
+            "relatedIds": [
+              "R-004",
+              "R-005"
+            ],
+            "resolved": true,
+            "resolution": "Do not install dependencies; if the pinned test cannot run, preserve the failed or unavailable gate as an unresolved verification gap."
+          }
+        ],
+        "sensitivity": [
+          {
+            "requirementId": "R-001",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-001",
+                "AT-002",
+                "AT-003",
+                "AT-008"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-001",
+                "mutation": "Strengthen implementation scope to require source-backed traceability for every public behavior and explicit preservation of unspecified behavior.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-001",
+                  "AT-008"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "R-002",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-002",
+                "AT-004"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-002",
+                "mutation": "Convert the file-scope constraint into an allowlist check against the final repository diff.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-004"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "R-003",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-001",
+                "AT-005"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-003",
+                "mutation": "Require observable evidence that contract sources were inspected before edits, not merely that they were eventually read.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-005"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "R-004",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-002",
+                "AT-003",
+                "AT-007"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-004",
+                "mutation": "Require both mandated checks to be run after implementation and prohibit reporting commands that were not actually executed.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-002",
+                  "AT-003",
+                  "AT-007"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "R-005",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-006"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-005",
+                "mutation": "Expand the restriction into an auditable execution-boundary requirement covering tools, network, dependencies, agents, and filesystem scope.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-006"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "R-006",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-007"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-006",
+                "mutation": "Constrain the handoff to a concise evidence-based summary containing implementation scope and actual command history only.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-007"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          }
+        ],
+        "risks": [
+          {
+            "mitigation": "Use repository evidence as the contract, perform adversarial counterexample review, and leave unsupported semantics unresolved.",
+            "id": "RK-001",
+            "failureMode": "Implementation passes obvious tests but violates an undocumented edge case in failure, interruption, ordering, or concurrency behavior.",
+            "falsification": "Run AT-001 and AT-008 against all public contract evidence and record any behavior without a source-backed expectation.",
+            "ownerTeam": "implementation-and-verification"
+          },
+          {
+            "mitigation": "Use only preinstalled tooling and report the gate as unverified if the required command cannot run.",
+            "id": "RK-002",
+            "failureMode": "A supposedly successful verification run depends on an unavailable package or an unapproved installation.",
+            "falsification": "Inspect the actual command output and execution audit for dependency resolution, installation, or environment errors.",
+            "ownerTeam": "verification"
+          },
+          {
+            "mitigation": "Apply strict workspace and file allowlists and perform an evidence review before handoff.",
+            "id": "RK-003",
+            "failureMode": "Scope or authorization is violated through edits, reads, network calls, or auxiliary agents.",
+            "falsification": "Review the final diff and command/tool audit against the allowlist in R-002 and R-005.",
+            "ownerTeam": "chief_of_staff"
+          }
+        ],
+        "blockers": [
+          "Unresolved ambiguity: A-002",
+          "Unresolved ambiguity: A-003",
+          "Unresolved ambiguity: A-004",
+          "Unresolved ambiguity: A-005"
+        ],
+        "ready": false
+      },
+      "programKnowledge": {
+        "status": "ready",
+        "graphHash": "d9e3a2513b61a2df26b9e11e79cc203d2da9741064268dd278a625df7cc12c12",
+        "nodeCount": 10,
+        "edgeCount": 9,
+        "indexedAt": "2026-08-17T18:54:00.830Z",
+        "omittedFiles": 0
+      }
+    },
+    "evolution": {
+      "schemaVersion": 1,
+      "mode": "pinned",
+      "promotionEligible": true,
+      "bundlePins": {
+        "long-running-orchestration": {
+          "workloadClass": "long-running-orchestration",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "engineering.feature": {
+          "workloadClass": "engineering.feature",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "engineering.bugfix": {
+          "workloadClass": "engineering.bugfix",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "engineering.refactor": {
+          "workloadClass": "engineering.refactor",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "engineering.performance": {
+          "workloadClass": "engineering.performance",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "research.deep-synthesis": {
+          "workloadClass": "research.deep-synthesis",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "research.numeric": {
+          "workloadClass": "research.numeric",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "security.audit": {
+          "workloadClass": "security.audit",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "validation": {
+          "workloadClass": "validation",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        },
+        "integration": {
+          "workloadClass": "integration",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T18:52:43.373Z"
+        }
+      },
+      "traceIds": [],
+      "outcomes": {},
+      "failureCapsuleIds": [],
+      "integrityErrors": []
+    },
+    "error": "Architect plan failed deterministic gates: Task T1 contract under-declares execution authority: command-execution, workspace-write required by its kind/objective/deliverable; contract excerpt=\"analysis | Inspect README.md and public tests for the authoritative task-pool contract | Read README.md and all relevant public tests within the workspace before implementation. Extract the exported API, scheduling and concurrency semantics, ordering expectations, error and rejection behavior, lifecycle rules, cleanup expectations, and documented edge cases. Record conflicts or missing semantics without resolving them by inference. | A source-indexed contract matrix mapping README and public-test paths to explicit task-pool behaviors, with separate unresolved-ambiguity notes. | README.md and a\""
+  }
+}

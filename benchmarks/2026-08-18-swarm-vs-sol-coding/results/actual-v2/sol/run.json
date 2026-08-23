@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "comparisonId": "actual-v2",
+  "arm": "sol",
+  "system": "single-codex-sol-session",
+  "model": "gpt-5.6-sol",
+  "baseCommit": "b8db554d6952f42f2e82758eaa00cae21f754302",
+  "candidateRef": "refs/heads/sol-candidate",
+  "candidateCommit": "f93b96c4818138e80d9383586289c4e054c565ef",
+  "startedAt": "2026-08-17T19:03:06.459Z",
+  "wallMs": 251201,
+  "exitCode": 0,
+  "timedOut": false,
+  "missionSha256": "sha256:53a44c209f220651c0558e438eec0414aecdbe131aea4ca058dcf28f20a6674e",
+  "hiddenSuiteSha256": "sha256:052e5cb5dcd4b8ac67348089581d53260ea1174a567a591e29cf45df82141ece",
+  "patchSha256": "sha256:57b9bedb0a53305e13bd29b453a584561964196e38588f53a0bc17120d3a92ae",
+  "sourceSha256": "sha256:805e8dbb0c3dd9474727d0fdb1921b8d0170cec6ae366a94c4cb53055deb2844",
+  "changedPaths": [
+    "src/task-pool.mjs"
+  ],
+  "qualityEvaluated": false,
+  "promotionEligible": false,
+  "isolation": "remote-less-disposable-clone-with-post-run-scope-validation",
+  "metrics": {
+    "modelCalls": 1,
+    "eventCount": 36,
+    "completedToolActions": 14,
+    "tokenUsage": {
+      "totalTokens": 0,
+      "inputTokens": 342572,
+      "cachedInputTokens": 295680,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 12118,
+      "reasoningOutputTokens": 5777
+    },
+    "tokenMeteredCalls": 1,
+    "tokenUnmeteredCalls": 0,
+    "tokenUsageComplete": false
+  }
+}

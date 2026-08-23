@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import { MockAgentBackend, demoHandler } from "../../src/backend/mock-backend.js";
 import { HARNESS_POLICY_VERSION } from "../../src/capabilities.js";
@@ -24,7 +26,11 @@ import {
   type SignedRolloutReceipt,
   type TrustedRolloutAuthority,
 } from "../../src/evolution/deployment/index.js";
-import { initializeEvolutionRuntime, type EvolutionRuntimeFingerprintInput } from "../../src/evolution/runtime.js";
+import {
+  initializeEvolutionRuntime,
+  resolveLocalSourceIdentity,
+  type EvolutionRuntimeFingerprintInput,
+} from "../../src/evolution/runtime.js";
 import { GenomeQuarantineStore } from "../../src/evolution/registry/quarantine-store.js";
 import { HARNESS_V2_ORG_VERSION } from "../../src/harness-v2/contracts.js";
 import { SwarmOrchestrator } from "../../src/orchestrator.js";
@@ -71,8 +77,21 @@ const fingerprint: EvolutionRuntimeFingerprintInput = {
   maxConcurrency: config.maxConcurrency,
   harnessPolicyVersion: HARNESS_POLICY_VERSION,
   organizationVersion: HARNESS_V2_ORG_VERSION,
+  releaseEpoch: 1,
   sourceCommit: "deployment-control-loop-source",
 };
+const execFileAsync = promisify(execFile);
+
+async function initializeCleanGitWorkspace(workspace: string): Promise<string> {
+  await execFileAsync("git", ["-C", workspace, "init"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "config", "user.email", "luna-swarm@example.invalid"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "config", "user.name", "Luna Swarm Test"], { windowsHide: true });
+  await writeFile(join(workspace, ".gitignore"), ".luna-swarm/\n.control-loop-run/\n", "utf8");
+  await writeFile(join(workspace, "tracked.txt"), "baseline\n", "utf8");
+  await execFileAsync("git", ["-C", workspace, "add", ".gitignore", "tracked.txt"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "commit", "-m", "baseline"], { windowsHide: true });
+  return resolveLocalSourceIdentity(workspace);
+}
 
 function signingAuthority(authority: TrustedRolloutAuthority["authority"]) {
   const pair = generateKeyPairSync("ed25519");
@@ -105,7 +124,8 @@ function receipt(input: {
 test("actual orchestrator candidate telemetry auto-rolls back and restart replays no authority effect", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "deployment-control-orchestrator-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  const evolution = await initializeEvolutionRuntime(workspace, fingerprint, FIXED_AT);
+  const runtimeFingerprint = { ...fingerprint, sourceCommit: await initializeCleanGitWorkspace(workspace) };
+  const evolution = await initializeEvolutionRuntime(workspace, runtimeFingerprint, FIXED_AT);
   const champion = evolution.bundles[WORKLOAD]!;
   const championGenome = await evolution.genomeStore.read(champion.genomeId);
   const candidateGenome = deriveOrganizationGenome(championGenome, {
@@ -221,7 +241,6 @@ test("actual orchestrator candidate telemetry auto-rolls back and restart replay
     store: runStore,
     config,
     workspace,
-    ...(fingerprint.sourceCommit === undefined ? {} : { sourceIdentity: fingerprint.sourceCommit }),
     deploymentRuntime: plane.router,
   }).start("exercise real orchestrator telemetry rollback");
   await plane.router.drain();

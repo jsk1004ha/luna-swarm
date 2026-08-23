@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "amends": "preregistration.v5.json",
+  "createdAt": "2026-08-17T13:31:00.000Z",
+  "reason": "The frozen scorer failed before reading any candidate result because Node on Windows could not spawn the npx shim with shell:false. The command now invokes the already-installed TypeScript CLI through the current Node executable. Score weights, hidden tests, candidate inputs, and gate semantics are unchanged.",
+  "oldScoreHash": "sha256:ebcd7ce2417420016ac2b932e9c69236e6f2167da0850dcd26dfc64bd4682a0b",
+  "newScoreHash": "sha256:a16c9af4bdf5bfb07322f2a84d1274364ad652492e59a5feb4304da27f4aff8d",
+  "affectedModelRuns": [],
+  "interpretation": "Infrastructure-only scorer launcher correction made before the first score was produced."
+}

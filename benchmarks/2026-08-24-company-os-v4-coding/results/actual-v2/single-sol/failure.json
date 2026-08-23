@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 2,
+  "comparisonId": "actual-v2",
+  "arm": "single-sol",
+  "startedAt": "2026-08-23T19:02:31.746Z",
+  "completedAttempts": 0,
+  "message": "single-sol changed paths outside preregistered scope: []"
+}

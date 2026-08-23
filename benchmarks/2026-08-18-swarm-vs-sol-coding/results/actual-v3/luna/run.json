@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "comparisonId": "actual-v3",
+  "arm": "luna",
+  "system": "actual-luna-swarm-coding",
+  "model": "gpt-5.6-luna",
+  "baseCommit": "b8db554d6952f42f2e82758eaa00cae21f754302",
+  "candidateRef": "refs/heads/luna-candidate",
+  "candidateCommit": "5f697729ef336beb73f74c4389ec9685f569e431",
+  "startedAt": "2026-08-17T19:26:07.508Z",
+  "wallMs": 896903,
+  "exitCode": 0,
+  "timedOut": false,
+  "missionSha256": "sha256:53a44c209f220651c0558e438eec0414aecdbe131aea4ca058dcf28f20a6674e",
+  "hiddenSuiteSha256": "sha256:052e5cb5dcd4b8ac67348089581d53260ea1174a567a591e29cf45df82141ece",
+  "patchSha256": "sha256:11114e32a62da1751fb2c64b151aa9a389dae917d60c297170a7dcce3d506336",
+  "sourceSha256": "sha256:6c8a5793f991296527e6c157fe77f249f289ded169f05459120abfd743862b56",
+  "changedPaths": [
+    "src/task-pool.mjs"
+  ],
+  "qualityEvaluated": false,
+  "promotionEligible": false,
+  "isolation": "host-brokered-read-only-swarm-plus-permission-process-manifest-pipeline",
+  "metrics": {
+    "modelCalls": 13,
+    "retries": 0,
+    "rateLimitEvents": 0,
+    "maxActiveCalls": 3,
+    "tokenUsage": {
+      "totalTokens": 596745,
+      "inputTokens": 538694,
+      "cachedInputTokens": 116736,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 58051,
+      "reasoningOutputTokens": 39567
+    },
+    "tokenMeteredCalls": 13,
+    "tokenUnmeteredCalls": 0,
+    "tokenUsageComplete": true,
+    "callBreakdown": []
+  }
+}

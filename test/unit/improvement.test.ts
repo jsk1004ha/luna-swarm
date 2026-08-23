@@ -61,7 +61,7 @@ test("legacy policy experiments remain inspectable but never alter runtime routi
       prompt: "Implement and verify the requested change.",
       reasoningEffort: "medium",
     });
-    assert.equal(applied.policyVersion, "luna-harness-v2");
+    assert.equal(applied.policyVersion, "luna-harness-v3-adversarial");
     assert.equal(applied.selectionReasons.some((reason) => reason.startsWith("learning-policy:")), false);
     assert.equal(harness.state().learningPolicyVersion, promoted.update.activeVersion);
     const persisted = await readFile(join(workspace, ".state", "learning", "policy.json"), "utf8");

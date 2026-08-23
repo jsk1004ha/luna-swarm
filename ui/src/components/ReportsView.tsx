@@ -3,6 +3,7 @@ import {
   Building2,
   CheckCircle2,
   ClipboardCheck,
+  Download,
   FileText,
   Gavel,
   Link2,
@@ -14,8 +15,10 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type MouseEvent, type RefObject } from "react";
 import { DEPARTMENT_META } from "../data/mock";
+import { artifactDownloadUrl } from "../api/client";
 import { useCompanyStore } from "../store/companyStore";
-import type { CompanyReport, DepartmentId, ReportKind, ReportStatus } from "../types";
+import type { CompanyReport, DepartmentId, GeneratedFile, ReportKind, ReportStatus } from "../types";
+import { ReportCenterDashboard } from "./ReportCenterDashboard";
 
 type ReportSort = "latest" | "kind";
 
@@ -115,6 +118,8 @@ export function ReportsView() {
 
     {snapshot?.run.isStale && <div className="reports-stale" role="status"><AlertTriangle size={14} /><span>연결이 오래되어 마지막 정상 문서 목록을 표시합니다.</span></div>}
 
+    <ReportCenterDashboard center={snapshot?.reportCenter} runId={snapshot?.run.id} />
+
     <div className="report-summary-grid" aria-label="보고서 요약">
       <ReportMetric label="전체 문서" value={counts.total} detail="현재 실행" tone="neutral" />
       <ReportMetric label="최종·승인" value={counts.approved} detail="공유 가능" tone="good" />
@@ -136,7 +141,7 @@ export function ReportsView() {
       {filtered.length > 0 ? <ReportTable reports={filtered} onOpen={openReport} stale={Boolean(snapshot?.run.isStale)} /> : reports.length > 0 ? <ReportEmpty filtered onReset={resetFilters} /> : <ReportEmpty />}
     </div>
 
-    {selected && <><button type="button" className="drawer-scrim" aria-label="보고서 닫기" onClick={closeReport} /><ReportDrawer report={selected} onClose={closeReport} drawerRef={drawerRef} /></>}
+    {selected && <><button type="button" className="drawer-scrim" aria-label="보고서 닫기" onClick={closeReport} /><ReportDrawer report={selected} runId={snapshot?.run.id ?? ""} onClose={closeReport} drawerRef={drawerRef} /></>}
   </section>;
 }
 
@@ -166,8 +171,9 @@ export function ReportTable({ reports, onOpen, stale = false }: {
   </table></div>;
 }
 
-function ReportDrawer({ report, onClose, drawerRef }: {
+function ReportDrawer({ report, runId, onClose, drawerRef }: {
   report: CompanyReport;
+  runId: string;
   onClose: () => void;
   drawerRef: RefObject<HTMLElement | null>;
 }) {
@@ -183,9 +189,14 @@ function ReportDrawer({ report, onClose, drawerRef }: {
     <section className="report-drawer-title"><span className="report-type-icon"><Icon size={18} /></span><div><small>{reportKindLabel(report.kind)} · {report.id}</small><h3>{report.title}</h3><span className={`report-status status-${report.status}`}>{reportStatusLabel(report.status)}</span></div></section>
     <section className="report-drawer-summary"><p>{report.summary}</p><dl><div><dt>작성 주체</dt><dd>{report.authorIds.join(", ") || "시스템"}</dd></div><div><dt>관련 업무</dt><dd>{report.taskId ?? report.teamId ?? "전사"}</dd></div><div><dt>발행 시각</dt><dd>{formatDate(report.updatedAt ?? report.createdAt)}</dd></div></dl></section>
     <div className="report-drawer-sections">{report.sections.map((section) => <section key={`${report.id}:${section.title}`}><h4>{section.title}</h4>{section.items.length > 0 ? <ul>{section.items.map((item, index) => <li key={`${section.title}:${index}`}><CheckCircle2 size={12} />{item}</li>)}</ul> : <p>기록된 항목 없음</p>}</section>)}</div>
+    {runId && report.generatedFiles && report.generatedFiles.length > 0 && <GeneratedFileList runId={runId} files={report.generatedFiles} />}
     <section className="report-reference-block"><h4><Link2 size={13} />감사 참조</h4>{referenceGroups.map(([label, values]) => <div key={label}><b>{label}</b>{values.length ? <span>{values.map((value) => <code key={value}>{value}</code>)}</span> : <small>기록 없음</small>}</div>)}</section>
     <footer className="report-drawer-footer"><UserRound size={13} /><span>원시 프롬프트와 비공개 회의 메모는 이 읽기 전용 보고서에 포함되지 않습니다.</span></footer>
   </aside>;
+}
+
+export function GeneratedFileList({ runId, files }: { runId: string; files: readonly GeneratedFile[] }) {
+  return <section className="report-generated-files"><h4><Download size={13} />생성 파일</h4><ul>{files.map((file) => <li key={file.id}><span><b>{file.fileName}</b><small>{file.format.toUpperCase()} · {formatBytes(file.bytes)} · SHA-256 {file.sha256.slice(0, 12)}…</small></span><a href={artifactDownloadUrl(runId, file)} download={file.fileName}><Download size={12} />다운로드</a></li>)}</ul></section>;
 }
 
 function ReportEmpty({ filtered = false, onReset }: { filtered?: boolean; onReset?: () => void }) {
@@ -258,4 +269,10 @@ function formatDate(value?: string): string {
   if (!value) return "시간 미상";
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("ko-KR", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }

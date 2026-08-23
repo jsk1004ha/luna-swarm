@@ -26,6 +26,15 @@
   "rateLimitCooldownMs": 30000,
   "schedulerAgingMs": 5000,
   "allowNetwork": false,
+  "webResearch": {
+    "enabled": true,
+    "allowedOrigins": ["*"],
+    "maxCallsPerSession": 12,
+    "maxRedirects": 4,
+    "maxResponseBytes": 262144,
+    "maxDeadlineMs": 30000,
+    "allowedMimeTypes": ["text/html", "text/plain", "application/json"]
+  },
   "ephemeralThreads": true,
   "stateDirectory": ".luna-swarm",
   "storageMaintenance": {
@@ -41,6 +50,12 @@
   "harnessEnabled": true,
   "maxSkillsPerCall": 3,
   "maxSkillChars": 6000,
+  "skillPortfolio": {
+    "enabled": true,
+    "maxUniquePerTask": 8,
+    "maxPerAgent": 2,
+    "maxInstructionCharsPerAgent": 4000
+  },
   "learningEnabled": true,
   "learningAutoApply": false,
   "maxMemoriesPerCall": 4,
