@@ -47,7 +47,7 @@
     "@openai/codex-sdk": "0.147.0",
     "@resvg/resvg-js": "2.6.2",
     "pdfkit": "0.19.1",
-    "typescript": "^5.9.0",
+    "typescript": "^7.0.2",
     "ws": "8.21.3",
     "zod": "4.4.3"
   },
