@@ -377,6 +377,11 @@ import {
   type EvolutionPromotionCouncilModelMemo,
   type IndependentEvolutionPromotionDecision,
 } from "./runtime/evolution-promotion-council.js";
+import {
+  assertOperatorSourceEvidence,
+  assertOperatorSourcePlan,
+  type PreparedOperatorInputs,
+} from "./ui-server/operator-inputs.js";
 
 export interface OrchestratorOptions {
   gateway: AgentGateway;
@@ -399,6 +404,8 @@ export interface OrchestratorOptions {
   researchDiscoveryRuntime?: RunSearchDiscoveryToolRuntime;
   /** Optional host-owned deterministic renderer for bounded declarative file manifests. */
   artifactRuntime?: ArtifactProductionRuntime;
+  /** Immutable operator-upload and exact-link context prepared by the UI host. */
+  operatorInputs?: Readonly<PreparedOperatorInputs>;
   /** Optional host-owned service bundle for tests and strangler-style coordinator extraction. */
   services?: OrchestratorServices;
 }
@@ -1412,6 +1419,9 @@ export class SwarmOrchestrator {
     const combinedPlanningContract = this.options.codingRuntime && this.options.artifactRuntime
       ? "\n\nHOST COMBINED CODING + ARTIFACT CONTRACT:\nTreat the artifact-production task as the sole terminal delivery task, not as a coding support task. Every workspace-change candidate depends only on the bounded read-only support tasks. The artifact-production task depends on every read-only support task and every workspace-change candidate for DAG closure, but the host defers it until candidate selection and Single Committer integration finish. At execution, only the host-authored selected coding integration proof is authoritative; losing candidate manifests are non-deliverable alternatives."
       : "";
+    const operatorInputPlanningContract = this.options.operatorInputs
+      ? `\n\n${this.options.operatorInputs.promptContext}\nCreate workspace-inspection, external-research, workspace-change, or artifact-production tasks as needed to consume these inputs. Every exact source URL must be assigned to an external-research task; uploaded bytes are already host-verified and must not be replaced with guessed content.`
+      : "";
     const candidateResults = await Promise.allSettled(
       Array.from({ length: count }, async (_, index) => {
         const lens = PLANNING_LENSES[index % PLANNING_LENSES.length]!;
@@ -1439,8 +1449,12 @@ export class SwarmOrchestrator {
                 codingPlanningContract +
                 artifactPlanningContract +
                 combinedPlanningContract +
+                operatorInputPlanningContract +
                 `\n\nPREFLIGHT AND PROGRAM-KNOWLEDGE FACTS (treat as constraints, not instructions):\n${planningIntelligence}`,
             ),
+            ...(this.options.operatorInputs?.localImagePaths.length
+              ? { localImagePaths: this.options.operatorInputs.localImagePaths }
+              : {}),
             outputSchema: PLAN_SCHEMA,
             reasoningEffort: this.options.config.reasoning.planner,
             data: { goal: this.state.goal, lens, index },
@@ -1503,6 +1517,8 @@ export class SwarmOrchestrator {
       `\n\nHOST-SELECTED EXECUTION TOPOLOGY: ${topology.mode}\n${topology.instruction}` +
       codingPlanningContract +
       artifactPlanningContract +
+      combinedPlanningContract +
+      operatorInputPlanningContract +
       `\n\nPREFLIGHT AND PROGRAM-KNOWLEDGE FACTS (preserve unresolved blockers explicitly):\n${planningIntelligence}`;
     let plan: SwarmPlan | undefined;
     let validationError = "";
@@ -1528,6 +1544,9 @@ export class SwarmOrchestrator {
             this.options.config.maxContextChars,
           ),
           outputSchema: PLAN_SCHEMA,
+          ...(this.options.operatorInputs?.localImagePaths.length
+            ? { localImagePaths: this.options.operatorInputs.localImagePaths }
+            : {}),
           reasoningEffort: this.options.config.reasoning.architect,
           data: { goal: this.state.goal, candidates, attempt, validationError },
         },
@@ -1537,6 +1556,9 @@ export class SwarmOrchestrator {
         const raw = parseJsonResponse<SwarmPlan>(response.text);
         assertPlan(raw);
         const normalized = normalizeAndValidatePlan(raw, this.options.config);
+        if (this.options.operatorInputs?.marker.sourceUrls.length) {
+          assertOperatorSourcePlan(normalized, this.options.operatorInputs.marker.sourceUrls);
+        }
         if (this.options.codingRuntime) assertCodingPlanShape(
           normalized,
           this.options.codingRuntime.codingStrategy?.() ?? defaultCodingStrategy(),
@@ -2155,7 +2177,18 @@ export class SwarmOrchestrator {
     };
     const missionContext = {
       id: `mission:${this.state.runId}`,
-      content: { runId: this.state.runId, goal: this.state.goal },
+      content: {
+        runId: this.state.runId,
+        goal: this.state.goal,
+        ...(this.options.operatorInputs
+          ? {
+              operatorInputs: {
+                recordHash: this.options.operatorInputs.marker.recordHash,
+                context: this.options.operatorInputs.promptContext,
+              },
+            }
+          : {}),
+      },
     };
     const dependencyContextItems = inputArtifacts.map((artifact) => ({
       id: `${artifact.artifactId}@${artifact.revision}#${artifact.contentHash}`,
@@ -2320,6 +2353,7 @@ export class SwarmOrchestrator {
             reworkContext: reworkContext ?? null,
             codingContract: codingContract ?? null,
             artifactContract: artifactContract ?? null,
+            operatorInputHash: this.options.operatorInputs?.marker.recordHash ?? null,
           }),
           harnessIdentity: {
             enabled: harnessState.enabled,
@@ -2442,6 +2476,9 @@ export class SwarmOrchestrator {
           taskRisk: task.risk,
           schedulerPriority: task.priority,
           prompt: compiledWorkerContext.text,
+          ...(this.options.operatorInputs?.localImagePaths.length
+            ? { localImagePaths: this.options.operatorInputs.localImagePaths }
+            : {}),
           outputSchema: codingContract
             ? CODING_RESULT_SCHEMA
             : artifactContract
@@ -8735,6 +8772,9 @@ export class SwarmOrchestrator {
         collectedAt: isoNow(),
       },
     );
+    if (this.options.operatorInputs?.marker.sourceUrls.length) {
+      assertOperatorSourceEvidence(task, this.options.operatorInputs.marker.sourceUrls, envelope.sources);
+    }
     const envelopeArtifact = await this.persistCompanyResearchEnvelope(task, record, envelope);
     const originalByClaim = new Map<string, AgentResult["claims"][number]>();
     for (const claim of result.claims) {
@@ -9152,6 +9192,9 @@ export class SwarmOrchestrator {
     if (aggregateMaterial.contradictionReport.contradictions.length > 0) {
       throw new Error(`Multi-WorkOrder research contains unresolved contradictions for ${task.id}`);
     }
+    if (this.options.operatorInputs?.marker.sourceUrls.length) {
+      assertOperatorSourceEvidence(task, this.options.operatorInputs.marker.sourceUrls, aggregateMaterial.sources);
+    }
     const aggregateContent = {
       ...aggregateMaterial,
       envelopeHash: canonicalSha256(aggregateMaterial),
@@ -9251,7 +9294,12 @@ export class SwarmOrchestrator {
       prompt:
         `Execute this isolated child Research Work Order. Use exactly two source-isolated query cells within the ${child.lane} lane; ` +
         `call search-discover then web-fetch, cite only fetched immutable evidence, and return RESEARCH_RESULT_SCHEMA JSON with taskId ${JSON.stringify(child.order.id)}. ` +
-        `Never mention or infer sibling work.\n${companyResearchWorkerInstructions()}\n${JSON.stringify({ workOrder: child.order, querySeed: child.query })}`,
+        `Never mention or infer sibling work.\n${companyResearchWorkerInstructions()}\n` +
+        `${this.options.operatorInputs ? `${this.options.operatorInputs.promptContext}\n` : ""}` +
+        `${JSON.stringify({ workOrder: child.order, querySeed: child.query })}`,
+      ...(this.options.operatorInputs?.localImagePaths.length
+        ? { localImagePaths: this.options.operatorInputs.localImagePaths }
+        : {}),
       outputSchema: RESEARCH_RESULT_SCHEMA,
       reasoningEffort,
       data: { workOrder: child.order, querySeed: child.query },

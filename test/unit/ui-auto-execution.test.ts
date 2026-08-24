@@ -54,6 +54,10 @@ test("classifies an English analysis-only request as standard execution", () => 
 
 test("records host-mediated internet authority only when the natural-language goal requests it", () => {
   assert.deepEqual(
+    classifyUiExecutionGoal("https://example.com/reference 내용을 읽고 요약해줘"),
+    expected("standard", ["external-network"]),
+  );
+  assert.deepEqual(
     classifyUiExecutionGoal("인터넷에서 타 AI 에이전트의 최신 공식 자료를 조사해줘"),
     expected("standard", ["external-network"]),
   );
@@ -414,6 +418,28 @@ test("durably replays a UI request id across process-local gate loss and rejects
     }),
     (error: unknown) => error instanceof UiRequestConflictError && error.code === "IDEMPOTENCY_CONFLICT",
   );
+});
+
+test("UI start schema accepts only request-bound unique upload IDs", () => {
+  const requestId = "11111111-1111-4111-8111-111111111111";
+  const uploadId = "upload-22222222-2222-4222-8222-222222222222";
+  assert.equal(uiControlCommandSchema.safeParse({
+    action: "start",
+    goal: "첨부 파일을 읽고 보고서를 작성해줘",
+    requestId,
+    attachmentIds: [uploadId],
+  }).success, true);
+  assert.equal(uiControlCommandSchema.safeParse({
+    action: "start",
+    goal: "첨부 파일을 읽어줘",
+    attachmentIds: [uploadId],
+  }).success, false);
+  assert.equal(uiControlCommandSchema.safeParse({
+    action: "start",
+    goal: "첨부 파일을 읽어줘",
+    requestId,
+    attachmentIds: [uploadId, uploadId],
+  }).success, false);
 });
 
 async function cleanCodingRepository(t: { after(callback: () => Promise<void>): void }): Promise<string> {

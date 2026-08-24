@@ -2,8 +2,8 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, lstat, open, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { access, lstat, open, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { MockAgentBackend } from "./backend/mock-backend.js";
@@ -41,6 +41,13 @@ import {
   ExecutionController,
 } from "./controls/index.js";
 import { UiRuntimeRegistry, type ManagedRunRuntime } from "./ui-server/runtime-registry.js";
+import { UiInputStore, UiInputStoreError } from "./ui-server/input-store.js";
+import {
+  OperatorInputError,
+  prepareOperatorInputs,
+  restoreOperatorInputs,
+  type PreparedOperatorInputs,
+} from "./ui-server/operator-inputs.js";
 import { UiObservationCoordinator } from "./ui-server/observation-coordinator.js";
 import { MockUiRuntime } from "./ui-server/mock-runtime.js";
 import {
@@ -155,6 +162,7 @@ async function ui(args: string[]): Promise<void> {
   const assetsDirectory = await locateUiAssets();
   const hub = new UiEventHub({ maxEventsPerRun: 10_000 });
   const registry = new UiRuntimeRegistry();
+  const inputStore = await UiInputStore.create(workspace);
   const mockRuntime = mock ? new MockUiRuntime(hub) : undefined;
   const observer = mock
     ? undefined
@@ -207,6 +215,7 @@ async function ui(args: string[]): Promise<void> {
         workspace,
         runId,
         model: runConfig.model,
+        webResearchEnabled: runConfig.webResearch.enabled,
       });
     } catch (error) {
       const code = error instanceof UiAutoExecutionError ? error.code : "AUTO_EXECUTION_PREPARE_FAILED";
@@ -218,13 +227,51 @@ async function ui(args: string[]): Promise<void> {
       };
     }
     const store = new AtomicRunStore(workspace, runConfig.stateDirectory, runId);
+    let operatorInputs: Readonly<PreparedOperatorInputs> | undefined;
+    let runReserved = false;
     try {
       await store.create();
-      await persistUiAutoRunMarkers(store, command.goal, runConfig.model, command.mock === true, prepared);
+      runReserved = true;
+      const uploads = command.attachmentIds?.length
+        ? await inputStore.resolve(command.requestId!, command.attachmentIds)
+        : [];
+      operatorInputs = await prepareOperatorInputs({
+        runDirectory: store.runDirectory,
+        requestId: command.requestId ?? randomUUID(),
+        uploads,
+        sourceUrls: prepared.sourceUrls,
+        maxContextChars: runConfig.maxContextChars,
+      });
+      await persistUiAutoRunMarkers(
+        store,
+        command.goal,
+        runConfig.model,
+        command.mock === true,
+        prepared,
+        operatorInputs,
+      );
       await activatePreparedUiExecution(workspace, prepared);
     } catch (error) {
+      if (runReserved) {
+        try {
+          await discardUninitializedUiRun(store);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            `Run ${runId} 입력 준비 실패 후 생성 중인 실행 폴더도 안전하게 정리하지 못했습니다.`,
+          );
+        }
+      }
       if (error instanceof RunIdExistsError) {
         return { accepted: false, runId, code: error.code, message: error.message };
+      }
+      if (error instanceof UiInputStoreError || error instanceof OperatorInputError) {
+        return {
+          accepted: false,
+          runId,
+          code: error.code,
+          message: `입력 파일 또는 링크를 준비하지 못했습니다: ${error.message}`,
+        };
       }
       throw error;
     }
@@ -244,6 +291,7 @@ async function ui(args: string[]): Promise<void> {
       mock: command.mock === true,
       ...(prepared.codingPolicy ? { codingPolicy: prepared.codingPolicy } : {}),
       ...(prepared.artifactPolicy ? { artifactPolicy: prepared.artifactPolicy } : {}),
+      ...(operatorInputs ? { operatorInputs } : {}),
       releaseExecutionLease,
       onRuntimeReady: async (runtime) => {
         const goalSummary = command.goal.length > 240
@@ -260,6 +308,11 @@ async function ui(args: string[]): Promise<void> {
         printEvent(startEvent);
         registry.register(runtime);
         runtimeRegistered = true;
+        if (command.requestId && command.attachmentIds?.length) {
+          await inputStore.consume(command.requestId).catch((error: unknown) => {
+            process.stderr.write(`[ui-input-cleanup ${runId}] ${error instanceof Error ? error.message : String(error)}\n`);
+          });
+        }
         resolveReady();
       },
       onRuntimeDisposed: (runtime) => registry.unregister(runtime.runId, runtime),
@@ -302,6 +355,7 @@ async function ui(args: string[]): Promise<void> {
       mock: command.mock === true,
       maxConcurrency,
       model: config.model,
+      ...(command.attachmentIds ? { attachmentIds: command.attachmentIds } : {}),
     });
     const reserve = async (): Promise<UiControlResult> => {
       let runId: string | undefined;
@@ -318,15 +372,62 @@ async function ui(args: string[]): Promise<void> {
             const replayStore = new AtomicRunStore(workspace, config.stateDirectory, runId);
             try {
               await access(replayStore.runDirectory);
-              return {
-                accepted: true,
-                runId,
-                code: "REQUEST_REPLAY",
-                message: "동일한 시작 요청의 기존 Luna 실행을 반환했습니다.",
-              };
             } catch {
               // A durable reservation without a run directory is a recoverable
               // pre-start crash; continue with the original runId.
+              return startReservedRun(command, runId);
+            }
+            try {
+              await access(replayStore.statePath);
+            } catch {
+              // The process stopped after reserving the run directory but before
+              // state initialization. Remove only this exact uninitialized run
+              // and rebuild it with the original idempotency identity.
+              await discardUninitializedUiRun(replayStore);
+              return startReservedRun(command, runId);
+            }
+            try {
+              const restored = await loadResumeContext(workspace, config.stateDirectory, runId, {}, true);
+              if (["failed", "cancelled"].includes(restored.state.status)) {
+                return {
+                  accepted: false,
+                  runId,
+                  code: "REQUEST_REPLAY_FAILED",
+                  state: { status: restored.state.status },
+                  message: `동일한 시작 요청의 기존 실행은 ${restored.state.status} 상태입니다: ${runId}`,
+                };
+              }
+              if (["completed", "partial"].includes(restored.state.status)) {
+                startGate.release();
+                return {
+                  accepted: true,
+                  runId,
+                  code: "REQUEST_REPLAY_TERMINAL",
+                  state: { status: restored.state.status },
+                  message: `동일한 시작 요청의 완료된 Luna 실행 결과를 반환했습니다 (${restored.state.status}).`,
+                };
+              }
+              if (registry.isOwned(runId)) {
+                startGate.release();
+                return {
+                  accepted: true,
+                  runId,
+                  code: "REQUEST_REPLAY_ACTIVE",
+                  state: { status: restored.state.status },
+                  message: "동일한 시작 요청의 현재 실행을 반환했습니다.",
+                };
+              }
+              return resumeVerifiedUiRun(restored, {
+                successCode: "REQUEST_REPLAY_RECOVERED",
+                successMessage: "동일한 시작 요청의 중단된 Luna 실행을 검증된 marker에서 복구했습니다.",
+              });
+            } catch (error) {
+              return {
+                accepted: false,
+                runId,
+                code: "REQUEST_REPLAY_INVALID",
+                message: `동일한 시작 요청의 실행 기록을 검증하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+              };
             }
           }
         } catch (error) {
@@ -355,6 +456,92 @@ async function ui(args: string[]): Promise<void> {
     );
   };
 
+  async function resumeVerifiedUiRun(
+    restored: Readonly<ResumeContext>,
+    success: Readonly<{ successCode?: string; successMessage: string }> = {
+      successMessage: "중단된 Web UI 자동 실행을 immutable marker에서 복구했습니다.",
+    },
+  ): Promise<UiControlResult> {
+    const runId = restored.state.runId;
+    if (!restored.autoSnapshot) {
+      return {
+        accepted: false,
+        runId,
+        code: "EXTERNAL_READ_ONLY",
+        message: "Web UI 자동 실행 marker가 없는 실행은 이 UI에서 인수할 수 없습니다.",
+      };
+    }
+    if (!await isStaleRun(restored.state, restored.store)) {
+      return {
+        accepted: false,
+        runId,
+        code: "RUN_STILL_ACTIVE",
+        message: "이 실행은 아직 최신 heartbeat를 가지고 있어 인수할 수 없습니다.",
+      };
+    }
+    let releaseExecutionLease: () => Promise<void>;
+    try {
+      releaseExecutionLease = await restored.store.acquireExecutionLease();
+    } catch (error) {
+      if (error instanceof RunExecutionLockedError) {
+        return { accepted: false, runId, code: "RUN_EXECUTION_LOCKED", message: error.message };
+      }
+      throw error;
+    }
+    let resolveReady!: () => void;
+    let rejectReady!: (error: unknown) => void;
+    const ready = new Promise<void>((resolveRuntime, rejectRuntime) => {
+      resolveReady = resolveRuntime;
+      rejectReady = rejectRuntime;
+    });
+    let runtimeRegistered = false;
+    const execution = launch({
+      goal: restored.state.goal,
+      workspace,
+      config: restored.config,
+      store: restored.store,
+      mock: restored.autoSnapshot.mock === true,
+      loaded: restored.state,
+      releaseExecutionLease,
+      ...(restored.codingSnapshot ? { codingPolicy: restored.codingSnapshot.policy, allowPreparedCodingRecovery: true } : {}),
+      ...(restored.artifactSnapshot ? { artifactPolicy: restored.artifactSnapshot.policy } : {}),
+      ...(restored.operatorInputs ? { operatorInputs: restored.operatorInputs } : {}),
+      onRuntimeReady: (runtime) => {
+        registry.register(runtime);
+        runtimeRegistered = true;
+        resolveReady();
+      },
+      onRuntimeDisposed: (runtime) => registry.unregister(runtime.runId, runtime),
+    });
+    activeRun = execution;
+    void execution
+      .catch((error: unknown) => {
+        if (!runtimeRegistered) rejectReady(error);
+        process.stderr.write(`[ui-recover ${runId}] ${error instanceof Error ? error.message : String(error)}\n`);
+      })
+      .finally(() => {
+        if (activeRun === execution) activeRun = null;
+        startGate.release();
+        void observer?.poll().catch(() => undefined);
+      });
+    try {
+      await ready;
+    } catch (error) {
+      return {
+        accepted: false,
+        runId,
+        code: "RUN_RECOVERY_FAILED",
+        message: `실행 복구를 시작하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    return {
+      accepted: true,
+      runId,
+      ...(success.successCode ? { code: success.successCode } : {}),
+      message: success.successMessage,
+    };
+  }
+
   const recoverRun = (runId: string): Promise<UiControlResult> => startGate.start(
     undefined,
     () => ({
@@ -375,77 +562,7 @@ async function ui(args: string[]): Promise<void> {
           message: `실행을 안전하게 복구하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
         };
       }
-      if (!restored.autoSnapshot) {
-        return {
-          accepted: false,
-          runId,
-          code: "EXTERNAL_READ_ONLY",
-          message: "Web UI 자동 실행 marker가 없는 실행은 이 UI에서 인수할 수 없습니다.",
-        };
-      }
-      if (!await isStaleRun(restored.state, restored.store)) {
-        return {
-          accepted: false,
-          runId,
-          code: "RUN_STILL_ACTIVE",
-          message: "이 실행은 아직 최신 heartbeat를 가지고 있어 인수할 수 없습니다.",
-        };
-      }
-      let releaseExecutionLease: () => Promise<void>;
-      try {
-        releaseExecutionLease = await restored.store.acquireExecutionLease();
-      } catch (error) {
-        if (error instanceof RunExecutionLockedError) {
-          return { accepted: false, runId, code: "RUN_EXECUTION_LOCKED", message: error.message };
-        }
-        throw error;
-      }
-      let resolveReady!: () => void;
-      let rejectReady!: (error: unknown) => void;
-      const ready = new Promise<void>((resolveRuntime, rejectRuntime) => {
-        resolveReady = resolveRuntime;
-        rejectReady = rejectRuntime;
-      });
-      let runtimeRegistered = false;
-      const execution = launch({
-        goal: restored.state.goal,
-        workspace,
-        config: restored.config,
-        store: restored.store,
-        mock: restored.autoSnapshot.mock === true,
-        loaded: restored.state,
-        releaseExecutionLease,
-        ...(restored.codingSnapshot ? { codingPolicy: restored.codingSnapshot.policy, allowPreparedCodingRecovery: true } : {}),
-        ...(restored.artifactSnapshot ? { artifactPolicy: restored.artifactSnapshot.policy } : {}),
-        onRuntimeReady: (runtime) => {
-          registry.register(runtime);
-          runtimeRegistered = true;
-          resolveReady();
-        },
-        onRuntimeDisposed: (runtime) => registry.unregister(runtime.runId, runtime),
-      });
-      activeRun = execution;
-      void execution
-        .catch((error: unknown) => {
-          if (!runtimeRegistered) rejectReady(error);
-          process.stderr.write(`[ui-recover ${runId}] ${error instanceof Error ? error.message : String(error)}\n`);
-        })
-        .finally(() => {
-          if (activeRun === execution) activeRun = null;
-          startGate.release();
-          void observer?.poll().catch(() => undefined);
-        });
-      try {
-        await ready;
-      } catch (error) {
-        return {
-          accepted: false,
-          runId,
-          code: "RUN_RECOVERY_FAILED",
-          message: `실행 복구를 시작하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-      return { accepted: true, runId, message: "중단된 Web UI 자동 실행을 immutable marker에서 복구했습니다." };
+      return resumeVerifiedUiRun(restored);
     },
   );
 
@@ -486,6 +603,24 @@ async function ui(args: string[]): Promise<void> {
       if (command.action === "recover") return recoverRun(command.runId);
       return registry.control(command);
     },
+    onUiUpload: async (upload) => {
+      try {
+        if (mockRuntime) {
+          throw new UiInputStoreError("INVALID_UPLOAD", "데모 실행은 첨부 파일을 실제 에이전트에게 전달하지 않으므로 업로드할 수 없습니다.");
+        }
+        const stored = await inputStore.put(upload);
+        return {
+          uploadId: stored.uploadId,
+          fileName: stored.fileName,
+          mimeType: stored.mimeType,
+          sizeBytes: stored.sizeBytes,
+          sha256: stored.sha256,
+        };
+      } catch (error) {
+        if (error instanceof UiInputStoreError) throw error;
+        throw new Error(`파일 업로드를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
   });
   const webSockets = attachUiEventWebSocketServer(server.server, hub, {
     requireLoopback: isLoopbackBind(host),
@@ -513,6 +648,24 @@ async function ui(args: string[]): Promise<void> {
   webSockets.close();
   await server.close();
   if (activeRun) await activeRun;
+}
+
+async function discardUninitializedUiRun(store: AtomicRunStore): Promise<void> {
+  const runInfo = await lstat(store.runDirectory);
+  if (!runInfo.isDirectory() || runInfo.isSymbolicLink()) {
+    throw new Error(`생성 중인 실행 경로가 안전한 디렉터리가 아닙니다: ${store.runDirectory}`);
+  }
+  const [runRoot, runDirectory] = await Promise.all([
+    realpath(resolve(store.runDirectory, "..")),
+    realpath(store.runDirectory),
+  ]);
+  const relativeRun = relative(runRoot, runDirectory);
+  const expectedRelative = store.runId;
+  const comparable = (value: string): string => process.platform === "win32" ? value.toLowerCase() : value;
+  if (comparable(relativeRun) !== comparable(expectedRelative) || relativeRun.startsWith("..")) {
+    throw new Error(`생성 중인 실행 경로가 runs 루트를 벗어났습니다: ${runDirectory}`);
+  }
+  await rm(runDirectory, { recursive: true, force: false, maxRetries: 3, retryDelay: 50 });
 }
 
 async function dashboard(args: string[]): Promise<void> {
@@ -974,7 +1127,7 @@ function artifactRunMarker(policy: Readonly<ArtifactProductionPolicy>): Readonly
 }
 
 interface UiAutoRunMarkerV1 {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   command: "ui-auto";
   classifierVersion: "semantic-capability-v1";
   profile: "standard" | "coding" | "artifact" | "combined";
@@ -984,6 +1137,7 @@ interface UiAutoRunMarkerV1 {
   artifactPolicyHash: `sha256:${string}` | null;
   policySources: Readonly<{ coding?: "workspace" | "automatic"; artifact?: "workspace" | "automatic" }>;
   mock?: boolean;
+  operatorInputHash?: `sha256:${string}` | null;
 }
 
 async function persistUiAutoRunMarkers(
@@ -992,6 +1146,7 @@ async function persistUiAutoRunMarkers(
   model: string,
   mock: boolean,
   prepared: Readonly<PreparedUiExecution>,
+  operatorInputs?: Readonly<PreparedOperatorInputs>,
 ): Promise<void> {
   if (prepared.codingPolicy) {
     await durableCreateText(
@@ -1007,7 +1162,7 @@ async function persistUiAutoRunMarkers(
     );
   }
   const autoMarker: UiAutoRunMarkerV1 = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     command: "ui-auto",
     classifierVersion: "semantic-capability-v1",
     profile: prepared.intent.profile,
@@ -1021,6 +1176,7 @@ async function persistUiAutoRunMarkers(
       : null,
     policySources: prepared.policySources,
     mock,
+    operatorInputHash: operatorInputs?.markerHash ?? null,
   };
   const autoText = canonicalJson(autoMarker);
   await durableCreateText(
@@ -1094,8 +1250,11 @@ async function readUiAutoRunMarker(
   const keys = Object.keys(marker).sort().join(",");
   const v1Keys = "artifactPolicyHash,classifierVersion,codingPolicyHash,command,goalHash,model,policySources,profile,schemaVersion";
   const v2Keys = "artifactPolicyHash,classifierVersion,codingPolicyHash,command,goalHash,mock,model,policySources,profile,schemaVersion";
+  const v3Keys = "artifactPolicyHash,classifierVersion,codingPolicyHash,command,goalHash,mock,model,operatorInputHash,policySources,profile,schemaVersion";
   if (
-    !((marker.schemaVersion === 1 && keys === v1Keys) || (marker.schemaVersion === 2 && keys === v2Keys)) ||
+    !((marker.schemaVersion === 1 && keys === v1Keys) ||
+      (marker.schemaVersion === 2 && keys === v2Keys) ||
+      (marker.schemaVersion === 3 && keys === v3Keys)) ||
     marker.command !== "ui-auto" ||
     marker.classifierVersion !== "semantic-capability-v1" ||
     !["standard", "coding", "artifact", "combined"].includes(String(marker.profile)) ||
@@ -1103,7 +1262,8 @@ async function readUiAutoRunMarker(
     typeof marker.model !== "string" || marker.model.length === 0 || marker.model.length > 128 ||
     !nullableHash(marker.codingPolicyHash) || !nullableHash(marker.artifactPolicyHash) ||
     !validUiPolicySources(marker.policySources) ||
-    (marker.schemaVersion === 2 && typeof marker.mock !== "boolean")
+    ((marker.schemaVersion === 2 || marker.schemaVersion === 3) && typeof marker.mock !== "boolean") ||
+    (marker.schemaVersion === 3 && !nullableHash(marker.operatorInputHash))
   ) {
     throw new Error("UI auto-run marker schema is invalid");
   }
@@ -1253,6 +1413,7 @@ async function resume(args: string[]): Promise<void> {
     loaded: restored.state,
     ...(restored.codingSnapshot ? { codingPolicy: restored.codingSnapshot.policy, allowPreparedCodingRecovery: true } : {}),
     ...(restored.artifactSnapshot ? { artifactPolicy: restored.artifactSnapshot.policy } : {}),
+    ...(restored.operatorInputs ? { operatorInputs: restored.operatorInputs } : {}),
   });
 }
 
@@ -1263,6 +1424,7 @@ interface ResumeContext {
   codingSnapshot?: Readonly<CodingRunSnapshot>;
   artifactSnapshot?: Readonly<ArtifactRunSnapshot>;
   autoSnapshot?: Readonly<UiAutoRunMarkerV1>;
+  operatorInputs?: Readonly<PreparedOperatorInputs>;
 }
 
 async function loadResumeContext(
@@ -1270,6 +1432,7 @@ async function loadResumeContext(
   stateDirectory: string,
   runId: string,
   overrides: Partial<SwarmConfig> = {},
+  allowTerminal = false,
 ): Promise<Readonly<ResumeContext>> {
   const store = new AtomicRunStore(workspace, stateDirectory, runId);
   let codingSnapshot: Readonly<CodingRunSnapshot> | undefined;
@@ -1279,6 +1442,9 @@ async function loadResumeContext(
     resolve(store.runDirectory, "auto-run.json"),
     runKind?.command === "ui-auto" ? runKind.markerHash : undefined,
   );
+  const operatorInputs = autoSnapshot?.operatorInputHash
+    ? await restoreOperatorInputs(store.runDirectory, autoSnapshot.operatorInputHash)
+    : undefined;
   if (runKind?.command === "ui-auto" && !autoSnapshot) {
     throw new Error("UI auto-run marker is missing; the run cannot be resumed safely");
   }
@@ -1341,7 +1507,7 @@ async function loadResumeContext(
       throw new Error("UI auto-run model pin does not match persisted state");
     }
   }
-  if (["completed", "partial", "failed", "cancelled"].includes(state.status)) {
+  if (!allowTerminal && ["completed", "partial", "failed", "cancelled"].includes(state.status)) {
     throw new Error(`Run ${runId} is already ${state.status} and cannot be resumed`);
   }
   const config: SwarmConfig = {
@@ -1379,6 +1545,7 @@ async function loadResumeContext(
     ...(codingSnapshot ? { codingSnapshot } : {}),
     ...(artifactSnapshot ? { artifactSnapshot } : {}),
     ...(autoSnapshot ? { autoSnapshot } : {}),
+    ...(operatorInputs ? { operatorInputs } : {}),
   });
 }
 
@@ -1396,6 +1563,7 @@ async function launch(options: {
   codingPolicy?: SwarmCodingPolicy;
   allowPreparedCodingRecovery?: boolean;
   artifactPolicy?: ArtifactProductionPolicy;
+  operatorInputs?: Readonly<PreparedOperatorInputs>;
 }): Promise<void> {
   const releaseExecutionLease = options.releaseExecutionLease
     ?? await options.store.acquireExecutionLease();
@@ -1563,6 +1731,7 @@ async function launch(options: {
       ...(artifactRuntime ? { artifactRuntime } : {}),
       ...(researchRuntime ? { researchRuntime } : {}),
       ...(researchDiscoveryRuntime ? { researchDiscoveryRuntime } : {}),
+      ...(options.operatorInputs ? { operatorInputs: options.operatorInputs } : {}),
     });
     managedRuntime = {
       runId: options.store.runId,

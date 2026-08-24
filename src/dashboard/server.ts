@@ -25,6 +25,7 @@ import {
   type UiControlCommand,
   type UiControlResult,
 } from "../ui-server/control-schema.js";
+import { UiInputStoreError } from "../ui-server/input-store.js";
 
 export interface DashboardServerOptions extends DashboardDataOptions {
   port?: number;
@@ -32,11 +33,27 @@ export interface DashboardServerOptions extends DashboardDataOptions {
   assetsDirectory?: string;
   onCommand?: (command: DashboardCommand) => Promise<DashboardCommandResult>;
   onUiControl?: (command: UiControlCommand) => Promise<UiControlResult>;
+  onUiUpload?: (upload: DashboardUiUpload) => Promise<DashboardUiUploadResult>;
   isRunOwned?: (runId: string) => boolean;
   getUiControlState?: (runId: string) => Promise<unknown>;
   listUiRuns?: () => Promise<DashboardRunSummary[]>;
   getUiSnapshot?: (runId?: string) => Promise<DashboardSnapshot>;
   accessToken?: string;
+}
+
+export interface DashboardUiUpload {
+  requestId: string;
+  fileName: string;
+  mimeType: string;
+  bytes: Buffer;
+}
+
+export interface DashboardUiUploadResult {
+  uploadId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
 }
 
 export interface DashboardCommand {
@@ -91,6 +108,9 @@ const FAVICON_SVG = `<?xml version="1.0" encoding="UTF-8"?>
   <path d="M44 49A23 23 0 1 1 44 15 18 18 0 1 0 44 49Z" fill="#6ea8ff"/>
 </svg>
 `;
+
+const MAX_UI_UPLOAD_BYTES = 16 * 1024 * 1024;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function createDashboardServer(options: DashboardServerOptions = {}): DashboardServer {
   const host = options.host ?? "127.0.0.1";
@@ -244,6 +264,21 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
         sendJson(response, result.accepted ? 202 : 409, result);
         return;
       }
+      if (url.pathname === "/api/ui/uploads") {
+        if (method !== "POST") {
+          response.setHeader("allow", "POST");
+          sendJson(response, 405, { error: "Method not allowed" });
+          return;
+        }
+        if (!options.onUiUpload) {
+          sendJson(response, 503, { error: "UI file upload is not enabled" });
+          return;
+        }
+        const upload = await readUiUpload(request, url);
+        const result = await options.onUiUpload(upload);
+        sendJson(response, 201, result);
+        return;
+      }
       if (url.pathname === "/api/commands") {
         if (method !== "POST") {
           response.setHeader("allow", "POST");
@@ -334,6 +369,12 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
           ? 403
           : error instanceof ArtifactIntegrityError
             ? 409
+          : error instanceof UiInputStoreError && (error.code === "UPLOAD_TOO_LARGE" || error.code === "UPLOAD_LIMIT")
+            ? 413
+          : error instanceof UiInputStoreError && (error.code === "UPLOAD_INTEGRITY_FAILURE" || error.code === "UPLOAD_BINDING_MISMATCH")
+            ? 409
+          : error instanceof UiInputStoreError
+            ? 400
           : error instanceof UnsafePathError || error instanceof BadRequestError
             ? 400
             : 500;
@@ -420,7 +461,7 @@ async function readCommand(request: IncomingMessage): Promise<DashboardCommand> 
   if (value.requestId !== undefined) {
     if (
       typeof value.requestId !== "string" ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.requestId)
+      !UUID_PATTERN.test(value.requestId)
     ) {
       throw new BadRequestError("requestId must be a UUID");
     }
@@ -441,6 +482,49 @@ async function readCommand(request: IncomingMessage): Promise<DashboardCommand> 
     command.maxConcurrency = value.maxConcurrency;
   }
   return command;
+}
+
+async function readUiUpload(request: IncomingMessage, url: URL): Promise<DashboardUiUpload> {
+  const requestId = url.searchParams.get("requestId");
+  if (!requestId || !UUID_PATTERN.test(requestId)) {
+    throw new BadRequestError("requestId must be a UUID");
+  }
+  const fileName = url.searchParams.get("fileName");
+  if (!fileName || fileName.includes("\0") || /[\r\n]/u.test(fileName)) {
+    throw new BadRequestError("fileName is required and must not contain control characters");
+  }
+  const declaredLength = request.headers["content-length"];
+  if (declaredLength !== undefined) {
+    if (!/^[0-9]+$/u.test(declaredLength)) {
+      throw new BadRequestError("Content-Length must be a non-negative integer");
+    }
+    const size = Number(declaredLength);
+    if (!Number.isSafeInteger(size) || size > MAX_UI_UPLOAD_BYTES) {
+      throw new BadRequestError("Upload payload is too large");
+    }
+    if (size === 0) {
+      throw new BadRequestError("Upload payload must not be empty");
+    }
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_UI_UPLOAD_BYTES) {
+      throw new BadRequestError("Upload payload is too large");
+    }
+    chunks.push(buffer);
+  }
+  if (size === 0) {
+    throw new BadRequestError("Upload payload must not be empty");
+  }
+  return {
+    requestId,
+    fileName,
+    mimeType: request.headers["content-type"] ?? "application/octet-stream",
+    bytes: Buffer.concat(chunks, size),
+  };
 }
 
 async function readUiControl(request: IncomingMessage): Promise<UiControlCommand> {

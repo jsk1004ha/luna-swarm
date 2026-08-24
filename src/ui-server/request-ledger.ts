@@ -13,6 +13,7 @@ export interface UiStartRequestIdentity {
   mock: boolean;
   maxConcurrency: number;
   model: string;
+  attachmentIds?: readonly string[];
 }
 
 export interface UiStartRequestRecordV1 {
@@ -37,6 +38,7 @@ export function uiStartRequestHash(input: Readonly<UiStartRequestIdentity>): `sh
     mock: input.mock,
     maxConcurrency: input.maxConcurrency,
     model: input.model,
+    attachmentIds: [...(input.attachmentIds ?? [])],
   }))}`;
 }
 

@@ -7,6 +7,10 @@ const requestId = z.string().regex(
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
   "requestId must be a UUID",
 );
+const uploadId = z.string().regex(
+  /^upload-[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+  "attachmentIds must contain upload UUIDs",
+);
 
 export const uiControlCommandSchema = z.discriminatedUnion("action", [
   z.object({
@@ -15,7 +19,11 @@ export const uiControlCommandSchema = z.discriminatedUnion("action", [
     mock: z.boolean().optional(),
     maxConcurrency: z.number().int().min(1).max(1_024).optional(),
     requestId: requestId.optional(),
-  }).strict(),
+    attachmentIds: z.array(uploadId).max(8).refine((ids) => new Set(ids).size === ids.length, "attachmentIds must be unique").optional(),
+  }).strict().refine(
+    (command) => !command.attachmentIds?.length || command.requestId !== undefined,
+    { message: "requestId is required when attachmentIds are present", path: ["requestId"] },
+  ),
   z.object({ action: z.literal("pause"), runId }).strict(),
   z.object({ action: z.literal("resume"), runId }).strict(),
   z.object({ action: z.literal("recover"), runId }).strict(),

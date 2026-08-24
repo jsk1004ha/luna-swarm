@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { refreshRuns, sendUiControl, type UiControlPayload } from "../api/client";
 import { companyRoster, useCompanyStore } from "../store/companyStore";
+import { createUploadRequestId, RunAttachmentPicker, useRunAttachments } from "./RunAttachments";
 
 type CommandAction = Exclude<UiControlPayload["action"], "cancel_task" | "recover">;
 
@@ -9,11 +10,7 @@ type RandomUuidSource = { randomUUID?: () => string };
 export function createStartRequestId(
   source: RandomUuidSource | null | undefined = globalThis.crypto,
 ): string | undefined {
-  try {
-    return source?.randomUUID?.();
-  } catch {
-    return undefined;
-  }
+  return createUploadRequestId(source);
 }
 
 export function CommandRail() {
@@ -24,6 +21,7 @@ export function CommandRail() {
   const [text, setText] = useState("");
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
+  const { attachments, uploading, addFiles, removeFile, clearFiles, uploadFiles } = useRunAttachments();
   const selectedAgent = companyRoster(snapshot).find((agent) => agent.id === selectedAgentId);
   const readOnly = snapshot?.observation?.readOnly ?? snapshot?.control?.readOnly ?? true;
   const mode = snapshot?.control?.mode;
@@ -52,7 +50,7 @@ export function CommandRail() {
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busy || actionBlocked || (needsText && !text.trim())) return;
+    if (busy || uploading || actionBlocked || (needsText && !text.trim())) return;
     if (effectiveAction === "priority" && !selectedAgent?.taskId) {
       setFeedback("우선순위를 변경할 업무가 있는 직원을 먼저 선택하세요.");
       return;
@@ -65,12 +63,17 @@ export function CommandRail() {
     try {
       let payload: UiControlPayload;
       if (effectiveAction === "start") {
-        const requestId = createStartRequestId();
+        setFeedback(attachments.length > 0 ? `첨부 파일 ${attachments.length}개 업로드 중` : "명령 전달 중");
+        const preparedUploads = await uploadFiles(JSON.stringify({
+          goal: text.trim(),
+          mock: snapshot?.mode === "demo",
+        }));
         payload = {
           action: effectiveAction,
           goal: text.trim(),
           mock: snapshot?.mode === "demo",
-          ...(requestId ? { requestId } : {}),
+          ...(preparedUploads.requestId ? { requestId: preparedUploads.requestId } : {}),
+          ...(preparedUploads.attachmentIds.length > 0 ? { attachmentIds: preparedUploads.attachmentIds } : {}),
         };
       }
       else {
@@ -82,6 +85,7 @@ export function CommandRail() {
       }
       const result = await sendUiControl(payload);
       setText("");
+      if (effectiveAction === "start") clearFiles();
       setFeedback(result.message);
       if (effectiveAction === "start" && result.runId) await refreshRuns(result.runId);
     } catch (error) {
@@ -105,7 +109,8 @@ export function CommandRail() {
         <option value="priority" disabled={readOnly || mode === "idle" || !selectedAgent?.taskId}>선택 업무 우선순위</option>
       </select></label>
     </div>
-    <button className="command-submit" disabled={busy || actionBlocked || (needsText && !text.trim())}>{busy ? "전달 중" : effectiveAction === "start" ? "새 실행 시작" : "명령 실행"}<kbd>↵</kbd></button>
+    {effectiveAction === "start" && <RunAttachmentPicker attachments={attachments} disabled={busy || uploading} onAddFiles={addFiles} onRemoveFile={removeFile} compact />}
+    <button className="command-submit" disabled={busy || uploading || actionBlocked || (needsText && !text.trim())}>{busy || uploading ? "전달 중" : effectiveAction === "start" ? "새 실행 시작" : "명령 실행"}<kbd>↵</kbd></button>
     <output aria-live="polite">{feedback || (readOnly ? "기존 기록 · 복구 또는 새 실행 가능" : "이 UI가 소유한 실행만 제어합니다.")}</output>
   </form>;
 }

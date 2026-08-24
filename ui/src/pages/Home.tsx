@@ -27,11 +27,12 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useRef, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { refreshRuns, sendUiControl, switchRun, type UiControlPayload } from "../api/client";
 import { DagView } from "../components/DagView";
 import { ReportsView } from "../components/ReportsView";
+import { RunAttachmentPicker, useRunAttachments } from "../components/RunAttachments";
 import { avatarInitials } from "../data/avatar";
 import { DEPARTMENT_META } from "../data/mock";
 import { agentForTask, companyRoster, eventBelongsToAgent, filteredAgents, useCompanyStore } from "../store/companyStore";
@@ -171,6 +172,8 @@ export default function Home() {
   const [drawerInstruction, setDrawerInstruction] = useState("");
   const [priority, setPriority] = useState("");
   const [busy, setBusy] = useState(false);
+  const startInFlight = useRef(false);
+  const { attachments, uploading, addFiles, removeFile, clearFiles, uploadFiles } = useRunAttachments();
 
   const activeAgent = companyRoster(snapshot).find((agent) => agent.id === selectedAgentId) ?? null;
   const activeAgentEvents = useMemo(
@@ -223,10 +226,30 @@ export default function Home() {
     event.preventDefault();
     if (effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock") {
       if (!commandText.trim()) return toast.error("새 실행 목표를 입력하세요.");
-      const result = await runControl({ action: "start", goal: commandText.trim(), mock: effectiveDirectiveAction === "start_mock", requestId: globalThis.crypto?.randomUUID?.() });
-      if (result?.runId) {
-        setDirectiveAction("instruction");
-        await refreshRuns(result.runId);
+      if (startInFlight.current) return;
+      startInFlight.current = true;
+      try {
+        if (attachments.length > 0) toast.info(`첨부 파일 ${attachments.length}개를 업로드하고 있습니다.`);
+        const preparedUploads = await uploadFiles(JSON.stringify({
+          goal: commandText.trim(),
+          mock: effectiveDirectiveAction === "start_mock",
+        }));
+        const result = await runControl({
+          action: "start",
+          goal: commandText.trim(),
+          mock: effectiveDirectiveAction === "start_mock",
+          ...(preparedUploads.requestId ? { requestId: preparedUploads.requestId } : {}),
+          ...(preparedUploads.attachmentIds.length > 0 ? { attachmentIds: preparedUploads.attachmentIds } : {}),
+        });
+        if (result?.runId) {
+          clearFiles();
+          setDirectiveAction("instruction");
+          await refreshRuns(result.runId);
+        }
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "첨부 파일을 업로드할 수 없습니다.");
+      } finally {
+        startInFlight.current = false;
       }
     } else {
       if (!snapshot || readOnly) return toast.error("현재 실행은 관찰 전용입니다.");
@@ -367,7 +390,7 @@ export default function Home() {
         </section>
         </>}
 
-        <form className="directive-bar" onSubmit={(event) => void sendDirective(event)}><div className="directive-icon"><Command size={16} /></div><div><b>Operator directive</b><span>{readOnly ? "새 목표를 입력하면 Luna Swarm 실행을 시작합니다." : "다음 안전한 체크포인트에 실제로 전달됩니다."}</span></div><div className="directive-entry"><select value={effectiveDirectiveAction} onChange={(event) => setDirectiveAction(event.target.value as DirectiveAction)}><option value="instruction" disabled={!snapshot || readOnly}>Instruction</option><option value="start">Start live run</option><option value="start_mock">Start demo run</option><option value="concurrency" disabled={!snapshot || readOnly}>Concurrency</option><option value="cancel" disabled={!snapshot || readOnly}>Cancel run</option></select><input type={effectiveDirectiveAction === "concurrency" ? "number" : "text"} value={commandText} onChange={(event) => setCommandText(event.target.value)} placeholder={effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" ? "새 실행 목표" : effectiveDirectiveAction === "concurrency" ? "동시성 값" : effectiveDirectiveAction === "cancel" ? "확인 후 Send" : "조직에 보낼 지시"} disabled={effectiveDirectiveAction === "cancel"} /></div><button disabled={busy || ((effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" || effectiveDirectiveAction === "instruction") && !commandText.trim())}><Send size={15} />{busy ? "Starting" : effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" ? "Start run" : "Send"}</button></form>
+        <form className="directive-bar" onSubmit={(event) => void sendDirective(event)}><div className="directive-icon"><Command size={16} /></div><div><b>Operator directive</b><span>{readOnly ? "새 목표를 입력하면 Luna Swarm 실행을 시작합니다." : "다음 안전한 체크포인트에 실제로 전달됩니다."}</span></div><div className="directive-entry"><select value={effectiveDirectiveAction} onChange={(event) => setDirectiveAction(event.target.value as DirectiveAction)}><option value="instruction" disabled={!snapshot || readOnly}>Instruction</option><option value="start">Start live run</option><option value="start_mock">Start demo run</option><option value="concurrency" disabled={!snapshot || readOnly}>Concurrency</option><option value="cancel" disabled={!snapshot || readOnly}>Cancel run</option></select><input type={effectiveDirectiveAction === "concurrency" ? "number" : "text"} value={commandText} onChange={(event) => setCommandText(event.target.value)} placeholder={effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" ? "새 실행 목표" : effectiveDirectiveAction === "concurrency" ? "동시성 값" : effectiveDirectiveAction === "cancel" ? "확인 후 Send" : "조직에 보낼 지시"} disabled={effectiveDirectiveAction === "cancel"} /></div>{(effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock") && <RunAttachmentPicker attachments={attachments} disabled={busy || uploading} onAddFiles={addFiles} onRemoveFile={removeFile} compact />}<button disabled={busy || uploading || ((effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" || effectiveDirectiveAction === "instruction") && !commandText.trim())}><Send size={15} />{busy || uploading ? "Starting" : effectiveDirectiveAction === "start" || effectiveDirectiveAction === "start_mock" ? "Start run" : "Send"}</button></form>
       </div>
     </main>
 

@@ -4,7 +4,7 @@ import { access, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inflateSync } from "node:zlib";
+import { inflateRawSync, inflateSync } from "node:zlib";
 import { Resvg } from "@resvg/resvg-js";
 import type { ArtifactFormat, PreviewDerivationReceipt, PreviewRendererIdentity, RenderedArtifact } from "./contracts.js";
 import { canonicalJson, sha256 } from "./receipts.js";
@@ -100,26 +100,67 @@ function decodeXml(value: string): string {
   return value.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&apos;", "'").replaceAll("&amp;", "&");
 }
 
-function readStoredZip(bytes: Buffer): Map<string, Buffer> {
+function readBoundedZip(bytes: Buffer): Map<string, Buffer> {
   if (bytes.length > MAX_ARTIFACT_BYTES) throw new Error("OOXML artifact exceeds preview renderer input limit");
-  const entries = new Map<string, Buffer>();
-  let offset = 0;
-  while (offset + 4 <= bytes.length && bytes.readUInt32LE(offset) === 0x04034b50) {
-    if (entries.size >= 128) throw new Error("OOXML package has too many entries");
-    if (offset + 30 > bytes.length) throw new Error("OOXML local header is truncated");
-    const flags = bytes.readUInt16LE(offset + 6), method = bytes.readUInt16LE(offset + 8), declaredCrc = bytes.readUInt32LE(offset + 14), compressed = bytes.readUInt32LE(offset + 18), uncompressed = bytes.readUInt32LE(offset + 22), nameLength = bytes.readUInt16LE(offset + 26), extraLength = bytes.readUInt16LE(offset + 28);
-    if ((flags & 0x0008) !== 0 || method !== 0 || compressed !== uncompressed || uncompressed > MAX_ARTIFACT_BYTES) throw new Error("OOXML preview renderer accepts only bounded stored entries");
-    const nameStart = offset + 30, dataStart = nameStart + nameLength + extraLength, dataEnd = dataStart + compressed;
-    if (dataEnd > bytes.length) throw new Error("OOXML entry exceeds package bounds");
-    const name = bytes.subarray(nameStart, nameStart + nameLength).toString("utf8");
-    if (!/^[A-Za-z0-9_[\]./-]+$/.test(name) || name.startsWith("/") || name.includes("..") || entries.has(name)) throw new Error("OOXML package contains an unsafe entry");
-    const data = Buffer.from(bytes.subarray(dataStart, dataEnd));
-    if (crc32(data) !== declaredCrc) throw new Error("OOXML entry checksum is invalid");
-    entries.set(name, data);
-    offset = dataEnd;
+  const eocd = findEndOfCentralDirectory(bytes);
+  if (eocd < 0 || eocd + 22 > bytes.length) throw new Error("OOXML package has no valid central directory");
+  const disk = bytes.readUInt16LE(eocd + 4), centralDisk = bytes.readUInt16LE(eocd + 6);
+  const diskEntries = bytes.readUInt16LE(eocd + 8), totalEntries = bytes.readUInt16LE(eocd + 10);
+  const centralSize = bytes.readUInt32LE(eocd + 12), centralOffset = bytes.readUInt32LE(eocd + 16);
+  const commentLength = bytes.readUInt16LE(eocd + 20);
+  if (disk !== 0 || centralDisk !== 0 || diskEntries !== totalEntries || totalEntries < 1 || totalEntries > 128 ||
+      eocd + 22 + commentLength !== bytes.length || centralOffset + centralSize > eocd) {
+    throw new Error("OOXML central directory is invalid or outside bounds");
   }
-  if (entries.size < 1) throw new Error("OOXML package has no readable entries");
+  const entries = new Map<string, Buffer>();
+  let totalUncompressed = 0;
+  let offset = centralOffset;
+  for (let index = 0; index < totalEntries; index += 1) {
+    if (offset + 46 > eocd || bytes.readUInt32LE(offset) !== 0x02014b50) throw new Error("OOXML central entry is truncated");
+    const flags = bytes.readUInt16LE(offset + 8), method = bytes.readUInt16LE(offset + 10);
+    const declaredCrc = bytes.readUInt32LE(offset + 16), compressed = bytes.readUInt32LE(offset + 20);
+    const uncompressed = bytes.readUInt32LE(offset + 24), nameLength = bytes.readUInt16LE(offset + 28);
+    const extraLength = bytes.readUInt16LE(offset + 30), entryCommentLength = bytes.readUInt16LE(offset + 32);
+    const localOffset = bytes.readUInt32LE(offset + 42);
+    const next = offset + 46 + nameLength + extraLength + entryCommentLength;
+    if (next > eocd || (flags & 0x0001) !== 0 || ![0, 8].includes(method) ||
+        compressed > MAX_ARTIFACT_BYTES || uncompressed > MAX_ARTIFACT_BYTES || localOffset + 30 > centralOffset) {
+      throw new Error("OOXML entry uses an unsupported or unbounded encoding");
+    }
+    const name = bytes.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+    if (!/^[A-Za-z0-9_[\]./-]+$/.test(name) || name.startsWith("/") || name.includes("..") || entries.has(name)) {
+      throw new Error("OOXML package contains an unsafe entry");
+    }
+    if (bytes.readUInt32LE(localOffset) !== 0x04034b50) throw new Error("OOXML local entry header is missing");
+    const localFlags = bytes.readUInt16LE(localOffset + 6), localMethod = bytes.readUInt16LE(localOffset + 8);
+    const localNameLength = bytes.readUInt16LE(localOffset + 26), localExtraLength = bytes.readUInt16LE(localOffset + 28);
+    const localName = bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength).toString("utf8");
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const dataEnd = dataStart + compressed;
+    if (localFlags !== flags || localMethod !== method || localName !== name || dataEnd > centralOffset) {
+      throw new Error("OOXML local and central entry metadata do not match");
+    }
+    const compressedBytes = bytes.subarray(dataStart, dataEnd);
+    const data = method === 0
+      ? Buffer.from(compressedBytes)
+      : Buffer.from(inflateRawSync(compressedBytes, { maxOutputLength: Math.min(MAX_ARTIFACT_BYTES, uncompressed + 1) }));
+    totalUncompressed += data.length;
+    if (data.length !== uncompressed || totalUncompressed > MAX_ARTIFACT_BYTES || crc32(data) !== declaredCrc) {
+      throw new Error("OOXML entry length or checksum is invalid");
+    }
+    if (!name.endsWith("/")) entries.set(name, data);
+    offset = next;
+  }
+  if (offset !== centralOffset + centralSize || entries.size < 1) throw new Error("OOXML package has no readable complete central directory");
   return entries;
+}
+
+function findEndOfCentralDirectory(bytes: Buffer): number {
+  const minimum = Math.max(0, bytes.length - 65_557);
+  for (let offset = bytes.length - 22; offset >= minimum; offset -= 1) {
+    if (bytes.readUInt32LE(offset) === 0x06054b50) return offset;
+  }
+  return -1;
 }
 
 function escapeXml(value: string): string { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"); }
@@ -131,7 +172,7 @@ function textPreview(title: string, lines: readonly string[], width = 1200, heig
 }
 
 function rasterDocx(bytes: Buffer): RasterUnit[] {
-  const entries = readStoredZip(bytes), xml = entries.get("word/document.xml")?.toString("utf8");
+  const entries = readBoundedZip(bytes), xml = entries.get("word/document.xml")?.toString("utf8");
   if (!xml) throw new Error("DOCX final bytes have no document.xml");
   const pages = xml.split(/<w:br\s+w:type="page"\s*\/>/g);
   if (pages.length > MAX_UNITS) throw new Error("DOCX page count exceeds preview bound");
@@ -142,7 +183,7 @@ function rasterDocx(bytes: Buffer): RasterUnit[] {
 }
 
 function rasterPptx(bytes: Buffer): RasterUnit[] {
-  const entries = readStoredZip(bytes), slides = [...entries.entries()].filter(([name]) => /^ppt\/slides\/slide\d+\.xml$/.test(name)).sort(([a], [b]) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]));
+  const entries = readBoundedZip(bytes), slides = [...entries.entries()].filter(([name]) => /^ppt\/slides\/slide\d+\.xml$/.test(name)).sort(([a], [b]) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]));
   if (slides.length < 1 || slides.length > MAX_UNITS) throw new Error("PPTX slide count outside preview bounds");
   return slides.map(([name, content], index) => {
     const lines = [...content.toString("utf8").matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((match) => decodeXml(match[1] ?? "")).filter(Boolean);
@@ -151,7 +192,7 @@ function rasterPptx(bytes: Buffer): RasterUnit[] {
 }
 
 function rasterXlsx(bytes: Buffer): RasterUnit[] {
-  const entries = readStoredZip(bytes), sheets = [...entries.entries()].filter(([name]) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name)).sort(([a], [b]) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]));
+  const entries = readBoundedZip(bytes), sheets = [...entries.entries()].filter(([name]) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name)).sort(([a], [b]) => Number(a.match(/\d+/)?.[0]) - Number(b.match(/\d+/)?.[0]));
   if (sheets.length < 1 || sheets.length > MAX_UNITS) throw new Error("XLSX sheet count outside preview bounds");
   return sheets.map(([name, content], index) => {
     const rows = [...content.toString("utf8").matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)].slice(0, 40).map((row) => [...row[1]!.matchAll(/<(?:t|v)(?:\s[^>]*)?>([\s\S]*?)<\/(?:t|v)>/g)].slice(0, 16).map((cell) => decodeXml(cell[1] ?? "")).join("  |  "));

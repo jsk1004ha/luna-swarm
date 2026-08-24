@@ -1088,6 +1088,131 @@ test("command endpoint validates and forwards chairman directives", async () => 
   }
 });
 
+test("UI upload endpoint forwards a bounded raw file through the trusted dashboard boundary", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-upload-"));
+  const bytes = Buffer.from("verified upload bytes\n", "utf8");
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const received: Array<{
+    requestId: string;
+    fileName: string;
+    mimeType: string;
+    bytes: Buffer;
+  }> = [];
+  const dashboard = createDashboardServer({
+    workspace,
+    demo: true,
+    port: 0,
+    onUiUpload: async (upload) => {
+      received.push(upload);
+      return {
+        uploadId: "upload-verified",
+        fileName: upload.fileName,
+        mimeType: upload.mimeType,
+        sizeBytes: upload.bytes.length,
+        sha256,
+      };
+    },
+  });
+  try {
+    const address = await dashboard.listen();
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    const fileName = "보고서 v1.pdf";
+    const accepted = await fetch(
+      `${address.url}/api/ui/uploads?requestId=${requestId}&fileName=${encodeURIComponent(fileName)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/pdf" },
+        body: bytes,
+      },
+    );
+    assert.equal(accepted.status, 201);
+    assert.equal(accepted.headers.get("cache-control"), "no-store");
+    assert.equal(accepted.headers.get("x-content-type-options"), "nosniff");
+    assert.deepEqual(await accepted.json(), {
+      uploadId: "upload-verified",
+      fileName,
+      mimeType: "application/pdf",
+      sizeBytes: bytes.length,
+      sha256,
+    });
+    assert.equal(received.length, 1);
+    assert.equal(received[0]?.requestId, requestId);
+    assert.equal(received[0]?.fileName, fileName);
+    assert.equal(received[0]?.mimeType, "application/pdf");
+    assert.deepEqual(received[0]?.bytes, bytes);
+
+    const wrongMethod = await fetch(
+      `${address.url}/api/ui/uploads?requestId=${requestId}&fileName=${encodeURIComponent(fileName)}`,
+    );
+    assert.equal(wrongMethod.status, 405);
+    assert.equal(wrongMethod.headers.get("allow"), "POST");
+  } finally {
+    await dashboard.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("UI upload endpoint rejects empty, oversized, malformed, and untrusted requests before callback", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-dashboard-upload-reject-"));
+  let calls = 0;
+  const dashboard = createDashboardServer({
+    workspace,
+    demo: true,
+    port: 0,
+    onUiUpload: async (upload) => {
+      calls += 1;
+      return {
+        uploadId: "unexpected",
+        fileName: upload.fileName,
+        mimeType: upload.mimeType,
+        sizeBytes: upload.bytes.length,
+        sha256: createHash("sha256").update(upload.bytes).digest("hex"),
+      };
+    },
+  });
+  try {
+    const address = await dashboard.listen();
+    const base = "/api/ui/uploads?requestId=11111111-1111-4111-8111-111111111111&fileName=input.txt";
+
+    const empty = await rawBinaryRequest(address.host, address.port, base, Buffer.alloc(0), {
+      "content-type": "text/plain",
+    });
+    assert.equal(empty.status, 400);
+    assert.match(empty.body, /must not be empty/i);
+
+    const oversized = await rawBinaryRequest(address.host, address.port, base, Buffer.alloc(16 * 1024 * 1024 + 1), {
+      "content-type": "application/octet-stream",
+    });
+    assert.equal(oversized.status, 400);
+    assert.match(oversized.body, /too large/i);
+
+    const missingRequestId = await rawBinaryRequest(
+      address.host,
+      address.port,
+      "/api/ui/uploads?fileName=input.txt",
+      Buffer.from("x"),
+    );
+    assert.equal(missingRequestId.status, 400);
+
+    const unsafeName = await rawBinaryRequest(
+      address.host,
+      address.port,
+      "/api/ui/uploads?requestId=11111111-1111-4111-8111-111111111111&fileName=bad%0Aname.txt",
+      Buffer.from("x"),
+    );
+    assert.equal(unsafeName.status, 400);
+
+    const untrustedOrigin = await rawBinaryRequest(address.host, address.port, base, Buffer.from("x"), {
+      origin: "https://evil.example",
+    });
+    assert.equal(untrustedOrigin.status, 403);
+    assert.equal(calls, 0);
+  } finally {
+    await dashboard.close();
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("command-enabled dashboards refuse non-loopback binds", () => {
   assert.throws(
     () => createDashboardServer({
@@ -1446,6 +1571,38 @@ function rawJsonRequest(
         "content-type": "application/json",
         ...headers,
       },
+    }, (response) => {
+      response.setEncoding("utf8");
+      let responseBody = "";
+      response.on("data", (chunk: string) => { responseBody += chunk; });
+      response.on("end", () => resolveRequest({
+        status: response.statusCode ?? 0,
+        body: responseBody,
+      }));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+function rawBinaryRequest(
+  host: string,
+  port: number,
+  path: string,
+  body: Buffer | undefined,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolveRequest, reject) => {
+    const requestHeaders = { ...headers };
+    if (requestHeaders["content-length"] === undefined) {
+      requestHeaders["content-length"] = String(body?.length ?? 0);
+    }
+    const req = request({
+      host,
+      port,
+      path,
+      method: "POST",
+      headers: requestHeaders,
     }, (response) => {
       response.setEncoding("utf8");
       let responseBody = "";

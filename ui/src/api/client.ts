@@ -9,7 +9,7 @@ let disconnectCurrent: (() => void) | null = null;
 let pendingStartControl: { key: string; promise: Promise<UiControlResponse> } | null = null;
 
 export type UiControlPayload =
-  | { action: "start"; goal: string; mock?: boolean; maxConcurrency?: number; requestId?: string }
+  | { action: "start"; goal: string; mock?: boolean; maxConcurrency?: number; requestId?: string; attachmentIds?: string[] }
   | { action: "pause" | "resume" | "recover" | "cancel"; runId: string }
   | { action: "concurrency"; runId: string; value: number }
   | { action: "instruction"; runId: string; text: string; taskId?: string; trigger?: "next_turn" | "next_retry" }
@@ -22,6 +22,14 @@ export interface UiControlResponse {
   runId?: string;
   code?: string;
   state?: unknown;
+}
+
+export interface UiUploadedFile {
+  uploadId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
 }
 
 function apiUrl(path: string): string {
@@ -79,6 +87,7 @@ export function sendUiControl(payload: UiControlPayload): Promise<UiControlRespo
     goal: payload.goal,
     mock: payload.mock === true,
     maxConcurrency: payload.maxConcurrency ?? null,
+    attachmentIds: payload.attachmentIds ?? [],
   });
   if (pendingStartControl) {
     if (pendingStartControl.key === key) return pendingStartControl.promise;
@@ -93,6 +102,42 @@ export function sendUiControl(payload: UiControlPayload): Promise<UiControlRespo
   });
   pendingStartControl = { key, promise: tracked };
   return tracked;
+}
+
+export async function uploadUiFile(requestId: string, file: File): Promise<UiUploadedFile> {
+  const query = new URLSearchParams({ requestId, fileName: file.name });
+  const response = await fetch(apiUrl(`/api/ui/uploads?${query}`), {
+    method: "POST",
+    headers: {
+      ...JSON_HEADERS,
+      "Content-Type": file.type || "application/octet-stream",
+    },
+    body: file,
+  });
+  const body = await response.json().catch(() => null) as Partial<UiUploadedFile> & { error?: unknown; message?: unknown } | null;
+  if (!response.ok) {
+    const message = typeof body?.error === "string"
+      ? body.error
+      : typeof body?.message === "string"
+        ? body.message
+        : response.statusText;
+    throw new Error(`${response.status} ${message}`);
+  }
+  if (!body
+    || typeof body.uploadId !== "string"
+    || typeof body.fileName !== "string"
+    || typeof body.mimeType !== "string"
+    || typeof body.sizeBytes !== "number"
+    || typeof body.sha256 !== "string") {
+    throw new Error("업로드 응답 형식이 올바르지 않습니다.");
+  }
+  return {
+    uploadId: body.uploadId,
+    fileName: body.fileName,
+    mimeType: body.mimeType,
+    sizeBytes: body.sizeBytes,
+    sha256: body.sha256,
+  };
 }
 
 export function artifactDownloadUrl(runId: string, file: Pick<GeneratedFile, "sha256" | "kind">): string {

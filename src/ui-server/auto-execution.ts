@@ -22,6 +22,7 @@ import {
 } from "../artifact-production/policy.js";
 import { syncDirectory } from "../evolution/registry/durable-file.js";
 import type { TaskCapability } from "../types.js";
+import { extractUiSourceUrls, OperatorInputError } from "./operator-inputs.js";
 
 const execFileAsync = promisify(execFile);
 const CLASSIFIER_VERSION = "semantic-capability-v1" as const;
@@ -44,6 +45,7 @@ export interface UiExecutionIntentV1 {
 
 export interface PreparedUiExecution {
   intent: Readonly<UiExecutionIntentV1>;
+  sourceUrls: readonly string[];
   codingPolicy?: Readonly<SwarmCodingPolicy>;
   artifactPolicy?: Readonly<ArtifactProductionPolicy>;
   policySources: Readonly<{
@@ -63,6 +65,8 @@ export class UiAutoExecutionError extends Error {
       | "AUTO_CODING_TARGET_CONFLICT"
       | "AUTO_COMMAND_VERIFICATION_UNAVAILABLE"
       | "AUTO_ARTIFACT_FONT_REQUIRED"
+      | "AUTO_INPUT_URL_INVALID"
+      | "AUTO_WEB_RESEARCH_REQUIRED"
       | "AUTO_EXECUTION_POLICY_INVALID",
     message: string,
   ) {
@@ -75,6 +79,7 @@ export class UiAutoExecutionError extends Error {
 export function classifyUiExecutionGoal(goal: string): Readonly<UiExecutionIntentV1> {
   const normalized = goal.normalize("NFKC");
   const demanded = new Set<TaskCapability>(semanticCapabilityDemandForText(normalized));
+  if (extractUiSourceUrls(normalized).length > 0) demanded.add("external-network");
   if (hasExplicitCodingRequest(normalized)) {
     demanded.add("command-execution");
     demanded.add("workspace-write");
@@ -100,8 +105,23 @@ export async function prepareUiExecution(input: Readonly<{
   workspace: string;
   runId: string;
   model: string;
+  webResearchEnabled?: boolean;
 }>): Promise<Readonly<PreparedUiExecution>> {
+  let sourceUrls: readonly string[];
+  try { sourceUrls = extractUiSourceUrls(input.goal); }
+  catch (error) {
+    if (error instanceof OperatorInputError) {
+      throw new UiAutoExecutionError("AUTO_INPUT_URL_INVALID", error.message);
+    }
+    throw error;
+  }
   const intent = classifyUiExecutionGoal(input.goal);
+  if (sourceUrls.length > 0 && input.webResearchEnabled === false) {
+    throw new UiAutoExecutionError(
+      "AUTO_WEB_RESEARCH_REQUIRED",
+      "링크를 읽으려면 config.webResearch.enabled가 true여야 합니다.",
+    );
+  }
   const demanded = new Set<TaskCapability>(semanticCapabilityDemandForText(input.goal.normalize("NFKC")));
   if (intent.profile === "standard" && demanded.has("command-execution")) {
     throw new UiAutoExecutionError(
@@ -110,7 +130,7 @@ export async function prepareUiExecution(input: Readonly<{
     );
   }
   if (intent.profile === "standard") {
-    return Object.freeze({ intent, policySources: Object.freeze({}) });
+    return Object.freeze({ intent, sourceUrls, policySources: Object.freeze({}) });
   }
   if (input.model !== "gpt-5.6-luna") {
     throw new UiAutoExecutionError(
@@ -163,6 +183,7 @@ export async function prepareUiExecution(input: Readonly<{
   }
   return Object.freeze({
     intent,
+    sourceUrls,
     ...(codingPolicy ? { codingPolicy } : {}),
     ...(artifactPolicy ? { artifactPolicy } : {}),
     policySources: Object.freeze({

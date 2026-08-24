@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { artifactDownloadUrl, connectEvents, evidenceArtifactUrl, selectBootstrapRunId, selectInitialRunId, sendUiControl } from "./client";
+import { artifactDownloadUrl, connectEvents, evidenceArtifactUrl, selectBootstrapRunId, selectInitialRunId, sendUiControl, uploadUiFile } from "./client";
 import { createMockSnapshot } from "../data/mock";
 import { useCompanyStore } from "../store/companyStore";
 import type { RunSummary } from "../types";
@@ -59,7 +59,7 @@ describe("UI start controls", () => {
     const response = new Promise<Response>((resolve) => {
       resolveResponse = resolve;
     });
-    const fetchMock = vi.fn(() => response);
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => response);
     vi.stubGlobal("window", { location: { origin: "http://127.0.0.1:4310", search: "" } });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -127,6 +127,60 @@ describe("UI start controls", () => {
       runId: "run-stale-1",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("uploads raw file bytes with a request binding and returns only the server upload reference", async () => {
+    const file = new File(["hello luna"], "notes & data.txt", { type: "text/plain" });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), "http://127.0.0.1:4310");
+      expect(url.pathname).toBe("/api/ui/uploads");
+      expect(url.searchParams.get("requestId")).toBe("11111111-1111-4111-8111-111111111111");
+      expect(url.searchParams.get("fileName")).toBe("notes & data.txt");
+      expect(url.searchParams.get("token")).toBe("local-secret");
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe(file);
+      expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("text/plain");
+      return new Response(JSON.stringify({
+        uploadId: "upload-1",
+        fileName: file.name,
+        mimeType: file.type,
+        sizeBytes: file.size,
+        sha256: "a".repeat(64),
+      }), { status: 201, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("window", { location: { origin: "http://127.0.0.1:4310", search: "?token=local-secret" } });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(uploadUiFile("11111111-1111-4111-8111-111111111111", file)).resolves.toEqual({
+      uploadId: "upload-1",
+      fileName: "notes & data.txt",
+      mimeType: "text/plain",
+      sizeBytes: 10,
+      sha256: "a".repeat(64),
+    });
+  });
+
+  it("includes attachment identity when coalescing start requests", async () => {
+    let resolveResponse!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => { resolveResponse = resolve; });
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => response);
+    vi.stubGlobal("window", { location: { origin: "http://127.0.0.1:4310", search: "" } });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = sendUiControl({ action: "start", goal: "첨부 분석", attachmentIds: ["upload-a"] });
+    const competing = sendUiControl({ action: "start", goal: "첨부 분석", attachmentIds: ["upload-b"] });
+    await expect(competing).rejects.toMatchObject({ code: "RUN_ALREADY_ACTIVE" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      action: "start",
+      goal: "첨부 분석",
+      attachmentIds: ["upload-a"],
+    });
+    resolveResponse(new Response(JSON.stringify({ accepted: true, runId: "run-files", message: "started" }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    }));
+    await expect(first).resolves.toMatchObject({ runId: "run-files" });
   });
 });
 
