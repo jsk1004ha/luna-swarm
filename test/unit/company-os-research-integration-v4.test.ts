@@ -146,6 +146,30 @@ test("Company OS research service fails closed for unsupported and contradicted 
   }), errorCode("CONTRADICTED_CLAIM_SET"));
 });
 
+test("Company OS research service rejects exactly cited subunit contradictions at the default relative tolerance", async () => {
+  const fixture = await researchFixture("Quality was 0.0001 points.", "Quality was 0.0002 points.");
+  await assert.rejects(() => serviceFor(fixture).execute({
+    queries: queries(),
+    claims: subunitClaims(fixture),
+    replaySnapshotsByCanonicalUrl: replayMap(fixture),
+  }), errorCode("CONTRADICTED_CLAIM_SET"));
+});
+
+test("Company OS research service accepts a subunit difference covered by explicit absolute tolerance", async () => {
+  const fixture = await researchFixture("Quality was 0.0001 points.", "Quality was 0.0002 points.");
+  const result = await serviceFor(fixture).execute({
+    queries: queries(),
+    claims: subunitClaims(fixture),
+    replaySnapshotsByCanonicalUrl: replayMap(fixture),
+    contradictionTolerance: { absoluteTolerance: 0.0001 },
+  });
+
+  assert.equal(result.status, "accepted");
+  assert.equal(result.contradictionReport.contradictions.length, 0);
+  assert.equal(result.contradictionReport.absoluteTolerance, 0.0001);
+  assert.deepEqual(result.citationReplay.flatMap((entry) => entry.quotes).sort(), ["0.0001 points", "0.0002 points"]);
+});
+
 test("Company OS research service rejects replay substitution and cross-cell source reuse", async () => {
   const substituted = await researchFixture();
   await assert.rejects(() => serviceFor(substituted).execute({
@@ -196,7 +220,17 @@ function claim(text: string, url: string, body: string, quote: string, value: nu
   };
 }
 
-async function researchFixture(officialBody = "공식 발표 — Quality was 94 points."): Promise<{
+function subunitClaims(fixture: { official: ResearchSnapshot; academic: ResearchSnapshot }): CompanyResearchClaimPlan[] {
+  return [
+    claim("Quality was 0.0001 points.", OFFICIAL_URL, fixture.official.bodyUtf8, "0.0001 points", 0.0001),
+    claim("Quality was 0.0002 points.", ACADEMIC_URL, fixture.academic.bodyUtf8, "0.0002 points", 0.0002),
+  ];
+}
+
+async function researchFixture(
+  officialBody = "공식 발표 — Quality was 94 points.",
+  academicBody = "Independent study baseline was 71 points.",
+): Promise<{
   runtime: RunResearchToolRuntime;
   official: Readonly<ResearchSnapshot>;
   academic: Readonly<ResearchSnapshot>;
@@ -206,7 +240,7 @@ async function researchFixture(officialBody = "공식 발표 — Quality was 94 
   await mkdir(runDirectory, { recursive: true });
   const store = new ResearchSnapshotStore(workspace, ".state/research/snapshots/sha256");
   const official = await publish(store, OFFICIAL_URL, officialBody);
-  const academic = await publish(store, ACADEMIC_URL, "Independent study baseline was 71 points.");
+  const academic = await publish(store, ACADEMIC_URL, academicBody);
   const runtime = await RunResearchToolRuntime.create({
     workspaceRoot: workspace,
     runDirectory,

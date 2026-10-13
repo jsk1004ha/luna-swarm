@@ -27,7 +27,11 @@ export interface ContradictionReport {
   readonly reportHash: Sha256;
 }
 
-/** Detects only explicitly comparable numeric claims; ambiguous pairs are deliberately ignored. */
+/**
+ * Detects only explicitly comparable numeric claims; ambiguous pairs are ignored.
+ * Relative tolerance scales with the larger magnitude, including below one.
+ * An absolute near-zero noise floor must be explicit and in the claim's unit.
+ */
 export function detectContradictions(
   graph: ClaimGraph,
   options: { readonly absoluteTolerance?: number; readonly relativeTolerance?: number } = {},
@@ -50,8 +54,8 @@ export function detectContradictions(
       const right = candidates[rightIndex];
       if (!right || left.comparisonKey !== right.comparisonKey || !sameContext(left.normalizedValue, right.normalizedValue)) continue;
       const absoluteDifference = Math.abs(left.normalizedValue.value - right.normalizedValue.value);
-      const scale = Math.max(Math.abs(left.normalizedValue.value), Math.abs(right.normalizedValue.value), 1);
-      const relativeDifference = absoluteDifference / scale;
+      const scale = Math.max(Math.abs(left.normalizedValue.value), Math.abs(right.normalizedValue.value));
+      const relativeDifference = scale === 0 ? 0 : absoluteDifference / scale;
       if (absoluteDifference <= absoluteTolerance || relativeDifference <= relativeTolerance) continue;
       const [first, second] = [left, right].sort((a, b) => a.claimId.localeCompare(b.claimId));
       if (!first || !second) continue;

@@ -17,6 +17,7 @@ import {
   createCompanyResearchCollectionSession,
   executeCompanyResearchWorkOrder,
   finalizeCompanyResearchTurn,
+  type CompanyResearchClaimPlan,
   type ResearchToolReceipt,
   type SearchDiscoveryToolReceipt,
 } from "../../src/research/index.js";
@@ -68,6 +69,54 @@ test("Research WorkOrder adapter rejects authority, budget, and capability rebin
 
 test("two-stage Research turn composes discovery and evidence tools, then finalizes receipts without refetch", async () => {
   const fixture = await fixtureFor(8);
+  const { authority, discovery, discoveryReceipts, evidenceReceipts } = await collectResearchTurn(fixture);
+
+  const finalized = await finalizeCompanyResearchTurn({ discovery, evidence: fixture.options.runtime }, {
+    authority,
+    queries: executionInput(fixture).queries,
+    claims: executionInput(fixture).claims,
+    discoveryReceipts,
+    evidenceReceipts,
+    collectedAt: fixture.options.collectedAt,
+  });
+  assert.equal(finalized.status, "accepted");
+  assert.deepEqual(finalized.citationReplay.flatMap((entry) => entry.quotes), ["Quality was 94 points."]);
+  assert.equal(finalized.sources.find((source) => source.candidate.identity.canonicalUrl === canonicalizeSourceUrl(OFFICIAL_URL))?.snapshot.finalUrl, OFFICIAL_FINAL_URL);
+
+  await assert.rejects(() => finalizeCompanyResearchTurn({ discovery, evidence: fixture.options.runtime }, {
+    authority, queries: executionInput(fixture).queries, claims: executionInput(fixture).claims,
+    discoveryReceipts: [{ ...discoveryReceipts[0]!, candidateSetHash: canonicalSha256("tampered") }, discoveryReceipts[1]!],
+    evidenceReceipts, collectedAt: fixture.options.collectedAt,
+  }), errorCode("RESEARCH_AUTHORITY_MISMATCH"));
+});
+
+test("two-stage Research finalization rejects exactly cited subunit contradictions at the default relative tolerance", async () => {
+  const fixture = await fixtureFor(8, "Quality was 0.0001 points.", "Quality was 0.0002 points.");
+  const { authority, discovery, discoveryReceipts, evidenceReceipts } = await collectResearchTurn(fixture);
+
+  await assert.rejects(() => finalizeCompanyResearchTurn({ discovery, evidence: fixture.options.runtime }, {
+    authority, queries: executionInput(fixture).queries, claims: subunitClaims(),
+    discoveryReceipts, evidenceReceipts, collectedAt: fixture.options.collectedAt,
+  }), errorCode("CONTRADICTED_CLAIM_SET"));
+});
+
+test("two-stage Research finalization accepts a subunit difference covered by explicit absolute tolerance", async () => {
+  const fixture = await fixtureFor(8, "Quality was 0.0001 points.", "Quality was 0.0002 points.");
+  const { authority, discovery, discoveryReceipts, evidenceReceipts } = await collectResearchTurn(fixture);
+
+  const finalized = await finalizeCompanyResearchTurn({ discovery, evidence: fixture.options.runtime }, {
+    authority, queries: executionInput(fixture).queries, claims: subunitClaims(),
+    discoveryReceipts, evidenceReceipts, collectedAt: fixture.options.collectedAt,
+    contradictionTolerance: { absoluteTolerance: 0.0001 },
+  });
+
+  assert.equal(finalized.status, "accepted");
+  assert.equal(finalized.contradictionReport.contradictions.length, 0);
+  assert.equal(finalized.contradictionReport.absoluteTolerance, 0.0001);
+  assert.deepEqual(finalized.citationReplay.flatMap((entry) => entry.quotes).sort(), ["Quality was 0.0001 points.", "Quality was 0.0002 points."]);
+});
+
+async function collectResearchTurn(fixture: Awaited<ReturnType<typeof fixtureFor>>) {
   const policy = {
     allowedTools: ["search-discover", "web-fetch"], network: "allowlist" as const,
     allowedDomains: ["*"], readScopes: [], writeScopes: [],
@@ -109,32 +158,18 @@ test("two-stage Research turn composes discovery and evidence tools, then finali
   assert.ok(discoveryReceipts.every((receipt) => discovery.verifyReceipt(receipt)));
   assert.deepEqual(await discovery.readReceipt(discoveryReceipts[0]!.receiptId), discoveryReceipts[0]);
 
-  const finalized = await finalizeCompanyResearchTurn({ discovery, evidence: fixture.options.runtime }, {
-    authority,
-    queries: executionInput(fixture).queries,
-    claims: executionInput(fixture).claims,
-    discoveryReceipts,
-    evidenceReceipts,
-    collectedAt: fixture.options.collectedAt,
-  });
-  assert.equal(finalized.status, "accepted");
-  assert.deepEqual(finalized.citationReplay.flatMap((entry) => entry.quotes), ["Quality was 94 points."]);
-  assert.equal(finalized.sources.find((source) => source.candidate.identity.canonicalUrl === canonicalizeSourceUrl(OFFICIAL_URL))?.snapshot.finalUrl, OFFICIAL_FINAL_URL);
+  return { authority, discovery, discoveryReceipts, evidenceReceipts };
+}
 
-  await assert.rejects(() => finalizeCompanyResearchTurn({ discovery, evidence: fixture.options.runtime }, {
-    authority, queries: executionInput(fixture).queries, claims: executionInput(fixture).claims,
-    discoveryReceipts: [{ ...discoveryReceipts[0]!, candidateSetHash: canonicalSha256("tampered") }, discoveryReceipts[1]!],
-    evidenceReceipts, collectedAt: fixture.options.collectedAt,
-  }), errorCode("RESEARCH_AUTHORITY_MISMATCH"));
-});
-
-async function fixtureFor(maxToolCalls: number) {
+async function fixtureFor(
+  maxToolCalls: number,
+  officialBody = "공식 발표 — Quality was 94 points.",
+  academicBody = "Independent method and limitations.",
+) {
   const workspace = await mkdtemp(join(tmpdir(), "luna-company-research-work-order-"));
   const runDirectory = join(workspace, ".state", "runs", "run-research-order");
   await mkdir(runDirectory, { recursive: true });
   const store = new ResearchSnapshotStore(workspace, ".state/research/snapshots/sha256");
-  const officialBody = "공식 발표 — Quality was 94 points.";
-  const academicBody = "Independent method and limitations.";
   const official = await store.publish({
     schemaVersion: 1, sourceUrl: OFFICIAL_URL, finalUrl: OFFICIAL_FINAL_URL, redirectChain: [OFFICIAL_URL],
     fetchedAt: "2026-08-24T00:00:00.000Z", status: 200, mimeType: "text/plain", bodyUtf8: officialBody,
@@ -197,6 +232,18 @@ function executionInput(fixture: Awaited<ReturnType<typeof fixtureFor>>) {
       [canonicalizeSourceUrl(ACADEMIC_URL)]: fixture.academic.snapshotHash,
     },
   };
+}
+
+function subunitClaims(): CompanyResearchClaimPlan[] {
+  return [
+    { sourceUrl: OFFICIAL_URL, value: 0.0001 },
+    { sourceUrl: ACADEMIC_URL, value: 0.0002 },
+  ].map(({ sourceUrl, value }) => ({
+    claimText: `Quality was ${value} points.`, comparisonKey: "quality-score", modality: "fact",
+    normalizedValue: { value, unit: "points", period: "2026", geography: "global", population: "all runs" },
+    citations: [{ sourceUrl, quotes: [`Quality was ${value} points.`] }],
+    status: "supported", assumptions: [], falsifier: "A newer reproducible primary source reports another value.",
+  }));
 }
 
 function errorCode(expected: string): (error: unknown) => boolean {
