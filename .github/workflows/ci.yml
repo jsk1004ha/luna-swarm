@@ -30,6 +30,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Set up artifact renderer Python
+        id: artifact-python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-artifacts.txt
+
+      - name: Install artifact renderer dependencies
+        run: |
+          python -m pip install --only-binary=:all: -r requirements-artifacts.txt
+          python -I -c "import pypdfium2; from PIL import Image"
+
       - name: Check types
         run: npm run check
 
@@ -37,6 +50,8 @@ jobs:
         run: npm run lint
 
       - name: Run tests
+        env:
+          LUNA_SWARM_ARTIFACT_PYTHON: ${{ steps.artifact-python.outputs.python-path }}
         run: npm test
 
       - name: Build
