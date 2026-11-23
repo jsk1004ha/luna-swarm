@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalSha256, immutable, type Sha256 } from "../domain/canonical.js";
+import { withEvolutionActivationLock } from "../registry/activation-lock.js";
 import { verifySignedRolloutReceipt } from "./receipt.js";
 import { verifySignedOperatorApproval } from "./operator-approval.js";
 import { materializeRevision, RolloutConflictError, RolloutStore } from "./store.js";
@@ -45,12 +46,14 @@ export class RolloutCoordinator {
     if (!Number.isInteger(input.canaryBasisPoints) || input.canaryBasisPoints < 1 || input.canaryBasisPoints > 1_000) {
       throw new Error("canaryBasisPoints must be between 1 and 1000");
     }
-    const revision = materializeRevision({
-      schemaVersion: 1, rolloutId: input.rolloutId, bundleHash: input.bundleHash, generation: input.generation,
-      revision: 1, state: "draft", canaryBasisPoints: input.canaryBasisPoints, slo: structuredClone(input.slo),
-      receiptHashes: [], actor: input.actor, reason: input.reason, createdAt: this.now(),
+    return withEvolutionActivationLock(this.options.store.boundary, async () => {
+      const revision = materializeRevision({
+        schemaVersion: 1, rolloutId: input.rolloutId, bundleHash: input.bundleHash, generation: input.generation,
+        revision: 1, state: "draft", canaryBasisPoints: input.canaryBasisPoints, slo: structuredClone(input.slo),
+        receiptHashes: [], actor: input.actor, reason: input.reason, createdAt: this.now(),
+      });
+      return this.options.store.append(revision, null);
     });
-    return this.options.store.append(revision, null);
   }
 
   async advance(input: {
@@ -58,33 +61,45 @@ export class RolloutCoordinator {
     receipt?: SignedRolloutReceipt;
     operatorApproval?: SignedOperatorApproval;
   }): Promise<Readonly<RolloutRevision>> {
-    const current = await this.requireCurrent(input.rolloutId, input.expectedRevision);
-    if (NEXT[current.state] !== input.target) throw new RolloutTransitionError(`Unauthorized transition ${current.state} -> ${input.target}`);
-    if (input.target === "operator_promoted" || input.target === "stable") {
-      this.assertOperatorApproval(current, input.target, input.operatorApproval);
-    }
-    const requiredStage = targetStage(input.target);
-    if (requiredStage) {
-      if (!input.receipt) throw new RolloutReceiptError(`${requiredStage} receipt is required`);
-      this.assertReceipt(current, input.receipt, requiredStage);
-      const violations = evaluateReceipt(input.receipt, current.slo);
-      if (violations.length > 0) {
-        if (current.state === "shadow" || current.state === "canary") {
-          const rolledBack = await this.beginRecovery(current, violations.join("; "), input.receipt.recordHash);
-          return this.reconcileRecovery(rolledBack.rolloutId);
-        }
-        return this.failureTransition(current, "rejected", input.actor, violations.join("; "), input.receipt.recordHash);
+    let recoveryRolloutId: string | undefined;
+    const revision = await withEvolutionActivationLock(this.options.store.boundary, async () => {
+      const current = await this.requireCurrent(input.rolloutId, input.expectedRevision);
+      if (NEXT[current.state] !== input.target) throw new RolloutTransitionError(`Unauthorized transition ${current.state} -> ${input.target}`);
+      if (input.target === "operator_promoted" || input.target === "stable") {
+        this.assertOperatorApproval(current, input.target, input.operatorApproval);
       }
-    }
-    const authorityHash = input.operatorApproval?.recordHash ?? input.receipt?.recordHash;
-    const next = this.nextRevision(current, input.target, input.actor, input.reason, authorityHash);
-    return this.options.store.append(next, current.revision);
+      if (input.target === "stable") {
+        throw new RolloutTransitionError(
+          "Stable rollout finalization is disabled until Stable Pointer CAS and active-binding cleanup are durably reconciled",
+        );
+      }
+      const requiredStage = targetStage(input.target);
+      if (requiredStage) {
+        if (!input.receipt) throw new RolloutReceiptError(`${requiredStage} receipt is required`);
+        this.assertReceipt(current, input.receipt, requiredStage);
+        const violations = evaluateReceipt(input.receipt, current.slo);
+        if (violations.length > 0) {
+          if (current.state === "shadow" || current.state === "canary") {
+            const rolledBack = await this.beginRecovery(current, violations.join("; "), input.receipt.recordHash);
+            recoveryRolloutId = rolledBack.rolloutId;
+            return rolledBack;
+          }
+          return this.failureTransition(current, "rejected", input.actor, violations.join("; "), input.receipt.recordHash);
+        }
+      }
+      const authorityHash = input.operatorApproval?.recordHash ?? input.receipt?.recordHash;
+      const next = this.nextRevision(current, input.target, input.actor, input.reason, authorityHash);
+      return this.options.store.append(next, current.revision);
+    });
+    return recoveryRolloutId ? this.reconcileRecovery(recoveryRolloutId) : revision;
   }
 
   async fail(input: { rolloutId: string; expectedRevision: number; target: "rejected" | "quarantined" | "superseded" | "expired"; actor: string; reason: string }): Promise<Readonly<RolloutRevision>> {
-    const current = await this.requireCurrent(input.rolloutId, input.expectedRevision);
-    if (FAILURE_STATES.has(current.state) || current.state === "stable") throw new RolloutTransitionError(`Cannot fail rollout from ${current.state}`);
-    return this.failureTransition(current, input.target, input.actor, input.reason);
+    return withEvolutionActivationLock(this.options.store.boundary, async () => {
+      const current = await this.requireCurrent(input.rolloutId, input.expectedRevision);
+      if (FAILURE_STATES.has(current.state) || current.state === "stable") throw new RolloutTransitionError(`Cannot fail rollout from ${current.state}`);
+      return this.failureTransition(current, input.target, input.actor, input.reason);
+    });
   }
 
   /** Completes a durable recovery intent. Authorities deduplicate the incident key across crash/restart retries. */
@@ -109,14 +124,19 @@ export class RolloutCoordinator {
   }
 
   async ingestOperationalReceipt(input: { rolloutId: string; expectedRevision: number; receipt: SignedRolloutReceipt; actor?: string }): Promise<Readonly<RolloutRevision>> {
-    const current = await this.requireCurrent(input.rolloutId, input.expectedRevision);
-    const stage = current.state === "shadow" ? "shadow_slo" : current.state === "canary" ? "canary_slo" : undefined;
-    if (!stage) throw new RolloutTransitionError(`Operational receipt is not accepted in ${current.state}`);
-    this.assertReceipt(current, input.receipt, stage);
-    const violations = evaluateReceipt(input.receipt, current.slo);
-    if (violations.length === 0) return current;
-    const rolledBack = await this.beginRecovery(current, violations.join("; "), input.receipt.recordHash);
-    return this.reconcileRecovery(rolledBack.rolloutId);
+    let recoveryRolloutId: string | undefined;
+    const revision = await withEvolutionActivationLock(this.options.store.boundary, async () => {
+      const current = await this.requireCurrent(input.rolloutId, input.expectedRevision);
+      const stage = current.state === "shadow" ? "shadow_slo" : current.state === "canary" ? "canary_slo" : undefined;
+      if (!stage) throw new RolloutTransitionError(`Operational receipt is not accepted in ${current.state}`);
+      this.assertReceipt(current, input.receipt, stage);
+      const violations = evaluateReceipt(input.receipt, current.slo);
+      if (violations.length === 0) return current;
+      const rolledBack = await this.beginRecovery(current, violations.join("; "), input.receipt.recordHash);
+      recoveryRolloutId = rolledBack.rolloutId;
+      return rolledBack;
+    });
+    return recoveryRolloutId ? this.reconcileRecovery(recoveryRolloutId) : revision;
   }
 
   private async beginRecovery(current: Readonly<RolloutRevision>, reason: string, receiptHash?: Sha256): Promise<Readonly<RolloutRevision>> {
@@ -131,11 +151,19 @@ export class RolloutCoordinator {
 
   private async markRecovery(current: Readonly<RolloutRevision>, field: "rollbackAcknowledged" | "quarantineAcknowledged" | "failureCapsuleAcknowledged"): Promise<Readonly<RolloutRevision>> {
     if (!current.recovery) throw new RolloutIntegrityError("Missing recovery progress");
-    const next = materializeRevision({
-      ...baseNext(current), state: current.state, actor: "automatic-slo-controller", reason: `acknowledge ${field}`,
-      receiptHashes: [...current.receiptHashes], createdAt: this.now(), recovery: { ...current.recovery, [field]: true },
+    return withEvolutionActivationLock(this.options.store.boundary, async () => {
+      const latest = await this.options.store.read(current.rolloutId);
+      if (!latest?.recovery || latest.state !== "rolled_back" ||
+          latest.recovery.incidentId !== current.recovery!.incidentId) {
+        throw new RolloutIntegrityError("Recovery progress changed before acknowledgement");
+      }
+      if (latest.recovery[field]) return latest;
+      const next = materializeRevision({
+        ...baseNext(latest), state: latest.state, actor: "automatic-slo-controller", reason: `acknowledge ${field}`,
+        receiptHashes: [...latest.receiptHashes], createdAt: this.now(), recovery: { ...latest.recovery, [field]: true },
+      });
+      return this.options.store.append(next, latest.revision);
     });
-    return this.options.store.append(next, current.revision);
   }
 
   private async failureTransition(current: Readonly<RolloutRevision>, target: RolloutState, actor: string, reason: string, receiptHash?: Sha256): Promise<Readonly<RolloutRevision>> {

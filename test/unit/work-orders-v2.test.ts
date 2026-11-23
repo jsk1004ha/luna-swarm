@@ -93,6 +93,8 @@ test("TaskSpec adapter preserves execution contract and assigns stable independe
   assert.deepEqual(adapted.requiredGateIds, ["G0", "G2", "G3"]);
   assert.deepEqual(adapted.toolPolicy.allowedTools, ["read", "search"]);
   assert.deepEqual(adapted.toolPolicy.writeScopes, [], "read-only runtime must not request fake patch authority");
+  assert.match(adapted.reviewerPool[0]!, /\/team:security-attack$/);
+  assert.notEqual(adapted.ownerTeam, adapted.reviewerPool[0], "Blue owner and Red Team must be independent");
   assert.throws(
     () => workOrderFromTask({
       ...task,
@@ -101,13 +103,82 @@ test("TaskSpec adapter preserves execution contract and assigns stable independe
     }, { missionId: "mission-42", registry }),
     /unsupported runtime capabilities.*workspace-write/,
   );
+  const artifactOrder = workOrderFromTask({
+    ...task,
+    kind: "artifact-production.pdf",
+    objective: "Create an accessible PDF report",
+    executionMode: "artifact-production",
+    requiredCapabilities: ["artifact-render"],
+  }, { missionId: "mission-42", registry, hostAuthorizedArtifactProduction: true });
+  assert.deepEqual(artifactOrder.toolPolicy, {
+    allowedTools: [],
+    network: "off",
+    allowedDomains: [],
+    readScopes: [],
+    writeScopes: [],
+  });
+  assert.throws(
+    () => workOrderFromTask({
+      ...task,
+      executionMode: "artifact-production",
+      requiredCapabilities: ["artifact-render"],
+    }, { missionId: "mission-42", registry }),
+    /unsupported runtime capabilities.*artifact-render/,
+  );
+  const publicResearchOrder = workOrderFromTask({
+    ...task,
+    department: "risk",
+    kind: "competitive-evidence",
+    objective: "인터넷에서 최신 공식 자료를 조사한다",
+    executionMode: "external-research",
+    requiredCapabilities: ["external-network"],
+  }, {
+    missionId: "mission-42",
+    registry,
+    hostAuthorizedExternalResearch: true,
+    hostResearchDomains: ["*"],
+  });
+  const publicResearchOwner = registry.agents.find((agent) => agent.teamId === publicResearchOrder.ownerTeam)!;
+  assert.equal(publicResearchOwner.headquartersId, "research");
+  assert.deepEqual(publicResearchOrder.toolPolicy, {
+    allowedTools: ["search-discover", "web-fetch"],
+    network: "allowlist",
+    allowedDomains: ["*"],
+    readScopes: [],
+    writeScopes: [],
+  });
   const first = assignWorkOrderSlots(adapted, registry);
   const second = assignWorkOrderSlots(adapted, registry);
   assert.deepEqual(first, second);
+  assert.equal(first.reviewerAgentIds.length, 3);
   const assigned = registry.agents.find((agent) => agent.agentId === first.assignedAgentId)!;
   const reviewer = registry.agents.find((agent) => agent.agentId === first.reviewerAgentIds[0])!;
   assert.notEqual(assigned.teamId, reviewer.teamId);
+  assert.ok(reviewer.teamId.endsWith("/team:security-attack"));
+  assert.ok(first.reviewerAgentIds.every((agentId) => adapted.reviewerPool.includes(
+    registry.agents.find((agent) => agent.agentId === agentId)!.teamId,
+  )));
   assert.ok(reviewer.headquartersId === "quality" || reviewer.headquartersId === "integration");
+});
+
+test("small automatic organizations bind a three-person roster across Red and Integration teams", () => {
+  const compactRegistry = organizationRegistryV2({ headcount: 14, reviewerSlots: 3 });
+  const compactEngineeringTeam = compactRegistry.agents.find((agent) => agent.headquartersId === "engineering")!.teamId;
+  const redTeam = compactRegistry.agents.find((agent) => agent.teamId.endsWith("/team:security-attack"))!.teamId;
+  const integrationTeam = compactRegistry.agents.find((agent) => agent.headquartersId === "integration")!.teamId;
+  const assignment = assignWorkOrderSlots({
+    ...order("WO-COMPACT"),
+    ownerTeam: compactEngineeringTeam,
+    reviewerPool: [redTeam, integrationTeam],
+  }, compactRegistry, 3);
+
+  assert.equal(assignment.reviewerAgentIds.length, 3);
+  assert.equal(new Set(assignment.reviewerAgentIds).size, 3);
+  assert.match(
+    compactRegistry.agents.find((agent) => agent.agentId === assignment.reviewerAgentIds[0])!.teamId,
+    /\/team:security-attack$/u,
+  );
+  assert.ok(assignment.reviewerAgentIds.every((agentId) => agentId !== assignment.assignedAgentId));
 });
 
 test("state transitions are immutable, fenced, resumable, and terminal-safe", () => {
@@ -125,6 +196,8 @@ test("state transitions are immutable, fenced, resumable, and terminal-safe", ()
   assert.throws(() => transitionWorkOrder(released, "SUBMITTED", { fencingToken: 2 }), /Invalid/);
 
   const cancelled = transitionWorkOrder(released, "CANCELLED");
+  assert.equal(cancelled.lease, undefined);
+  assert.deepEqual(cancelled.completedExecution, released.lease);
   assert.throws(() => transitionWorkOrder(cancelled, "READY"), /Invalid/);
 });
 

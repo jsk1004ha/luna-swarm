@@ -4,12 +4,19 @@ import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type {
   HostToolCall,
+  HostToolAuthorityBinding,
   HostToolInvocationResult,
   HostToolSession,
   HostToolSpec,
 } from "../backend/agent-backend.js";
 import type { JsonValue } from "../types.js";
 import type { NormalizedToolPolicy } from "../harness-v2/tool-policy.js";
+import type { WorkOrderBudgetEnvelope } from "../harness-v2/contracts.js";
+import {
+  assertBudgetAdmission,
+  canonicalSha256,
+  validateWorkOrderBudget,
+} from "../harness-v2/company-os.js";
 import { CapabilityAuthority, normalizeRelativePath, pathMatchesScope } from "./capability.js";
 import { HostToolBroker } from "./broker.js";
 import { ToolBrokerError, type BrokerResult, type BrokerTool, type ToolReceipt } from "./types.js";
@@ -63,6 +70,10 @@ export interface HostToolSessionBinding {
   revision: number;
   attempt: number;
   policy: NormalizedToolPolicy;
+  /** Full Company Work Order policy used by the shared model/tool authority hash. */
+  authorityPolicy?: NormalizedToolPolicy;
+  authority?: HostToolAuthorityBinding;
+  budget?: WorkOrderBudgetEnvelope;
 }
 
 /**
@@ -73,15 +84,18 @@ export class RunHostToolRuntime {
   readonly #broker: HostToolBroker;
   readonly #authority: CapabilityAuthority;
   readonly #audience: string;
+  readonly #runId: string;
 
   private constructor(
     broker: HostToolBroker,
     authority: CapabilityAuthority,
     audience: string,
+    runId: string,
   ) {
     this.#broker = broker;
     this.#authority = authority;
     this.#audience = audience;
+    this.#runId = runId;
   }
 
   static async create(options: RunHostToolRuntimeOptions): Promise<RunHostToolRuntime> {
@@ -116,7 +130,7 @@ export class RunHostToolRuntime {
       environment: {},
       allowedEnvironmentKeys: [],
     });
-    return new RunHostToolRuntime(broker, authority, audience);
+    return new RunHostToolRuntime(broker, authority, audience, options.runId);
   }
 
   createSession(binding: HostToolSessionBinding): HostToolSession | undefined {
@@ -125,6 +139,29 @@ export class RunHostToolRuntime {
     }
     if (!Number.isSafeInteger(binding.attempt) || binding.attempt < 1) {
       throw new ToolBrokerError("INVALID_REQUEST", "Work Order attempt is invalid");
+    }
+    if (binding.authority) {
+      if (!binding.budget) throw new ToolBrokerError("INVALID_REQUEST", "Company Host Tool Session requires its Work Order budget");
+      validateWorkOrderBudget(binding.budget);
+      const authorityPolicy = binding.authorityPolicy ?? binding.policy;
+      if (!binding.policy.allowedTools.every((tool) => authorityPolicy.allowedTools.includes(tool)) ||
+          binding.policy.readScopes.some((scope) => !authorityPolicy.readScopes.includes(scope)) ||
+          binding.policy.writeScopes.some((scope) => !authorityPolicy.writeScopes.includes(scope)) ||
+          (binding.policy.network === "allowlist" && authorityPolicy.network !== "allowlist")) {
+        throw new ToolBrokerError("INVALID_REQUEST", "Local Host Tool policy expands the Company authority policy");
+      }
+      if (
+        binding.authority.runId !== this.#runId ||
+        binding.authority.agentId !== binding.agentId ||
+        binding.authority.workOrderId !== binding.workOrderId ||
+        binding.authority.workOrderRevision !== binding.revision ||
+        binding.authority.budgetHash !== binding.budget.budgetHash ||
+        binding.authority.toolPolicyHash !== canonicalSha256(authorityPolicy)
+      ) {
+        throw new ToolBrokerError("INVALID_REQUEST", "Company Host Tool Session authority binding mismatch");
+      }
+    } else if (binding.budget) {
+      throw new ToolBrokerError("INVALID_REQUEST", "A Host Tool budget cannot be supplied without Company authority");
     }
     const tools = binding.policy.allowedTools
       .filter((tool): tool is BrokerTool => tool === "read" || tool === "search")
@@ -144,7 +181,15 @@ export class RunHostToolRuntime {
     const inFlightRequests = new Map<string, Promise<BrokerResult>>();
     return Object.freeze({
       tools: Object.freeze(specs),
+      ...(binding.authority ? { authority: Object.freeze(structuredClone(binding.authority)) } : {}),
       invoke: async (call: HostToolCall): Promise<HostToolInvocationResult> => {
+        if (binding.budget) {
+          assertBudgetAdmission(
+            binding.budget,
+            { modelCalls: 0, toolCalls: callCount, inputTokens: 0, outputTokens: 0, elapsedMs: 0 },
+            { toolCalls: 1 },
+          );
+        }
         callCount += 1;
         if (callCount > MAX_HOST_TOOL_CALLS_PER_SESSION) {
           throw new ToolBrokerError(

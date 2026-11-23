@@ -11,8 +11,11 @@ import type { AddressInfo } from "node:net";
 import { extname, resolve, sep } from "node:path";
 import { isValidRunId } from "../store.js";
 import {
+  getDashboardArtifactDownload,
+  getDashboardEvidenceArtifact,
   getDashboardSnapshot,
   listDashboardRuns,
+  type DashboardArtifactDownload,
   type DashboardDataOptions,
   type DashboardRunSummary,
   type DashboardSnapshot,
@@ -153,6 +156,79 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
         }, method === "HEAD");
         return;
       }
+      if (url.pathname === "/api/ui/artifacts/download") {
+        if (method !== "GET" && method !== "HEAD") {
+          response.setHeader("allow", "GET, HEAD");
+          sendJson(response, 405, { error: "Method not allowed" });
+          return;
+        }
+        const requestedRunId = url.searchParams.get("runId");
+        const sha256 = url.searchParams.get("sha256");
+        const kind = url.searchParams.get("kind");
+        if (!requestedRunId || !isValidRunId(requestedRunId)) {
+          throw new BadRequestError("runId contains unsupported characters");
+        }
+        if (!sha256 || !/^[0-9a-f]{64}$/.test(sha256)) {
+          throw new BadRequestError("sha256 must be a lowercase SHA-256 digest");
+        }
+        if (kind !== "output" && kind !== "preview") {
+          throw new BadRequestError("kind must be output or preview");
+        }
+        let artifact: DashboardArtifactDownload | null;
+        try {
+          artifact = await getDashboardArtifactDownload({
+            ...options,
+            runId: requestedRunId,
+          }, { runId: requestedRunId, sha256, kind });
+        } catch {
+          throw new ArtifactIntegrityError("Generated artifact failed integrity verification");
+        }
+        if (!artifact) {
+          sendJson(response, 404, { error: "Generated artifact not found" }, method === "HEAD");
+          return;
+        }
+        sendArtifactDownload(response, artifact, method === "HEAD");
+        return;
+      }
+      if (url.pathname === "/api/ui/evidence/artifact") {
+        if (method !== "GET" && method !== "HEAD") {
+          response.setHeader("allow", "GET, HEAD");
+          sendJson(response, 405, { error: "Method not allowed" });
+          return;
+        }
+        const requestedRunId = url.searchParams.get("runId");
+        const artifactId = url.searchParams.get("artifactId");
+        const revisionValue = url.searchParams.get("revision");
+        const contentHash = url.searchParams.get("contentHash");
+        if (!requestedRunId || !isValidRunId(requestedRunId)) {
+          throw new BadRequestError("runId contains unsupported characters");
+        }
+        if (!artifactId || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(artifactId)) {
+          throw new BadRequestError("artifactId contains unsupported characters");
+        }
+        if (!revisionValue || !/^[1-9][0-9]{0,8}$/u.test(revisionValue)) {
+          throw new BadRequestError("revision must be a positive integer");
+        }
+        if (!contentHash || !/^[0-9a-f]{64}$/u.test(contentHash)) {
+          throw new BadRequestError("contentHash must be a lowercase SHA-256 digest");
+        }
+        const result = await getDashboardEvidenceArtifact({ ...options, runId: requestedRunId }, {
+          runId: requestedRunId,
+          artifactId,
+          revision: Number(revisionValue),
+          contentHash,
+        });
+        if (result.status === "not-found") {
+          sendJson(response, 404, { error: "Public evidence artifact not found" }, method === "HEAD");
+          return;
+        }
+        if (result.status === "mismatch") {
+          sendJson(response, 409, { error: "Evidence artifact identity or integrity mismatch" }, method === "HEAD");
+          return;
+        }
+        sendJson(response, 200, result.artifact, method === "HEAD");
+        return;
+      }
       if (url.pathname === "/api/ui/control") {
         if (method !== "POST") {
           response.setHeader("allow", "POST");
@@ -256,6 +332,8 @@ export function createDashboardServer(options: DashboardServerOptions = {}): Das
       if (!response.headersSent) {
         const status = error instanceof ForbiddenError
           ? 403
+          : error instanceof ArtifactIntegrityError
+            ? 409
           : error instanceof UnsafePathError || error instanceof BadRequestError
             ? 400
             : 500;
@@ -502,6 +580,26 @@ function sendJson(response: ServerResponse, status: number, value: unknown, head
   response.end(headOnly ? undefined : body);
 }
 
+function sendArtifactDownload(
+  response: ServerResponse,
+  artifact: DashboardArtifactDownload,
+  headOnly: boolean,
+): void {
+  const encodedName = encodeURIComponent(artifact.fileName);
+  response.writeHead(200, {
+    "accept-ranges": "none",
+    "cache-control": "private, no-store",
+    "content-disposition": `attachment; filename="${artifact.fileName}"; filename*=UTF-8''${encodedName}`,
+    "content-length": artifact.bytes.length,
+    "content-security-policy": "sandbox",
+    "content-type": artifact.mimeType,
+    "cross-origin-resource-policy": "same-origin",
+    "x-artifact-sha256": artifact.sha256,
+    "x-content-type-options": "nosniff",
+  });
+  response.end(headOnly ? undefined : artifact.bytes);
+}
+
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
@@ -586,3 +684,4 @@ function isLoopbackHost(value: string): boolean {
 class UnsafePathError extends Error {}
 class BadRequestError extends Error {}
 class ForbiddenError extends Error {}
+class ArtifactIntegrityError extends Error {}

@@ -120,6 +120,12 @@ function normalizeDomain(input: string, allowWildcard: boolean): string {
   if (input.length === 0 || input !== input.trim() || /[\u0000-\u0020\u007f/@:#?]/u.test(input)) {
     throw new ToolPolicyError("INVALID_DOMAIN", `Invalid domain: ${JSON.stringify(input)}`);
   }
+  if (input === "*") {
+    if (!allowWildcard) {
+      throw new ToolPolicyError("INVALID_DOMAIN", "A concrete network request cannot use the public wildcard");
+    }
+    return "*";
+  }
   const wildcard = input.startsWith("*.");
   if (wildcard && !allowWildcard) {
     throw new ToolPolicyError("INVALID_DOMAIN", `A requested host cannot be a wildcard: ${input}`);
@@ -147,6 +153,7 @@ export function domainMatchesAllowlist(host: string, allowlist: readonly string[
   const normalizedHost = normalizeDomain(host, false);
   return allowlist.some((entry) => {
     const normalizedEntry = normalizeDomain(entry, true);
+    if (normalizedEntry === "*") return true;
     if (!normalizedEntry.startsWith("*.")) return normalizedHost === normalizedEntry;
     const suffix = normalizedEntry.slice(2);
     return normalizedHost.length > suffix.length && normalizedHost.endsWith(`.${suffix}`);
@@ -185,9 +192,13 @@ export function assertToolPolicySubset(
   if (requested.network === "off" && requested.allowedDomains.length > 0) {
     throw new ToolPolicyError("POLICY_EXPANSION", "Network-off policy cannot contain domains");
   }
-  const roleDomains = new Set(contract.allowedDomains.map((domain) => normalizeDomain(domain, true)));
   const allowedDomains = uniqueSorted(requested.allowedDomains.map((domain) => normalizeDomain(domain, true)));
-  if (allowedDomains.some((domain) => !roleDomains.has(domain))) {
+  const roleDomains = contract.allowedDomains.map((domain) => normalizeDomain(domain, true));
+  if (allowedDomains.some((domain) => {
+    if (domain === "*") return !roleDomains.includes("*");
+    if (domain.startsWith("*.")) return !roleDomains.includes(domain);
+    return !domainMatchesAllowlist(domain, roleDomains);
+  })) {
     throw new ToolPolicyError("POLICY_EXPANSION", `Requested domain allowlist expands ${contract.agentId}'s role`);
   }
 

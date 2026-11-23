@@ -7,16 +7,70 @@ export interface RequiredCheck {
   args: readonly string[];
 }
 
+export interface CodingAcceptanceCriterion {
+  id: string;
+  requirementIds: readonly string[];
+  statement: string;
+}
+
+export interface CodingContextReference {
+  path: string;
+  sha256: `sha256:${string}`;
+  purpose: string;
+}
+
+export interface VerifiedCodingContextReference extends CodingContextReference {
+  gitBlobId: string;
+  mode: "100644" | "100755";
+  size: number;
+  contentBase64: string;
+}
+
+export interface CodingArtifactReference {
+  artifactId: string;
+  revision: number;
+  contentHash: string;
+}
+
+export interface CodingSourceBinding {
+  runId: string;
+  taskId: string;
+  assignedAgentId: string;
+  sourceArtifact: CodingArtifactReference;
+  verificationArtifacts: readonly CodingArtifactReference[];
+}
+
+export interface ImplementationManifestChange {
+  path: string;
+  operation: "upsert" | "delete";
+  mode: "100644" | "100755";
+  contentUtf8?: string;
+}
+
+export interface ImplementationManifest {
+  schemaVersion: 1;
+  baseCommit: string;
+  changes: readonly ImplementationManifestChange[];
+}
+
 export interface CodingWorkOrder {
   id: string;
   repository: string;
   baseCommit: string;
   targetRef: string;
   commitMessage: string;
+  objective: string;
+  requirementIds: readonly string[];
+  acceptanceCriteria: readonly CodingAcceptanceCriterion[];
+  constraints: readonly string[];
+  contextReferences: readonly CodingContextReference[];
   readScopes: readonly string[];
   writeScopes: readonly string[];
   requiredChecks: readonly RequiredCheck[];
   requiredAuditIssuers: readonly string[];
+  codingStrategy?: Readonly<{ mode: "repair" | "genesis"; taskKind: string; strategyHash: string }>;
+  sourceBinding?: CodingSourceBinding;
+  implementationManifest?: ImplementationManifest;
 }
 
 export interface WorktreeSession {
@@ -46,6 +100,8 @@ export interface SnapshotFile {
 
 export interface WorktreeSnapshot {
   workOrderId: string;
+  executionAttempt: number;
+  attemptContextHash: string;
   baseCommit: string;
   headCommit: string;
   status: string;
@@ -73,11 +129,19 @@ export interface RunnerResult {
 
 export interface TrustedCommandRunner {
   readonly issuer: string;
-  run(request: Readonly<RunnerRequest>): Promise<Readonly<RunnerResult>>;
+  run(request: Readonly<RunnerRequest>, signal?: AbortSignal): Promise<Readonly<RunnerResult>>;
 }
 
 export interface AuditRequest {
   workOrderId: string;
+  workOrderHash: string;
+  executionAttempt: number;
+  attemptContextHash: string;
+  objective: string;
+  requirementIds: readonly string[];
+  acceptanceCriteria: readonly Readonly<CodingAcceptanceCriterion>[];
+  constraints: readonly string[];
+  contextReferences: readonly Readonly<VerifiedCodingContextReference>[];
   baseCommit: string;
   headCommit: string;
   patchHash: string;
@@ -88,20 +152,26 @@ export interface AuditRequest {
   patch: string;
   files: readonly Readonly<SnapshotFile>[];
   changedPaths: readonly string[];
+  codingStrategy?: Readonly<{ mode: "repair" | "genesis"; taskKind: string; strategyHash: string }>;
+  sourceBinding?: Readonly<CodingSourceBinding>;
+  implementationManifest?: Readonly<ImplementationManifest>;
 }
 
 export interface TrustedAuditRunner {
   readonly issuer: string;
-  review(request: Readonly<AuditRequest>): Promise<Readonly<{ outcome: "pass" | "fail"; evidence: unknown }>>;
+  review(request: Readonly<AuditRequest>, signal?: AbortSignal): Promise<Readonly<{ outcome: "pass" | "fail"; evidence: unknown }>>;
 }
 
 export type ReceiptKind = "check" | "audit";
 
 export interface ReceiptMaterial {
-  schemaVersion: 1;
+  schemaVersion: 3;
   kind: ReceiptKind;
   issuer: string;
   workOrderId: string;
+  workOrderHash: string;
+  executionAttempt: number;
+  attemptContextHash: string;
   baseCommit: string;
   headCommit: string;
   patchHash: string;
@@ -130,18 +200,28 @@ export interface CodingSubmission {
 
 export interface ExecutorCodingWorkOrder {
   id: string;
+  workOrderHash: string;
   baseCommit: string;
   commitMessage: string;
+  objective: string;
+  requirementIds: readonly string[];
+  acceptanceCriteria: readonly Readonly<CodingAcceptanceCriterion>[];
+  constraints: readonly string[];
+  contextReferences: readonly Readonly<CodingContextReference>[];
   readScopes: readonly string[];
   writeScopes: readonly string[];
   requiredChecks: readonly Readonly<RequiredCheck>[];
   requiredAuditIssuers: readonly string[];
+  codingStrategy?: Readonly<{ mode: "repair" | "genesis"; taskKind: string; strategyHash: string }>;
+  sourceBinding?: Readonly<CodingSourceBinding>;
+  implementationManifest?: Readonly<ImplementationManifest>;
 }
 
 export interface CodingExecutorRequest {
   cwd: string;
   env: Readonly<Record<string, string>>;
   workOrder: Readonly<ExecutorCodingWorkOrder>;
+  attemptContext: Readonly<CodingAttemptContext>;
   signal: AbortSignal;
 }
 
@@ -171,17 +251,102 @@ export interface CodingPipelineResult {
   snapshot: Readonly<WorktreeSnapshot>;
   receipts: readonly Readonly<SignedReceipt>[];
   integration: Readonly<IntegrationResult>;
+  executionAttempts: number;
+  repairFindings: readonly Readonly<CodingRepairFinding>[];
   cleanupWarnings: readonly CleanupWarning[];
+  /** True only when durable pre-CAS evidence proved a prior Single Committer CAS completed. */
+  recovered: boolean;
+}
+
+/**
+ * Non-integrating protected verification for one immutable implementation
+ * candidate. It creates and destroys an isolated clone and never creates a
+ * commit or moves a ref.
+ */
+export interface CodingCandidateVerificationResult {
+  snapshot: Readonly<WorktreeSnapshot>;
+  receipts: readonly Readonly<SignedReceipt>[];
+  repairFindings: readonly Readonly<CodingRepairFinding>[];
+  passedChecks: number;
+  totalChecks: number;
+  auditPassed: boolean;
+  changedFiles: number;
+  changedBytes: number;
+}
+
+export type CodingRepairStage = "check" | "audit";
+export type CodingRepairCode = "CHECK_FAILED" | "AUDIT_FAILED";
+
+/**
+ * Bounded, receipt-backed feedback for another isolated attempt. It never
+ * contains raw stdout, stderr, audit evidence, prompts, or file contents.
+ */
+export interface CodingRepairFinding {
+  schemaVersion: 1;
+  stage: CodingRepairStage;
+  code: CodingRepairCode;
+  subject: string;
+  executionAttempt: number;
+  attemptContextHash: string;
+  patchHash: string;
+  manifestHash: string;
+  receiptHash: string;
+  evidenceHash: string;
+  findingHash: string;
+}
+
+export interface CodingAttemptContext {
+  schemaVersion: 1;
+  executionAttempt: number;
+  maxAttempts: number;
+  contextHash: string;
+  previousFinding?: Readonly<CodingRepairFinding>;
 }
 
 export interface CleanupWarning {
-  phase: "source-pin-delete" | "integration-lock-release" | "worktree-dispose" | "process-authority-dispose";
+  phase: "source-pin-delete" | "integration-lock-release" | "worktree-dispose" | "process-authority-dispose" | "attempt-journal-finalize";
   resource: string;
   message: string;
   recoveryRequired: true;
 }
 
 export class CodingExecutionError extends Error {}
+export class CodingAttemptsExhaustedError extends CodingExecutionError {
+  constructor(
+    readonly attempts: number,
+    readonly lastFinding: Readonly<CodingRepairFinding>,
+  ) {
+    const failure = lastFinding.stage === "check"
+      ? `Trusted check failed: ${lastFinding.subject}`
+      : `Independent audit failed: ${lastFinding.subject}`;
+    super(`${failure}; coding repair attempts exhausted after ${attempts}: ${lastFinding.code}`);
+    this.name = "CodingAttemptsExhaustedError";
+  }
+}
+
+export interface CodingIntegrationRecovery {
+  workOrderId: string;
+  targetRef: string;
+  expectedTargetHead: string;
+  executionAttempt: number;
+  attemptContextHash: string;
+  patchHash: string;
+  treeHash: string;
+  manifestHash: string;
+}
+
+export class CodingExecutionRecoveryRequiredError extends CodingExecutionError {
+  readonly code = "CODING_EXECUTION_RECOVERY_REQUIRED";
+
+  constructor(
+    readonly recovery: Readonly<CodingIntegrationRecovery>,
+    cause?: unknown,
+  ) {
+    super(`Coding integration outcome requires reconciliation before retry: ${recovery.workOrderId}@${recovery.patchHash.slice(0, 12)}`);
+    this.name = "CodingExecutionRecoveryRequiredError";
+    if (cause !== undefined) this.cause = cause;
+  }
+}
 
 export interface IntegratedResult {
   kind: "integrated";
@@ -198,7 +363,8 @@ export interface IntegrationWorkOrder {
   id: string;
   sourceWorkOrderId: string;
   targetRef: string;
-  expectedTargetHead: string;
+  expectedTargetHead: string | null;
+  targetState: "commit" | "missing_or_non_commit";
   sourceCommit: string;
   protectedSourceRef: string;
   baseCommit: string;

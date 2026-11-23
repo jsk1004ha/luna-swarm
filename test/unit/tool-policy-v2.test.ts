@@ -72,12 +72,20 @@ test("workspace paths are canonical, relative, and traversal-safe", () => {
 });
 
 test("domain allowlists use label boundaries and explicit wildcard semantics", () => {
+  assert.equal(domainMatchesAllowlist("any-public.example", ["*"]), true);
   assert.equal(domainMatchesAllowlist("api.example.gov", ["*.gov"]), true);
   assert.equal(domainMatchesAllowlist("GITHUB.COM.", ["github.com"]), true);
   assert.equal(domainMatchesAllowlist("evilgithub.com", ["github.com"]), false);
   assert.equal(domainMatchesAllowlist("github.com.evil.test", ["github.com"]), false);
   assert.equal(domainMatchesAllowlist("gov", ["*.gov"]), false);
   assert.throws(() => domainMatchesAllowlist("https://github.com", ["github.com"]), ToolPolicyError);
+});
+
+test("public-internet Work Orders remain bounded by an explicitly public research role", () => {
+  const publicRole = { ...role, allowedDomains: ["*"] };
+  const publicOrder = order({ allowedDomains: ["*"] });
+  assert.deepEqual(assertToolPolicySubset(publicRole, publicOrder.toolPolicy).allowedDomains, ["*"]);
+  assert.throws(() => assertToolPolicySubset(role, publicOrder.toolPolicy), ToolPolicyError);
 });
 
 test("Work Order tool policy must be a strict subset of the fixed role contract", () => {

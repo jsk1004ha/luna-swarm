@@ -1,0 +1,3 @@
+# Real PDF preview rasterization; Pillow is required by PdfBitmap.to_pil().
+pypdfium2==5.13.0
+Pillow==12.3.0

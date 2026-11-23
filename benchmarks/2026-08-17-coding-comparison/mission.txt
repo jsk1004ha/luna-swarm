@@ -1,0 +1,20 @@
+Fix a race in CodexAppServerBackend token telemetry.
+
+A rawResponse/completed notification may arrive before turn/start returns and
+turnId is assigned. The current handler can attribute usage from a stale
+different turn.
+
+Ensure early notifications are deferred and, once the turn ID is known, only
+unique response IDs for that exact thread and turn are counted. A duplicate
+response ID is immutable: first observation wins, including missing or invalid
+usage.
+
+Preserve successful, failed, and aborted turn usage semantics and
+tokenUsageComplete. Do not change public types or disable tests. Add focused
+regression tests and run the relevant tests plus typecheck.
+
+Do not access the network, install dependencies, use subagents, or modify files
+outside:
+- src/backend/codex-app-server.ts
+- test/unit/app-server.test.ts
+- test/fixtures/fake-codex.mjs

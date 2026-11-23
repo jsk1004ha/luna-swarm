@@ -185,6 +185,24 @@ test("atomic start gate launches once, replays request IDs, and releases failed 
   );
   assert.equal(replay.runId, "run-once");
 
+  const keyedGate = new AtomicStartGate<{ accepted: boolean; runId?: string; code?: string }>();
+  const keyed = keyedGate.start(
+    "33333333-3333-4333-8333-333333333333",
+    () => ({ accepted: false, code: "RUN_ALREADY_ACTIVE" }),
+    async () => ({ accepted: true, runId: "run-keyed" }),
+    "sha256:first",
+    () => ({ accepted: false, code: "IDEMPOTENCY_CONFLICT" }),
+  );
+  assert.equal((await keyed).runId, "run-keyed");
+  const keyedConflict = await keyedGate.start(
+    "33333333-3333-4333-8333-333333333333",
+    () => ({ accepted: false, code: "RUN_ALREADY_ACTIVE" }),
+    async () => ({ accepted: true, runId: "unexpected" }),
+    "sha256:second",
+    () => ({ accepted: false, code: "IDEMPOTENCY_CONFLICT" }),
+  );
+  assert.equal(keyedConflict.code, "IDEMPOTENCY_CONFLICT");
+
   for (let index = 100; index < 1_200; index += 1) {
     await gate.start(
       `request-${index}`,

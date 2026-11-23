@@ -263,7 +263,7 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
   // `write` suffix look like an imperative even in explicit denial lists such
   // as `command-execution·workspace-write·network unavailable`.
   const actionContract = contract.replace(
-    /\b(?:workspace-(?:read|search|write)|command-execution|external-network)\b/gu,
+    /\b(?:workspace-(?:read|search|write)|command-execution|external-network|artifact-render|artifact-production)\b/gu,
     " ",
   );
 
@@ -322,9 +322,17 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
     return false;
   };
   const englishWorkspaceObject =
-    /\b(?:readme|docs?|documentation|source(?:\s+code)?|code|files?|director(?:y|ies)|folders?|website|web\s*app|applications?|apps?|components?|pages?|repositor(?:y|ies)|repos?|configs?|configuration|scripts?|packages?|dependenc(?:y|ies)|branches?|pull\s*requests?|tests?|bugs?|features?|workspace|working\s*tree|changes?|patches?)\b/u;
+    /\b(?:readme|docs?|documentation|source(?:\s+code)?|code|files?|director(?:y|ies)|folders?|website|web\s*app|applications?|apps?|components?|pages?|parsers?|renderers?|generators?|viewers?|editors?|libraries|tools?|processors?|repositor(?:y|ies)|repos?|configs?|configuration|scripts?|packages?|dependenc(?:y|ies)|branches?|pull\s*requests?|tests?|bugs?|features?|workspace|working\s*tree|changes?|patches?)\b/u;
   const koreanWorkspaceObject =
-    /(?:readme|소스\s*코드|코드|파일|폴더|디렉터리|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|저장소|리포지토리|설정|스크립트|패키지|의존성|브랜치|풀\s*리퀘스트|pr|테스트|버그|기능|변경사항|패치)/u;
+    /(?:readme|소스\s*코드|코드|파일|폴더|디렉터리|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|파서|렌더러|생성기|뷰어|에디터|라이브러리|도구|프로세서|저장소|리포지토리|설정|스크립트|패키지|의존성|브랜치|풀\s*리퀘스트|pr|테스트|버그|기능|변경사항|패치)|(?:parser|renderer|generator|viewer|editor|library|tool|application|app|component|processor)(?=[가-힣])/u;
+  const artifactObject =
+    /\b(?:pdf|docx|pptx|word\s+document|powerpoint|presentation|slide\s+deck|slides?|xlsx|csv|svg|png|spreadsheet|workbook|data\s*visuali[sz]ation|chart)\b|(?:워드(?:\s*문서)?|파워포인트|프레젠테이션|슬라이드(?:\s*덱)?|스프레드시트|엑셀|데이터\s*시각화|차트|그래프)/u;
+  const artifactAction =
+    /\b(?:creat(?:e|ed|ing)|generat(?:e|ed|ing)|produc(?:e|ed|ing)|author(?:ed|ing)?|render(?:ed|ing)?|export(?:ed|ing)?)\b|(?:제작|생성|작성|렌더|내보내기)(?:하|해|할|했)|(?:만들(?:어|고|기|자|려|면))/gu;
+  const softwareArtifactTopic = /\b(?:parser|renderer|generator|viewer|editor|library|tool|application|app|component|processor)s?\b|(?:파서|렌더러|생성기|뷰어|에디터|라이브러리|도구|애플리케이션|앱|컴포넌트|프로세서)/u;
+  const artifactProductionClauses = new Set(clauses.filter((clause) =>
+    hasPositiveAction(clause, artifactAction, artifactObject, softwareArtifactTopic)));
+  if (artifactProductionClauses.size > 0) required.add("artifact-render");
   const informationalOutput =
     /\b(?:report|analysis|review|assessment|plan|strategy|recommendations?|proposal|summary|argument|brief|memo|matrix|table|checklist|register|inventory|catalog|hand-?off)\b|(?:보고서|분석|리뷰|검토|평가|계획|전략|추천|제안|개선안|요약|메모|매트릭스|표|체크리스트|레지스터|인벤토리|카탈로그|핸드오프)/u;
   const englishPersistsInformationalOutput = (clause: string): boolean => {
@@ -348,6 +356,7 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
     /(?:readme|소스\s*코드|코드|파일|폴더|디렉터리|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|저장소|리포지토리|설정|스크립트|패키지|브랜치|풀\s*리퀘스트|pr)(?:에|로|으로)(?!\s*(?:대한|관한|관해|대해|기반))(?:\s|$)/u.test(clause) ||
     /(?:보고서|분석|리뷰|검토|평가|계획|전략|추천|제안|개선안|요약|메모|매트릭스|표|체크리스트|레지스터|인벤토리|카탈로그|핸드오프).{0,24}(?:readme|파일|웹\s*사이트|웹\s*앱|애플리케이션|앱|컴포넌트|페이지|설정|스크립트|패키지|브랜치|풀\s*리퀘스트|pr)/u.test(clause);
   const materialWorkspaceChange = clauses.some((clause) =>
+    !artifactProductionClauses.has(clause) && (
     hasPositiveAction(
       clause,
       /\b(?:implement(?:ed|ing)?|edit(?:ed|ing)?|updat(?:e|ed|ing)|modif(?:y|ied|ying)|chang(?:e|ed|ing)|delet(?:e|ed|ing)|remov(?:e|ed|ing)|renam(?:e|ed|ing)|mov(?:e|ed|ing)|sav(?:e|ed|ing)|patch(?:ed|ing)?|refactor(?:ed|ing)?|fix(?:ed|ing)?|appl(?:y|ied|ying)|add(?:ed|ing)?|install(?:ed|ing)?|upgrad(?:e|ed|ing)|format(?:ted|ting)?|open(?:ed|ing)?)\b/gu,
@@ -373,7 +382,7 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
       clause,
       /\b(?:git\s+)?(?:commit|push|merge|rebase|revert|cherry-pick)\b/gu,
     ) ||
-    hasPositiveAction(clause, /(?:커밋|푸시|병합|리베이스|리버트|체리픽)/gu)
+    hasPositiveAction(clause, /(?:커밋|푸시|병합|리베이스|리버트|체리픽)/gu))
   );
   if (materialWorkspaceChange) {
     required.add("workspace-write");
@@ -423,9 +432,9 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
     /(?:로컬|제공된|주어진|첨부된|워크스페이스|evidence\/|네\s*개?\s*문서|4\s*개\s*문서|내부\s*문서).{0,80}(?:만|내에서|기반|한정)|(?:문서|자료).{0,20}(?:외|이외).{0,40}(?:금지|미사용|사용하지|배제|제외|없이)/u.test(contract);
   const globallyProhibitsExternalResearch =
     /\b(?:do\s+not|don't|must\s+not|without|no)\b.{0,120}\b(?:external|online|web|official)\b/u.test(contract) ||
-    /\b(?:external|online|web)\b.{0,120}\b(?:forbidden|prohibited|disallowed|excluded|not\s+allowed|absent)\b/u.test(contract) ||
-    /(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회)).{0,120}(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|만들지|금한다|부재|없|불가)/u.test(contract) ||
-    /(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|부재|없|불가).{0,120}(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회))/u.test(contract) ||
+    /\b(?:external|online|web)\b.{0,120}\b(?:forbidden|prohibited|disallowed|excluded|not\s+allowed|absent|unavailable|outside\s+(?:the\s+)?(?:authorized\s+)?scope)\b/u.test(contract) ||
+    /(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회)).{0,120}(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|만들지|금한다|부재|없|불가|unavailable|권한\s*밖)/u.test(contract) ||
+    /(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|부재|없|불가|unavailable|권한\s*밖).{0,120}(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회))/u.test(contract) ||
     /(?:문서|자료).{0,20}(?:외|이외).{0,40}(?:금지|미사용|사용하지|배제|제외|없이)/u.test(contract);
   const externalResearch = contract
     .split(/\r?\n|(?<=[.!?。])\s+/u)
@@ -435,15 +444,16 @@ export function semanticCapabilityDemandForText(value: string): TaskCapability[]
         /(?:외부\s*(?:자료|출처|조사).{0,30}(?:검색|조사|수집|접근|조회)|(?:검색|조사|수집|접근|조회).{0,30}외부\s*(?:자료|출처)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회))/u.test(clause);
       const weakExternalResearch =
         /\b(?:latest|current\s+(?:market|product|competitor|vendor)|official\s+(?:sources?|documentation)|competitor|market\s+research|external\s+(?:sources?|research)|online\s+research|web\s+research)\b/u.test(clause) ||
-        /(?:최신|경쟁사|경쟁\s*제품|시장\s*조사|외부\s*(?:자료|출처|조사)|공식\s*(?:자료|출처|문서)|웹\s*조사|온라인\s*조사)/u.test(clause);
+        /\b(?:compare|research)\b.{0,50}\b(?:other|competing)\s+(?:ai\s+)?(?:agents?|models?|tools?|products?)\b/u.test(clause) ||
+        /(?:최신|경쟁사|경쟁\s*제품|시장\s*조사|외부\s*(?:자료|출처|조사)|공식\s*(?:자료|출처|문서)|웹\s*조사|온라인\s*조사|(?:타|다른)\s*(?:ai\s*)?(?:에이전트|모델|도구|제품).{0,40}(?:비교|조사)|(?:비교|조사).{0,40}(?:타|다른)\s*(?:ai\s*)?(?:에이전트|모델|도구|제품))/u.test(clause);
       if (!strongExternalResearch && !weakExternalResearch) return false;
       // A task that proves the absence of external research must not be forced
       // to request the very network authority it is required to avoid.
       const explicitlyProhibitsExternalResearch =
         /\b(?:do\s+not|don't|must\s+not|without|no)\b.{0,80}\b(?:external|online|web|official)\b/u.test(clause) ||
-        /\b(?:external|online|web)\b.{0,80}\b(?:forbidden|prohibited|disallowed|excluded|not\s+allowed|absent)\b/u.test(clause) ||
-        /(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회)).{0,80}(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|만들지|금한다|부재|없|불가)/u.test(clause) ||
-        /(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|부재|없|불가).{0,80}(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회))/u.test(clause);
+        /\b(?:external|online|web)\b.{0,80}\b(?:forbidden|prohibited|disallowed|excluded|not\s+allowed|absent|unavailable|outside\s+(?:the\s+)?(?:authorized\s+)?scope)\b/u.test(clause) ||
+        /(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회)).{0,80}(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|만들지|금한다|부재|없|불가|unavailable|권한\s*밖)/u.test(clause) ||
+        /(?:금지|미(?:사용|참조|조회|검색|조사|수집|접근)|비(?:사용|참조|조회|검색|조사|수집|접근|생성)|사용하지|쓰지|하지\s*않|배제|제외|없이|부재|없|불가|unavailable|권한\s*밖).{0,80}(?:외부\s*(?:자료|출처|조사|조회|검색|참조|네트워크)|웹\s*(?:조사|검색|조회)|온라인\s*(?:조사|검색|조회))/u.test(clause);
       if (explicitlyProhibitsExternalResearch) return false;
       if (!strongExternalResearch && localOnlyResearchScope && globallyProhibitsExternalResearch) return false;
       return true;

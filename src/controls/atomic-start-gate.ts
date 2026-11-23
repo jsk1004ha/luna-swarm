@@ -10,7 +10,7 @@ export class AtomicStartGate<Result extends StartResult> {
   private static readonly maxRememberedRequests = 1_024;
   private activeReservation: symbol | undefined;
   private activeRequestId: string | undefined;
-  private readonly requests = new Map<string, Promise<Result>>();
+  private readonly requests = new Map<string, Readonly<{ fingerprint?: string; result: Promise<Result> }>>();
 
   get active(): boolean {
     return this.activeReservation !== undefined;
@@ -20,15 +20,22 @@ export class AtomicStartGate<Result extends StartResult> {
     requestId: string | undefined,
     alreadyActive: () => Result,
     starter: () => Promise<Result>,
+    fingerprint?: string,
+    conflictingRequest: () => Result = alreadyActive,
   ): Promise<Result> {
     if (requestId) {
       const replay = this.requests.get(requestId);
-      if (replay) return replay;
+      if (replay) {
+        if (fingerprint !== undefined && replay.fingerprint !== undefined && replay.fingerprint !== fingerprint) {
+          return Promise.resolve(conflictingRequest());
+        }
+        return replay.result;
+      }
     }
 
     if (this.activeReservation) {
       const rejected = Promise.resolve(alreadyActive());
-      if (requestId) this.remember(requestId, rejected);
+      if (requestId) this.remember(requestId, rejected, fingerprint);
       return rejected;
     }
 
@@ -42,7 +49,7 @@ export class AtomicStartGate<Result extends StartResult> {
       resolveResult = resolve;
       rejectResult = reject;
     });
-    if (requestId) this.remember(requestId, result);
+    if (requestId) this.remember(requestId, result, fingerprint);
 
     void Promise.resolve()
       .then(starter)
@@ -62,8 +69,8 @@ export class AtomicStartGate<Result extends StartResult> {
     this.activeRequestId = undefined;
   }
 
-  private remember(requestId: string, result: Promise<Result>): void {
-    this.requests.set(requestId, result);
+  private remember(requestId: string, result: Promise<Result>, fingerprint?: string): void {
+    this.requests.set(requestId, Object.freeze({ ...(fingerprint === undefined ? {} : { fingerprint }), result }));
     while (this.requests.size > AtomicStartGate.maxRememberedRequests) {
       const oldest = this.requests.keys().next().value as string | undefined;
       if (!oldest) return;

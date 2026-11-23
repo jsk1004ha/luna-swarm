@@ -248,6 +248,34 @@ test("closed execution modes reject mismatched and semantically under-declared a
 });
 
 test("original mission capability demand cannot be laundered by a restricted planner", () => {
+  for (const mission of [
+    "Create an accessible PDF report",
+    "Generate an XLSX spreadsheet and CSV export",
+    "데이터 시각화 차트 PNG를 제작해줘",
+    "Render an SVG chart",
+  ]) {
+    assert.deepEqual(semanticCapabilityDemandForText(mission), ["artifact-render"], mission);
+  }
+  assert.deepEqual(
+    semanticCapabilityDemandForText("Create a PDF report and update README"),
+    ["artifact-render", "command-execution", "workspace-write"],
+  );
+  for (const mission of [
+    "Create a PDF parser application",
+    "Generate an SVG renderer",
+    "PNG editor component를 제작해줘",
+  ]) {
+    assert.deepEqual(
+      semanticCapabilityDemandForText(mission),
+      ["command-execution", "workspace-write"],
+      mission,
+    );
+  }
+  assert.deepEqual(semanticCapabilityDemandForText("Analyze the supplied PDF report"), []);
+  assert.deepEqual(
+    semanticCapabilityDemandForText("artifact-render and artifact-production are unavailable in this read-only diagnostic"),
+    [],
+  );
   assert.deepEqual(
     semanticCapabilityDemandForText(
       "Compare other AI agents using current external sources and build a motion website",
@@ -259,6 +287,23 @@ test("original mission capability demand cannot be laundered by a restricted pla
       "Use only the supplied local evidence; do not use external sources and produce a read-only report",
     ),
     [],
+  );
+  for (const mission of [
+    "외부 조사·배포 unavailable 상태를 포함한 비교 주장·모션·권한 반례 검토",
+    "외부 조사·배포 unavailable 기록, 비밀정보·외부 변경 차단",
+    "외부 네트워크·배포·비밀정보 사용이 현재 권한 밖임을 기록한다",
+  ]) {
+    assert.deepEqual(semanticCapabilityDemandForText(mission), [], mission);
+  }
+  assert.deepEqual(
+    semanticCapabilityDemandForText("인터넷에서 타 AI 에이전트의 최신 공식 자료를 조사해줘"),
+    ["external-network"],
+  );
+  assert.deepEqual(
+    semanticCapabilityDemandForText(
+      "이 루나 스웜의 장점을 타 AI 에이전트와 비교해서 조사하고 그 장점을 잘 부각한 모션그래픽 웹사이트를 제작해줘",
+    ),
+    ["command-execution", "external-network", "workspace-write"],
   );
   for (const mission of [
     "readme 수정하고 메인에 커밋 푸시",

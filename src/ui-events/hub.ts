@@ -9,6 +9,10 @@ export interface UiEventSnapshot {
   replay: SwarmUiEvent[];
 }
 
+export interface UiEventReplayWindow extends UiEventSnapshot {
+  replayStatus: "complete" | "resync" | "unavailable";
+}
+
 export interface UiEventHubOptions {
   maxEventsPerRun?: number;
   now?: () => Date;
@@ -71,6 +75,20 @@ export class UiEventHub {
       lastSeq: journal.lastSeq,
       snapshot: journal.snapshot === null ? null : structuredClone(journal.snapshot),
       replay: journal.events.filter((event) => event.seq > lastSeq).map((event) => structuredClone(event)),
+    };
+  }
+
+  readReplayWindow(runId: string, lastSeq = 0): UiEventReplayWindow {
+    const current = this.read(runId, lastSeq);
+    const journal = this.journal(runId);
+    const firstRetainedSeq = journal.events[0]?.seq ?? journal.lastSeq + 1;
+    const replayHasGap = lastSeq > journal.lastSeq ||
+      (lastSeq < journal.lastSeq && lastSeq < firstRetainedSeq - 1);
+    return {
+      ...current,
+      replayStatus: replayHasGap
+        ? current.snapshot === null ? "unavailable" : "resync"
+        : "complete",
     };
   }
 

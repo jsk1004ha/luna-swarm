@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "protocol": "direct-codex-model-coding-paired-v5",
+  "baseCommit": "99af081e99226cfc3cb36297325a10c093fae19d",
+  "repetitions": 3,
+  "qualityVerdict": "not-blindly-scored",
+  "acceptanceGateVerdict": "tie",
+  "evidenceGrade": "diagnostic-only",
+  "promotionEligible": false,
+  "efficiencyVerdict": "directional-luna-advantage-not-decisive",
+  "models": {
+    "gpt-5.6-luna": {
+      "scores": [100, 100, 100],
+      "criticalPasses": 3,
+      "wallMs": [298017, 249440, 238628],
+      "medianWallMs": 249440,
+      "inputTokens": [1138516, 980282, 898962],
+      "medianInputTokens": 980282,
+      "cachedInputTokens": [1071360, 915712, 834560],
+      "medianCachedInputTokens": 915712,
+      "outputTokens": [6137, 5103, 5564],
+      "medianOutputTokens": 5564,
+      "reasoningOutputTokens": [2105, 1719, 1993],
+      "medianReasoningOutputTokens": 1993,
+      "completedToolActions": [16, 11, 12],
+      "medianCompletedToolActions": 12
+    },
+    "gpt-5.6-sol": {
+      "scores": [100, 100, 100],
+      "criticalPasses": 3,
+      "wallMs": [328927, 247860, 254344],
+      "medianWallMs": 254344,
+      "inputTokens": [1072651, 1089562, 1154957],
+      "medianInputTokens": 1089562,
+      "cachedInputTokens": [1007872, 1024256, 1078784],
+      "medianCachedInputTokens": 1024256,
+      "outputTokens": [10064, 7321, 8498],
+      "medianOutputTokens": 8498,
+      "reasoningOutputTokens": [3913, 2450, 2873],
+      "medianReasoningOutputTokens": 2873,
+      "completedToolActions": [24, 14, 18],
+      "medianCompletedToolActions": 18
+    }
+  },
+  "lunaMedianDeltaPercentVersusSol": {
+    "wallMs": -1.93,
+    "inputTokens": -10.03,
+    "cachedInputTokens": -10.6,
+    "outputTokens": -34.53,
+    "reasoningOutputTokens": -30.63,
+    "completedToolActions": -33.33
+  },
+  "totalTokensAvailable": false,
+  "limitations": [
+    "One bounded TypeScript race-fix task does not establish general coding superiority.",
+    "This measures the underlying models through the same Codex CLI wrapper, not the current read-only Luna Swarm orchestration path.",
+    "Windows nested workspace-write was read-only, so v5 used remote-less disposable clones with sandbox bypass and post-run scope validation.",
+    "The CLI did not report total_tokens; no total was estimated.",
+    "The runner bypassed the Codex sandbox; host-path non-isolation was observed, so this is not protected evaluation evidence.",
+    "The 100-point score covers automated acceptance gates, not a blind qualitative code review.",
+    "The preregistration self-declared timestamp conflicts with the recorded run timing and has no external signed timestamp.",
+    "Median non-cached input differs by about 1.1%; most of the 10% total input difference is cached input.",
+    "Tool actions count only CLI item.completed events, not every started or upstream tool call."
+  ]
+}

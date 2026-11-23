@@ -127,6 +127,16 @@ export interface OutputArtifact {
 export type ReportKind = "executive" | "team" | "task" | "meeting" | "validation";
 export type ReportStatus = "draft" | "reviewing" | "approved" | "partial" | "attention" | "final";
 
+export interface GeneratedFile {
+  id: string;
+  kind: "output" | "preview";
+  fileName: string;
+  format: "pdf" | "docx" | "pptx" | "xlsx" | "csv" | "svg" | "png";
+  mimeType: string;
+  bytes: number;
+  sha256: string;
+}
+
 export interface CompanyReport {
   id: string;
   kind: ReportKind;
@@ -141,6 +151,7 @@ export interface CompanyReport {
   teamId?: string;
   sourceTaskIds: string[];
   sections: Array<{ title: string; items: string[] }>;
+  generatedFiles?: GeneratedFile[];
   references: {
     artifactIds: string[];
     gateIds: string[];
@@ -187,6 +198,89 @@ export interface CouncilV2Summary {
   blockingFindings: string[];
 }
 
+export type CompanyStatus = "ready" | "needs-review" | "blocked" | "running";
+
+export interface EmployeeBinding {
+  agentId: string;
+  displayName: string;
+  title: string;
+  department: DepartmentId;
+  teamId?: string;
+}
+
+export interface ReportCenterSummary {
+  executiveBrief: {
+    directive: string;
+    summary?: string;
+    coveredRequirements: number;
+    totalRequirements: number;
+    unresolvedRisks: number;
+    approvalStatus: CompanyStatus;
+  };
+  staffing: { logical: number; active: number; inflight: number; idle: number; employees: EmployeeBinding[] };
+  missionCells: Array<{
+    id: string; status: CompanyStatus; lifecycle: string; owner: EmployeeBinding; members: EmployeeBinding[];
+    workOrderIds: string[]; createdAt: string;
+  }>;
+  departmentBoard: Array<{
+    id: string; headquartersId?: string; objective: string; status: CompanyStatus; lifecycle: string;
+    owner: EmployeeBinding; reviewers: EmployeeBinding[]; artifactIds: string[]; handoffArtifactIds: string[];
+    cycleTimeMs?: number; reworkCount: number;
+  }>;
+  meetings: Array<{
+    id: string; agenda: string; state: string; status: CompanyStatus; participants: EmployeeBinding[]; round: number;
+    newEvidenceCount: number; challengeCount: number; minorityCount: number; followUpWorkOrderIds: string[]; outcome?: string;
+  }>;
+  evidenceLedger: Array<{
+    artifactId: string; revision?: number; contentHash?: string;
+    artifactRef?: { artifactId: string; revision: number; contentHash: string };
+    taskId?: string; workOrderId?: string; status: CompanyStatus; gateIds: string[];
+    referenceKinds: Array<"artifact-head" | "work-order" | "research-envelope" | "host-tool-receipt">;
+    hostToolReceiptArtifactIds: string[]; publiclyInspectable: boolean;
+  }>;
+  engineeringQuality: Array<{
+    taskId: string; candidateCount: number; selectedCandidateId?: string; protectedCheckCount: number;
+    repairRounds: number; redFindingCount: number; redVerdict?: string; integrated: boolean;
+  }>;
+  visualQa: Array<{
+    taskId: string; fileName: string; format: GeneratedFile["format"]; unitKind: "page" | "slide" | "view";
+    unitCount: number; previewCount: number; qaReceiptCount: number; status: CompanyStatus;
+  }>;
+  artifacts: Array<GeneratedFile & {
+    taskId: string; sourceArtifactId?: string; rendererReceiptIds: string[]; qaReceiptIds: string[]; stale: boolean;
+  }>;
+  health: {
+    activeAssignmentRate: number; meetingCount: number; meetingEvidenceCount: number; handoffCount: number;
+    reworkCount: number; reviewerIndependenceViolations: number;
+  };
+}
+
+export interface EvidenceArtifactDetail {
+  schemaVersion: 1;
+  artifactRef: { artifactId: string; revision: number; contentHash: string };
+  taskId: string;
+  workOrderId: string;
+  kind: "research";
+  verificationStatus: "accepted";
+  createdAt: string;
+  claims: Array<{
+    claimId: string;
+    claimText: string;
+    status: string;
+    modality: string;
+    claimHash: string;
+    citations: Array<{
+      citationHash: string;
+      snapshotHash: string;
+      sourceFamilyId: string;
+      sourceIdentityHash: string;
+      sourceUrl: string;
+      finalUrl: string;
+      spans: Array<{ startByte: number; endByte: number; quoteHash: string; quote: string }>;
+    }>;
+  }>;
+}
+
 export interface CompanyEvent {
   id: string;
   seq?: number;
@@ -199,6 +293,10 @@ export interface CompanyEvent {
   department?: DepartmentId;
   agentId?: string;
   taskId?: string;
+  workOrderId?: string;
+  councilId?: string;
+  artifactIds?: string[];
+  messageType?: string;
   specialistId?: string;
   skillIds?: string[];
   memoryIds?: string[];
@@ -235,6 +333,7 @@ export interface Snapshot {
   workOrders?: WorkOrderV2Summary[];
   councils?: CouncilV2Summary[];
   intelligenceV2?: IntelligenceV2Summary;
+  reportCenter?: ReportCenterSummary;
   harness?: {
     enabled: boolean;
     learningEnabled: boolean;

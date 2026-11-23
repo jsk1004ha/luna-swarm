@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createMockSnapshot } from "../data/mock";
-import { agentForEvent, agentForTask, companyRoster, eventBelongsToAgent, filteredAgents } from "./companyStore";
+import { agentForEvent, agentForTask, companyRoster, eventBelongsToAgent, filteredAgents, useCompanyStore } from "./companyStore";
 
 describe("run-pinned logical company roster", () => {
   it("keeps every resolved employee accessible independently of runtime seats", () => {
@@ -67,5 +67,19 @@ describe("run-pinned logical company roster", () => {
     expect(reviewer.id.localeCompare(owner.id)).toBeLessThan(0);
     expect(agentForTask(snapshot, taskId)?.id).toBe(owner.id);
     expect(eventBelongsToAgent({ ...snapshot.events[0]!, taskId, agentId: undefined }, reviewer)).toBe(false);
+  });
+});
+
+describe("event sequence cursor", () => {
+  it("advances through a replayed event already present in the authoritative snapshot", () => {
+    const snapshot = createMockSnapshot(2, 14);
+    const replayed = { ...snapshot.events[0]!, seq: 2 };
+    snapshot.events = [replayed];
+    useCompanyStore.setState({ snapshot, lastSeq: 1 });
+
+    useCompanyStore.getState().appendEvent(replayed, 2);
+
+    expect(useCompanyStore.getState().snapshot?.events).toHaveLength(1);
+    expect(useCompanyStore.getState().lastSeq).toBe(2);
   });
 });

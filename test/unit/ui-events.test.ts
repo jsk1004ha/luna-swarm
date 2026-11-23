@@ -67,7 +67,8 @@ test("WebSocket session returns snapshot plus replay and streams only unseen eve
   try {
     session.receive(JSON.stringify({ type: "subscribe", runId: "run-a", lastSeq: 1 }));
     assert.equal(sent[0]?.type, "snapshot");
-    assert.equal(sent[0]?.seq, 2);
+    assert.equal(sent[0]?.mode, "replay");
+    assert.equal(sent[0]?.seq, 1);
     assert.deepEqual(sent[0]?.data, { observation: { mode: "external-read-only", readOnly: true } });
     assert.equal(sent[1]?.type, "event");
     assert.equal(sent[1]?.seq, 2);
@@ -79,6 +80,92 @@ test("WebSocket session returns snapshot plus replay and streams only unseen eve
     assert.equal(sent[2]?.type, "event");
     assert.equal(sent[2]?.seq, 3);
     assert.deepEqual(sent[2]?.data, { value: 3 });
+  } finally {
+    session.close();
+  }
+});
+
+test("WebSocket session resynchronizes from an authoritative snapshot when retained replay has a gap", () => {
+  const hub = new UiEventHub({
+    maxEventsPerRun: 2,
+    now: () => new Date("2026-08-12T00:00:00.000Z"),
+  });
+  hub.setSnapshot("run-gap", { run: { id: "run-gap", status: "running" }, events: [] });
+  hub.publish("run-gap", "run.first", { value: 1 });
+  hub.publish("run-gap", "run.second", { value: 2 });
+  hub.publish("run-gap", "run.third", { value: 3 });
+  const sent: Array<Record<string, unknown>> = [];
+  const session = new UiEventWebSocketSession(hub, (serialized) => {
+    sent.push(JSON.parse(serialized) as Record<string, unknown>);
+  });
+  try {
+    session.subscribe("run-gap", 0);
+    assert.deepEqual(sent, [{
+      type: "snapshot",
+      mode: "resync",
+      seq: 3,
+      data: { run: { id: "run-gap", status: "running" }, events: [] },
+    }]);
+  } finally {
+    session.close();
+  }
+});
+
+test("WebSocket session fails closed when replay is incomplete and no authoritative snapshot exists", () => {
+  const hub = new UiEventHub({ maxEventsPerRun: 1 });
+  hub.publish("run-no-snapshot", "run.first", { value: 1 });
+  hub.publish("run-no-snapshot", "run.second", { value: 2 });
+  const sent: Array<Record<string, unknown>> = [];
+  const session = new UiEventWebSocketSession(hub, (serialized) => {
+    sent.push(JSON.parse(serialized) as Record<string, unknown>);
+  });
+  try {
+    session.subscribe("run-no-snapshot", 0);
+    assert.deepEqual(sent, [{
+      type: "error",
+      code: "REPLAY_UNAVAILABLE",
+      seq: 2,
+      data: { message: "Authoritative snapshot unavailable for event resynchronization" },
+    }]);
+  } finally {
+    session.close();
+  }
+});
+
+test("WebSocket session buffers a publish injected during replay without loss or duplication", () => {
+  const hub = new UiEventHub({ now: () => new Date("2026-08-12T00:00:00.000Z") });
+  hub.setSnapshot("run-race", { run: { id: "run-race", status: "running" }, events: [] });
+  hub.publish("run-race", "run.first", { value: 1 });
+  hub.publish("run-race", "run.second", { value: 2 });
+  const sent: Array<Record<string, unknown>> = [];
+  const session = new UiEventWebSocketSession(hub, (serialized) => {
+    const message = JSON.parse(serialized) as Record<string, unknown>;
+    sent.push(message);
+    if (message.type === "snapshot") hub.publish("run-race", "run.third", { value: 3 });
+  });
+  try {
+    session.subscribe("run-race", 0);
+    assert.deepEqual(sent.filter((message) => message.type === "event").map((message) => message.seq), [1, 2, 3]);
+  } finally {
+    session.close();
+  }
+});
+
+test("WebSocket session resynchronizes an ahead cursor after a server journal restart", () => {
+  const hub = new UiEventHub();
+  hub.setSnapshot("run-restarted", { run: { id: "run-restarted", status: "completed" }, events: [] });
+  const sent: Array<Record<string, unknown>> = [];
+  const session = new UiEventWebSocketSession(hub, (serialized) => {
+    sent.push(JSON.parse(serialized) as Record<string, unknown>);
+  });
+  try {
+    session.subscribe("run-restarted", 90);
+    assert.deepEqual(sent, [{
+      type: "snapshot",
+      mode: "resync",
+      seq: 0,
+      data: { run: { id: "run-restarted", status: "completed" }, events: [] },
+    }]);
   } finally {
     session.close();
   }
@@ -118,7 +205,8 @@ test("WebSocket upgrade serves snapshot replay to a real client", async () => {
     });
     await received;
     assert.equal(messages[0]?.type, "snapshot");
-    assert.equal(messages[0]?.seq, 2);
+    assert.equal(messages[0]?.mode, "replay");
+    assert.equal(messages[0]?.seq, 1);
     assert.deepEqual(messages[0]?.data, { observation: { mode: "external-read-only", readOnly: true } });
     assert.equal(messages[1]?.type, "event");
     assert.equal(messages[1]?.seq, 2);

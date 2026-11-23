@@ -49,6 +49,14 @@ export class UiRuntimeRegistry {
   }
 
   async control(command: Exclude<UiControlCommand, { action: "start" }>): Promise<UiControlResult> {
+    if (command.action === "recover") {
+      return {
+        accepted: false,
+        runId: command.runId,
+        code: "RECOVERY_ROUTING_REQUIRED",
+        message: "중단 실행 복구는 UI host coordinator가 처리해야 합니다.",
+      };
+    }
     const runtime = this.runtimes.get(command.runId);
     if (!runtime) {
       return {

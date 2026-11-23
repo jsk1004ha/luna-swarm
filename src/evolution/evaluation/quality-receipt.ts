@@ -1,8 +1,9 @@
 import { sign as signBytes, verify as verifyBytes } from "node:crypto";
-import { lstat, mkdir, open, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { canonicalJson, canonicalSha256, immutable, type Sha256 } from "../domain/canonical.js";
 import { assertNoLinks, ExecutionBundleStore } from "../registry/bundle-store.js";
+import { durableCreateText } from "../registry/durable-file.js";
 
 export const BENCHMARK_QUALITY_AUTHORITY = "benchmark-suite-v1" as const;
 
@@ -27,6 +28,14 @@ export interface BenchmarkQualityReceiptInput {
   primaryQuality: number;
   measuredAt: string;
   evaluatorVersion: string;
+  protectedExecutionRef?: ProtectedExecutionReceiptRef;
+}
+
+export interface ProtectedExecutionReceiptRef {
+  id: `protected-execution:${string}`;
+  revision: 1;
+  contentHash: Sha256;
+  authority: "protected-evaluator-v1";
 }
 
 export interface BenchmarkQualityReceipt extends BenchmarkQualityReceiptInput {
@@ -69,6 +78,7 @@ export function createBenchmarkQualityReceipt(
   requireBareHash(input.outcomeReceiptHash, "outcomeReceiptHash");
   if (!Number.isFinite(input.primaryQuality)) throw new Error("primaryQuality must be finite");
   requireTimestamp(input.measuredAt, "measuredAt");
+  if (input.protectedExecutionRef) validateProtectedExecutionRef(input.protectedExecutionRef);
   const material = {
     schemaVersion: 1 as const,
     authority: BENCHMARK_QUALITY_AUTHORITY,
@@ -84,12 +94,19 @@ export function verifyBenchmarkQualityReceipt(receipt: BenchmarkQualityReceipt):
   try {
     const { recordHash, receiptId, signature, ...material } = receipt;
     requireName(receipt.keyId, "keyId");
+    if (receipt.protectedExecutionRef) validateProtectedExecutionRef(receipt.protectedExecutionRef);
     if (!/^[A-Za-z0-9_-]{40,512}$/.test(signature)) return false;
     return canonicalSha256({ ...material, receiptId, signature }) === recordHash &&
       `quality-receipt:${canonicalSha256({ ...material, signature }).slice(7, 39)}` === receiptId;
   } catch {
     return false;
   }
+}
+
+function validateProtectedExecutionRef(ref: ProtectedExecutionReceiptRef): void {
+  if (!ref.id.startsWith("protected-execution:") || ref.id.length > 512 || ref.revision !== 1 ||
+      ref.authority !== "protected-evaluator-v1") throw new Error("protectedExecutionRef is invalid");
+  requireDigest(ref.contentHash, "protectedExecutionRef.contentHash");
 }
 
 export function verifyBenchmarkQualityAuthority(
@@ -120,7 +137,7 @@ export class BenchmarkQualityReceiptStore {
     if (!verifyBenchmarkQualityReceipt(receipt)) throw new BenchmarkQualityReceiptIntegrityError("Benchmark quality receipt integrity check failed");
     await this.init();
     try {
-      await writeFile(this.path(receipt.receiptId), `${canonicalJson(receipt)}\n`, { encoding: "utf8", flag: "wx" });
+      await durableCreateText(this.path(receipt.receiptId), `${canonicalJson(receipt)}\n`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
         throw new BenchmarkQualityReceiptConflictError(`Benchmark quality receipt already exists: ${receipt.receiptId}`);

@@ -28,6 +28,7 @@ import {
   type ExplicitSourceIdentity,
   type SourceIdentityResolution,
 } from "./source-identity.js";
+import { COMPANY_OS_ORG_VERSION, HARNESS_V2_ORG_VERSION } from "../harness-v2/contracts.js";
 export {
   resolveEvolutionSourceIdentity,
   SourceIdentityUnavailableError,
@@ -60,6 +61,7 @@ export interface EvolutionRuntimeFingerprintInput {
   maxConcurrency: number;
   harnessPolicyVersion: string;
   organizationVersion: string;
+  releaseEpoch: number;
   sourceCommit?: string;
 }
 
@@ -102,6 +104,7 @@ export function environmentDigest(input: EvolutionRuntimeFingerprintInput): Sha2
     maxConcurrency: input.maxConcurrency,
     harnessPolicyVersion: input.harnessPolicyVersion,
     organizationVersion: input.organizationVersion,
+    releaseEpoch: input.releaseEpoch,
     sourceCommit: sourceCommitIdentity(input),
   });
 }
@@ -138,8 +141,13 @@ export function baselineGenome(input: EvolutionRuntimeFingerprintInput): Readonl
       "pinned-bundle-per-run",
     ],
   });
+  const baselineIdentity = canonicalSha256({
+    organizationVersion: input.organizationVersion,
+    harnessPolicyVersion: input.harnessPolicyVersion,
+    protectedGateHash,
+  });
   return createOrganizationGenome({
-    genomeId: `genome-baseline-${protectedGateHash.slice(7, 23)}`,
+    genomeId: `genome-baseline-${baselineIdentity.slice(7, 23)}`,
     parentGenomeIds: [],
     topologyRef: `organization:${input.organizationVersion}`,
     roleContracts: { registry: `organization:${input.organizationVersion}` },
@@ -188,6 +196,7 @@ export function baselineBundle(
   };
   const identity = canonicalSha256({
     sourceCommit: sourceCommitIdentity(input),
+    releaseEpoch: input.releaseEpoch,
     modelConfigHash,
     componentHashes,
   });
@@ -203,6 +212,7 @@ export function baselineBundle(
       harnessV2: 2,
       evolution: EVOLUTION_SCHEMA_VERSION,
       promptModuleV1: PROMPT_MODULE_SCHEMA_VERSION,
+      shippedBaselineReleaseEpoch: input.releaseEpoch,
     },
     workloadClasses: [...EVOLUTION_WORKLOAD_CLASSES],
     createdAt,
@@ -221,11 +231,12 @@ export async function initializeEvolutionRuntime(
   const baselinePrompt = baselinePromptModule(input);
   const genome = baselineGenome(input);
   const baseline = baselineBundle(input);
+  const quarantineStore = new GenomeQuarantineStore(workspace, genomeStore);
   const pointerStore = new StablePointerStore(workspace, {
     bundleStore,
+    quarantineStore,
     bootstrapAuthority: { bundleId: baseline.bundleId, bundleHash: baseline.bundleHash },
   });
-  const quarantineStore = new GenomeQuarantineStore(workspace, genomeStore);
   await promptModuleStore.publish(baselinePrompt);
   await genomeStore.publish(genome);
   await bundleStore.publish(baseline);
@@ -268,25 +279,16 @@ export async function initializeEvolutionRuntime(
       if (!pointer) throw new Error(`Evolution Stable Pointer baseline upgrade did not converge for ${workloadClass}`);
       bundle = await bundleStore.read(pointer.bundleId);
     }
-    if (bundle.bundleHash !== pointer.bundleHash) throw new Error("Evolution Stable Pointer hash mismatch");
-    const genomeHash = bundle.componentHashes.genome;
-    if (!genomeHash) throw new Error("Evolution Bundle is missing its immutable genome hash");
-    assertSha256(genomeHash, "Evolution Bundle genome hash");
-    await quarantineStore.assertPinAllowed({
-      genomeId: bundle.genomeId,
-      genomeHash,
+    const runBinding = await pointerStore.pinRunBundle({
       workloadClass,
-    });
-    behaviors[workloadClass] = await verifyRunnableEvolutionBundle(genomeStore, bundle, input, promptModuleStore);
-    bundles[workloadClass] = bundle;
-    pins[workloadClass] = Object.freeze({
-      workloadClass,
-      bundleId: bundle.bundleId,
-      bundleHash: bundle.bundleHash,
-      pointerGeneration: pointer.generation,
-      environmentDigest: environmentDigest(input),
+      environmentDigest: environmentDigest(fingerprintForBundleOrganization(bundle, input)),
       pinnedAt,
     });
+    pointer = runBinding.pointer;
+    bundle = runBinding.bundle;
+    behaviors[workloadClass] = await verifyRunnableEvolutionBundle(genomeStore, bundle, input, promptModuleStore);
+    bundles[workloadClass] = bundle;
+    pins[workloadClass] = runBinding.pin;
   }
   return { bundleStore, genomeStore, pointerStore, quarantineStore, promptModuleStore, bundles, pins, behaviors };
 }
@@ -331,8 +333,8 @@ export async function restoreEvolutionRuntime(
   const bundleStore = new ExecutionBundleStore(workspace);
   const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
   const promptModuleStore = new PromptModuleStore(workspace, bundleStore);
-  const pointerStore = new StablePointerStore(workspace, { bundleStore });
   const quarantineStore = new GenomeQuarantineStore(workspace, genomeStore);
+  const pointerStore = new StablePointerStore(workspace, { bundleStore, quarantineStore });
   const expectedClasses = [...EVOLUTION_WORKLOAD_CLASSES].sort();
   if (JSON.stringify(Object.keys(pins).sort()) !== JSON.stringify(expectedClasses)) {
     throw new Error("Persisted run Bundle pin set is incomplete or contains unsupported workloads");
@@ -343,18 +345,17 @@ export async function restoreEvolutionRuntime(
   for (const workloadClass of expectedClasses) {
     const pin = pins[workloadClass];
     if (!pin || pin.workloadClass !== workloadClass) throw new Error(`Persisted Bundle pin identity mismatch for ${workloadClass}`);
-    const bundle = await bundleStore.read(pin.bundleId);
-    if (bundle.bundleHash !== pin.bundleHash) throw new Error("Persisted run Bundle pin hash mismatch");
-    if (pin.environmentDigest !== environmentDigest(input)) throw new Error("Persisted run environment digest is incompatible");
-    if (!bundle.workloadClasses.includes(workloadClass)) throw new Error(`Persisted Bundle does not support ${workloadClass}`);
+    const bundle = await pointerStore.assertPinnedRunBundleAllowed({
+      workloadClass,
+      bundleId: pin.bundleId,
+      bundleHash: pin.bundleHash,
+    });
+    if (pin.environmentDigest !== environmentDigest(fingerprintForBundleOrganization(bundle, input))) {
+      throw new Error("Persisted run environment digest is incompatible");
+    }
     const genomeHash = bundle.componentHashes.genome;
     if (!genomeHash) throw new Error("Persisted Evolution Bundle is missing its immutable genome hash");
     assertSha256(genomeHash, "Persisted Evolution Bundle genome hash");
-    await quarantineStore.assertPinAllowed({
-      genomeId: bundle.genomeId,
-      genomeHash,
-      workloadClass,
-    });
     behaviors[workloadClass] = await verifyRunnableEvolutionBundle(genomeStore, bundle, input, promptModuleStore);
     bundles[workloadClass] = bundle;
     restoredPins[workloadClass] = Object.freeze(structuredClone(pin));
@@ -424,8 +425,20 @@ export async function verifyRunnableEvolutionBundle(
     throw new Error("Bundle source commit is not runnable by this binary");
   }
   const genome = await genomes.read(bundle.genomeId);
+  const baselineInput = fingerprintForBundleOrganization(bundle, input);
   return loadExecutionBehaviorV1(promptModules, bundle, genome, {
-    bundle: baselineBundle(input),
-    genome: baselineGenome(input),
+    bundle: baselineBundle(baselineInput),
+    genome: baselineGenome(baselineInput),
   });
+}
+
+function fingerprintForBundleOrganization(
+  bundle: Readonly<ExecutionBundle>,
+  input: EvolutionRuntimeFingerprintInput,
+): EvolutionRuntimeFingerprintInput {
+  const organizationVersion = [input.organizationVersion, HARNESS_V2_ORG_VERSION, COMPANY_OS_ORG_VERSION]
+    .find((candidate) => bundle.componentHashes.organization === canonicalSha256(candidate));
+  return organizationVersion && organizationVersion !== input.organizationVersion
+    ? { ...input, organizationVersion }
+    : input;
 }

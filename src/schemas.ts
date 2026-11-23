@@ -6,6 +6,8 @@ import type {
   SwarmPlan,
   ValidationVote,
 } from "./types.js";
+import { parseArtifactProductionSpec } from "./artifact-production/contracts.js";
+import { ARTIFACT_PRODUCTION_MANIFEST_SCHEMA } from "./artifact-production/runtime.js";
 
 const strings: JsonValue = { type: "array", items: { type: "string" } };
 const nonEmptyStrings: JsonValue = { type: "array", minItems: 1, items: { type: "string" } };
@@ -215,6 +217,7 @@ export const PLAN_SCHEMA: JsonValue = {
               "command-verification",
               "workspace-change",
               "external-research-and-workspace-change",
+              "artifact-production",
             ],
           },
           requiredCapabilities: {
@@ -227,6 +230,7 @@ export const PLAN_SCHEMA: JsonValue = {
                 "external-network",
                 "workspace-write",
                 "command-execution",
+                "artifact-render",
               ],
             },
           },
@@ -285,6 +289,166 @@ export const RESULT_SCHEMA: JsonValue = {
     checks: strings,
     uncertainties: strings,
     confidence: { type: "number", minimum: 0, maximum: 1 },
+  },
+};
+
+const researchCitationPlan: JsonValue = {
+  anyOf: [
+    {
+      type: "object", additionalProperties: false, required: ["sourceUrl", "quotes"],
+      properties: {
+        sourceUrl: { type: "string", minLength: 8, maxLength: 4_096 },
+        quotes: { type: "array", minItems: 1, items: { type: "string", minLength: 1, maxLength: 4_000 } },
+      },
+    },
+    {
+      type: "object", additionalProperties: false, required: ["sourceUrl", "spans"],
+      properties: {
+        sourceUrl: { type: "string", minLength: 8, maxLength: 4_096 },
+        spans: {
+          type: "array", minItems: 1,
+          items: {
+            type: "object", additionalProperties: false, required: ["startByte", "endByte"],
+            properties: {
+              startByte: { type: "integer", minimum: 0 },
+              endByte: { type: "integer", minimum: 1 },
+            },
+          },
+        },
+      },
+    },
+  ],
+};
+
+/** Strict two-stage research result. Search metadata proposes candidates; only fetched immutable snapshots become evidence. */
+export const RESEARCH_RESULT_SCHEMA: JsonValue = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "taskId", "summary", "claims", "evidence", "deliverables", "checks",
+    "uncertainties", "confidence", "researchPlan",
+  ],
+  properties: {
+    taskId: { type: "string" }, summary: { type: "string" },
+    claims: { type: "array", items: claim }, evidence: strings, deliverables: strings,
+    checks: strings, uncertainties: strings,
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    researchPlan: {
+      type: "object", additionalProperties: false, required: ["queries", "claims"],
+      properties: {
+        queries: {
+          type: "array", minItems: 2, maxItems: 32,
+          items: {
+            type: "object", additionalProperties: false,
+            required: ["cellId", "query", "lane", "maxCandidates", "freshnessWindowDays"],
+            properties: {
+              cellId: { type: "string", minLength: 1, maxLength: 160 },
+              query: { type: "string", minLength: 1, maxLength: 500 },
+              lane: { type: "string", enum: ["official", "academic", "industry", "counterevidence"] },
+              maxCandidates: { type: "integer", minimum: 1, maximum: 20 },
+              freshnessWindowDays: { type: "integer", minimum: 1, maximum: 36_500 },
+            },
+          },
+        },
+        claims: {
+          type: "array", minItems: 1, maxItems: 128,
+          items: {
+            type: "object", additionalProperties: false,
+            required: ["claimText", "modality", "citations", "status", "assumptions", "falsifier"],
+            properties: {
+              claimText: { type: "string", minLength: 1, maxLength: 4_000 },
+              comparisonKey: { type: "string", minLength: 1, maxLength: 500 },
+              modality: { type: "string", enum: ["fact", "estimate", "interpretation", "recommendation"] },
+              normalizedValue: {
+                type: "object", additionalProperties: false, required: ["value", "unit"],
+                properties: {
+                  value: { type: "number" }, unit: { type: "string", minLength: 1, maxLength: 160 },
+                  period: { type: "string", minLength: 1, maxLength: 500 },
+                  geography: { type: "string", minLength: 1, maxLength: 500 },
+                  population: { type: "string", minLength: 1, maxLength: 500 },
+                },
+              },
+              citations: { type: "array", minItems: 1, items: researchCitationPlan },
+              status: { type: "string", enum: ["supported"] },
+              assumptions: strings,
+              falsifier: { type: "string", minLength: 1, maxLength: 2_000 },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+const implementationManifest: JsonValue = {
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "baseCommit", "changes"],
+  properties: {
+    schemaVersion: { type: "integer", enum: [1] },
+    baseCommit: { type: "string", minLength: 1 },
+    changes: {
+      type: "array",
+      minItems: 1,
+      maxItems: 512,
+      items: {
+        anyOf: [
+          {
+            type: "object", additionalProperties: false,
+            required: ["path", "operation", "mode", "contentUtf8"],
+            properties: {
+              path: { type: "string", minLength: 1 },
+              operation: { type: "string", enum: ["upsert"] },
+              mode: { type: "string", enum: ["100644", "100755"] },
+              contentUtf8: { type: "string" },
+            },
+          },
+          {
+            type: "object", additionalProperties: false,
+            required: ["path", "operation", "mode"],
+            properties: {
+              path: { type: "string", minLength: 1 },
+              operation: { type: "string", enum: ["delete"] },
+              mode: { type: "string", enum: ["100644", "100755"] },
+            },
+          },
+        ],
+      },
+    },
+  },
+};
+
+/** Strict worker result envelope used only for a host-authorized workspace-change task. */
+export const CODING_RESULT_SCHEMA: JsonValue = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "taskId", "summary", "claims", "evidence", "deliverables", "checks",
+    "uncertainties", "confidence", "implementationManifest",
+  ],
+  properties: {
+    taskId: { type: "string" }, summary: { type: "string" },
+    claims: { type: "array", items: claim }, evidence: strings, deliverables: strings,
+    checks: strings, uncertainties: strings,
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    implementationManifest,
+  },
+};
+
+/** Strict worker result envelope used only for a host-authorized artifact-production task. */
+export const ARTIFACT_RESULT_SCHEMA: JsonValue = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "taskId", "summary", "claims", "evidence", "deliverables", "checks",
+    "uncertainties", "confidence", "artifactManifest",
+  ],
+  properties: {
+    taskId: { type: "string" }, summary: { type: "string" },
+    claims: { type: "array", items: claim }, evidence: strings, deliverables: strings,
+    checks: strings, uncertainties: strings,
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    artifactManifest: ARTIFACT_PRODUCTION_MANIFEST_SCHEMA as JsonValue,
   },
 };
 
@@ -450,6 +614,71 @@ export function assertResult(value: AgentResult, taskId: string, allowedRequirem
       );
     }
   }
+}
+
+export function assertCodingResult(value: AgentResult, taskId: string, allowedRequirementIds?: string[]): void {
+  assertResult(value, taskId, allowedRequirementIds);
+  const manifest = value.implementationManifest;
+  if (!manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.changes) || manifest.changes.length === 0) {
+    throw new Error(`Workspace-change result for ${taskId} lacks an implementation manifest`);
+  }
+  const paths = new Set<string>();
+  for (const [index, change] of manifest.changes.entries()) {
+    const normalized = change.path.replace(/\\/g, "/");
+    if (!normalized || normalized.startsWith("/") || /^[A-Za-z]:\//.test(normalized) ||
+      normalized.split("/").some((part: string) => part === "" || part === "." || part === "..") ||
+      normalized === ".git" || normalized.startsWith(".git/") ||
+      normalized === ".luna-swarm" || normalized.startsWith(".luna-swarm/")) {
+      throw new Error(`Implementation manifest change ${index} has an unsafe path`);
+    }
+    if (paths.has(normalized)) throw new Error(`Implementation manifest has duplicate path ${normalized}`);
+    paths.add(normalized);
+    if (!(["upsert", "delete"] as const).includes(change.operation)) {
+      throw new Error(`Implementation manifest change ${index} has an invalid operation`);
+    }
+    if (!(["100644", "100755"] as const).includes(change.mode)) {
+      throw new Error(`Implementation manifest change ${index} has an invalid mode`);
+    }
+    if (change.operation === "upsert" && typeof change.contentUtf8 !== "string") {
+      throw new Error(`Implementation manifest upsert ${normalized} lacks contentUtf8`);
+    }
+    if (change.operation === "delete" && change.contentUtf8 !== undefined) {
+      throw new Error(`Implementation manifest delete ${normalized} must not contain contentUtf8`);
+    }
+  }
+}
+
+export function assertResearchResult(value: AgentResult, taskId: string, allowedRequirementIds?: string[]): void {
+  assertResult(value, taskId, allowedRequirementIds);
+  const plan = value.researchPlan;
+  if (!plan || !Array.isArray(plan.queries) || plan.queries.length < 2 || !Array.isArray(plan.claims) || plan.claims.length === 0) {
+    throw new Error(`External-research result for ${taskId} lacks a source-isolated research plan`);
+  }
+  const queryKeys = new Set<string>();
+  for (const query of plan.queries) {
+    const key = `${query.lane}\0${query.query.normalize("NFKC").replace(/\s+/gu, " ").trim()}`;
+    if (!query.cellId || !query.query || queryKeys.has(key) || !Number.isSafeInteger(query.maxCandidates) ||
+        query.maxCandidates < 1 || query.maxCandidates > 20 || !Number.isSafeInteger(query.freshnessWindowDays) ||
+        query.freshnessWindowDays < 1) {
+      throw new Error(`External-research result for ${taskId} has an invalid or duplicate query cell`);
+    }
+    queryKeys.add(key);
+  }
+  for (const researchClaim of plan.claims) {
+    if (!researchClaim.claimText || researchClaim.status !== "supported" || !researchClaim.falsifier ||
+        !Array.isArray(researchClaim.citations) || researchClaim.citations.length === 0) {
+      throw new Error(`External-research result for ${taskId} has an unsupported or uncited research claim`);
+    }
+  }
+}
+
+export function assertArtifactResult(value: AgentResult, taskId: string, allowedRequirementIds?: string[]): void {
+  assertResult(value, taskId, allowedRequirementIds);
+  const manifest = value.artifactManifest;
+  if (!manifest || typeof manifest !== "object" || !("spec" in manifest)) {
+    throw new Error(`Artifact-production result for ${taskId} lacks an artifact manifest`);
+  }
+  value.artifactManifest = { spec: parseArtifactProductionSpec(manifest.spec) };
 }
 
 export function assertVote(value: ValidationVote, validatorId: string): void {

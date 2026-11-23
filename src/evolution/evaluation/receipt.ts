@@ -1,9 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { canonicalJson, canonicalSha256, immutable, type Sha256 } from "../domain/canonical.js";
 import { ExecutionBundleStore, assertNoLinks } from "../registry/bundle-store.js";
+import { durableCreateText, durableReplaceText } from "../registry/durable-file.js";
+import {
+  ProtectedExecutionReceiptStore,
+  type TrustedProtectedProcessAuthority,
+} from "../evaluator/execution-receipt-store.js";
+import { verifyProtectedExecutionReceipt } from "../evaluator/protected-runner.js";
+import type { ProtectedManifestRegistration } from "../evaluator/protected-runner.js";
 import { ObjectiveOutcomeReceiptStore } from "../trace/outcome-store.js";
 import { DecisionTraceStore } from "../trace/store.js";
 import {
@@ -21,6 +28,12 @@ import {
   type EvolutionScorecard,
   type PairedCaseObservation,
 } from "./scorecard.js";
+import {
+  verifyPreregisteredPairedEvaluationManifest,
+  type PreregisteredPairedEvaluationManifest,
+  type PreregisteredPairScheduleEntry,
+} from "./paired-outcome.js";
+import { createCandidateBuildDigest, type CandidateBuildInput } from "./case-identity.js";
 
 export const AUTHORITATIVE_PAIRED_EVALUATOR_VERSION = "paired-evaluator-v2" as const;
 
@@ -44,6 +57,16 @@ export interface PairedEvaluationManifestInput {
   environmentDigest: Sha256;
   scheduledObservations: ScheduledPairedObservation[];
   registeredAt: string;
+  protectedEvaluation?: ProtectedEvaluationManifestBinding;
+}
+
+export interface ProtectedEvaluationManifestBinding {
+  manifest: PreregisteredPairedEvaluationManifest;
+  registration: ProtectedManifestRegistration;
+  builds: {
+    champion: CandidateBuildInput;
+    challenger: CandidateBuildInput;
+  };
 }
 
 export interface PairedEvaluationManifest extends PairedEvaluationManifestInput {
@@ -91,7 +114,9 @@ export interface PairedEvaluationReceiptInput {
 export interface PairedEvaluationReceiptStoreOptions {
   directoryName?: string;
   qualityReceiptStore?: BenchmarkQualityReceiptStore;
+  protectedExecutionReceiptStore?: ProtectedExecutionReceiptStore;
   trustedBenchmarkAuthorities?: Readonly<Record<string, TrustedBenchmarkAuthority>>;
+  trustedProtectedProcessAuthorities?: Readonly<Record<string, TrustedProtectedProcessAuthority>>;
 }
 
 export interface PairedEvaluationReceipt extends PairedEvaluationReceiptInput {
@@ -154,6 +179,15 @@ export function createPairedEvaluationManifest(input: PairedEvaluationManifestIn
     environmentDigest: input.environmentDigest,
     scheduledObservations,
     registeredAt: input.registeredAt,
+    ...(input.protectedEvaluation ? {
+      protectedEvaluation: validateProtectedEvaluationBinding(
+        input.protectedEvaluation,
+        scheduledObservations,
+        input.environmentDigest,
+        input.champion,
+        input.challenger,
+      ),
+    } : {}),
   };
   const manifestId = `evaluation-manifest:${canonicalSha256(material).slice(7, 39)}` as const;
   const withoutHash = { ...material, manifestId };
@@ -169,6 +203,7 @@ export function verifyPairedEvaluationManifest(manifest: PairedEvaluationManifes
       environmentDigest: manifest.environmentDigest,
       scheduledObservations: structuredClone(manifest.scheduledObservations),
       registeredAt: manifest.registeredAt,
+      ...(manifest.protectedEvaluation ? { protectedEvaluation: structuredClone(manifest.protectedEvaluation) } : {}),
     });
     return rebuilt.manifestId === manifest.manifestId && rebuilt.recordHash === manifest.recordHash;
   } catch {
@@ -241,6 +276,7 @@ export class PairedEvaluationReceiptStore {
   private readonly outcomes: ObjectiveOutcomeReceiptStore;
   private readonly traces: DecisionTraceStore;
   private readonly qualityReceipts: BenchmarkQualityReceiptStore;
+  private readonly protectedExecutionReceipts: ProtectedExecutionReceiptStore;
   private readonly trustedBenchmarkAuthorities: Readonly<Record<string, TrustedBenchmarkAuthority>>;
 
   constructor(workspace: string, options: string | PairedEvaluationReceiptStoreOptions = {}) {
@@ -252,6 +288,11 @@ export class PairedEvaluationReceiptStore {
     this.outcomes = new ObjectiveOutcomeReceiptStore(workspace);
     this.traces = new DecisionTraceStore(workspace);
     this.qualityReceipts = resolvedOptions.qualityReceiptStore ?? new BenchmarkQualityReceiptStore(workspace);
+    this.protectedExecutionReceipts = resolvedOptions.protectedExecutionReceiptStore ?? new ProtectedExecutionReceiptStore(workspace, {
+      ...(resolvedOptions.trustedProtectedProcessAuthorities
+        ? { trustedProcessAuthorities: resolvedOptions.trustedProtectedProcessAuthorities }
+        : {}),
+    });
     this.trustedBenchmarkAuthorities = Object.freeze({ ...(resolvedOptions.trustedBenchmarkAuthorities ?? {}) });
   }
 
@@ -263,7 +304,7 @@ export class PairedEvaluationReceiptStore {
       throw new PairedEvaluationReceiptIntegrityError("Manifest requested registration time is outside the store clock window");
     }
     try {
-      await writeFile(this.manifestPath(manifest.manifestId), `${canonicalJson(manifest)}\n`, { encoding: "utf8", flag: "wx" });
+      await durableCreateText(this.manifestPath(manifest.manifestId), `${canonicalJson(manifest)}\n`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const existing = JSON.parse(await readRegularEvaluationFile(this.manifestPath(manifest.manifestId))) as PairedEvaluationManifest;
@@ -292,7 +333,7 @@ export class PairedEvaluationReceiptStore {
       const registrationId = `evaluation-registration:${canonicalSha256(material).slice(7, 39)}` as const;
       const withoutHash = { ...material, registrationId };
       const registration = immutable({ ...withoutHash, recordHash: canonicalSha256(withoutHash) });
-      await writeFile(this.registrationPath(registrationId), `${canonicalJson(registration)}\n`, { encoding: "utf8", flag: "wx" });
+      await durableCreateText(this.registrationPath(registrationId), `${canonicalJson(registration)}\n`);
       await this.writeRegistrationHead({ generation: registration.generation, registrationId, registrationHash: registration.recordHash });
       return registration;
     } finally {
@@ -303,10 +344,10 @@ export class PairedEvaluationReceiptStore {
   async append(receipt: PairedEvaluationReceipt): Promise<Readonly<PairedEvaluationReceipt>> {
     if (!verifyPairedEvaluationReceipt(receipt)) throw new PairedEvaluationReceiptIntegrityError("Paired evaluation receipt integrity check failed");
     await this.init();
-    const registration = await this.verifyPromotionAuthority(receipt);
-    await this.verifyOutcomeBindings(receipt, registration);
+    const authority = await this.verifyPromotionAuthority(receipt);
+    await this.verifyOutcomeBindings(receipt, authority);
     try {
-      await writeFile(this.path(receipt.receiptId), `${canonicalJson(receipt)}\n`, { encoding: "utf8", flag: "wx" });
+      await durableCreateText(this.path(receipt.receiptId), `${canonicalJson(receipt)}\n`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new PairedEvaluationReceiptConflictError(`Evaluation receipt already exists: ${receipt.receiptId}`);
       throw error;
@@ -320,8 +361,8 @@ export class PairedEvaluationReceiptStore {
     if (receipt.receiptId !== receiptId || !verifyPairedEvaluationReceipt(receipt)) {
       throw new PairedEvaluationReceiptIntegrityError("Paired evaluation receipt integrity check failed");
     }
-    const registration = await this.verifyPromotionAuthority(receipt);
-    await this.verifyOutcomeBindings(receipt, registration);
+    const authority = await this.verifyPromotionAuthority(receipt);
+    await this.verifyOutcomeBindings(receipt, authority);
     return immutable(receipt);
   }
 
@@ -333,8 +374,8 @@ export class PairedEvaluationReceiptStore {
       if (name !== `${canonicalSha256(receipt.receiptId).slice(7)}.json` || !verifyPairedEvaluationReceipt(receipt)) {
         throw new PairedEvaluationReceiptIntegrityError("Paired evaluation receipt integrity check failed");
       }
-      const registration = await this.verifyPromotionAuthority(receipt);
-      await this.verifyOutcomeBindings(receipt, registration);
+      const authority = await this.verifyPromotionAuthority(receipt);
+      await this.verifyOutcomeBindings(receipt, authority);
       return immutable(receipt);
     }));
   }
@@ -365,7 +406,11 @@ export class PairedEvaluationReceiptStore {
     await assertNoLinks(this.boundary.workspaceDirectory, this.registrationDirectory);
   }
 
-  private async verifyOutcomeBindings(receipt: PairedEvaluationReceipt, registration: EvaluationManifestRegistration): Promise<void> {
+  private async verifyOutcomeBindings(
+    receipt: PairedEvaluationReceipt,
+    authority: { registration: EvaluationManifestRegistration; manifest: PairedEvaluationManifest },
+  ): Promise<void> {
+    const { registration, manifest } = authority;
     const seen = new Set<string>();
     const seenTraces = new Set<string>();
     for (const observation of receipt.observations) {
@@ -416,12 +461,17 @@ export class PairedEvaluationReceiptStore {
           metrics.qualityMeasurementRef,
           metrics.quality,
           receipt.evaluatedAt,
+          manifest,
+          observation,
         );
       }
     }
   }
 
-  private async verifyPromotionAuthority(receipt: PairedEvaluationReceipt): Promise<EvaluationManifestRegistration> {
+  private async verifyPromotionAuthority(receipt: PairedEvaluationReceipt): Promise<{
+    registration: EvaluationManifestRegistration;
+    manifest: PairedEvaluationManifest;
+  }> {
     if (receipt.evaluatorVersion !== AUTHORITATIVE_PAIRED_EVALUATOR_VERSION) {
       throw new PairedEvaluationReceiptIntegrityError("Paired evaluation receipt uses a non-authoritative evaluator version");
     }
@@ -463,7 +513,10 @@ export class PairedEvaluationReceiptStore {
     if (canonicalJson(scorecard) !== canonicalJson(receipt.scorecard)) {
       throw new PairedEvaluationReceiptIntegrityError("Paired evaluation scorecard was not produced by the authoritative promotion policy");
     }
-    return registration;
+    if (!manifest.protectedEvaluation) {
+      throw new PairedEvaluationReceiptIntegrityError("Paired evaluation manifest is missing protected process registration evidence");
+    }
+    return { registration, manifest };
   }
 
   private async readRegistration(registrationId: string): Promise<EvaluationManifestRegistration> {
@@ -514,9 +567,7 @@ export class PairedEvaluationReceiptStore {
   }
 
   private async writeRegistrationHead(head: { generation: number; registrationId: `evaluation-registration:${string}`; registrationHash: Sha256 }): Promise<void> {
-    const temporary = `${this.registrationHeadPath()}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temporary, `${canonicalJson(head)}\n`, "utf8");
-    await rename(temporary, this.registrationHeadPath());
+    await durableReplaceText(this.registrationHeadPath(), `${canonicalJson(head)}\n`);
   }
 
   private async acquireRegistrationLock(): Promise<{ token: string }> {
@@ -606,6 +657,8 @@ export class PairedEvaluationReceiptStore {
     ref: PairedCaseObservation["champion"]["qualityMeasurementRef"],
     expectedQuality: number,
     evaluatedAt: string,
+    manifest: PairedEvaluationManifest,
+    observation: PairedCaseObservation,
   ): Promise<void> {
     if (!ref || ref.authority !== BENCHMARK_QUALITY_AUTHORITY || ref.revision !== 1) {
       throw new PairedEvaluationReceiptIntegrityError(`${side} outcome is missing an authoritative quality measurement receipt`);
@@ -618,6 +671,50 @@ export class PairedEvaluationReceiptStore {
     }
     if (!verifyBenchmarkQualityAuthority(receipt, this.trustedBenchmarkAuthorities[receipt.keyId])) {
       throw new PairedEvaluationReceiptIntegrityError(`${side} benchmark suite is not trusted by the protected evaluator`);
+    }
+    if (!receipt.protectedExecutionRef) {
+      throw new PairedEvaluationReceiptIntegrityError(`${side} benchmark quality is missing protected process execution evidence`);
+    }
+    const authority = this.trustedBenchmarkAuthorities[receipt.keyId];
+    const protectedBinding = manifest.protectedEvaluation!;
+    const protectedSchedule = protectedBinding.manifest.schedule.find((item) =>
+      scheduleIdentity(item) === scheduleIdentity(observation));
+    const expectedBuildDigest = side === "champion"
+      ? protectedBinding.manifest.championBuildDigest
+      : protectedBinding.manifest.challengerBuildDigest;
+    if (!protectedSchedule) {
+      throw new PairedEvaluationReceiptIntegrityError(`${side} protected process schedule is not registered for this observation`);
+    }
+    let execution;
+    let processAttestedAt: string;
+    try {
+      const evidence = await this.protectedExecutionReceipts.read(receipt.protectedExecutionRef.id);
+      execution = evidence.executionReceipt;
+      processAttestedAt = evidence.processAttestation.verifiedAt;
+    } catch {
+      throw new PairedEvaluationReceiptIntegrityError(`${side} protected process execution receipt is unavailable or invalid`);
+    }
+    if (!authority || !verifyProtectedExecutionReceipt(execution, authority.publicKeyPem) ||
+        execution.recordHash !== receipt.protectedExecutionRef.contentHash ||
+        execution.authority !== receipt.protectedExecutionRef.authority ||
+        execution.manifestId !== protectedBinding.registration.manifestId ||
+        execution.manifestHash !== protectedBinding.registration.recordHash ||
+        execution.scheduleId !== protectedSchedule.scheduleId || execution.side !== side ||
+        execution.candidateBuildDigest !== expectedBuildDigest ||
+        execution.keyId !== receipt.keyId || execution.evaluatorVersion !== receipt.evaluatorVersion ||
+        execution.benchmarkSuiteId !== protectedBinding.registration.benchmarkSuiteId ||
+        execution.benchmarkSuiteHash !== protectedBinding.registration.benchmarkSuiteHash ||
+        execution.benchmarkSuiteId !== receipt.benchmarkSuiteId || execution.benchmarkSuiteHash !== receipt.benchmarkSuiteHash ||
+        execution.caseDigest !== receipt.caseDigest || execution.bundleId !== receipt.bundleId ||
+        execution.bundleHash !== receipt.bundleHash || execution.runId !== receipt.runId ||
+        execution.workOrderId !== receipt.workOrderId || execution.attemptId !== receipt.attemptId ||
+        execution.outcomeReceiptId !== receipt.outcomeReceiptId || execution.outcomeReceiptHash !== receipt.outcomeReceiptHash ||
+        execution.environmentDigest !== outcome.environmentDigest || execution.budgetDigest !== outcome.budgetDigest ||
+        execution.primaryQuality !== receipt.primaryQuality || execution.measuredAt !== receipt.measuredAt ||
+        Date.parse(processAttestedAt) < Date.parse(execution.measuredAt) ||
+        Date.parse(processAttestedAt) > Date.parse(evaluatedAt) ||
+        execution.terminalState !== "SUCCEEDED") {
+      throw new PairedEvaluationReceiptIntegrityError(`${side} protected process execution is not bound to the benchmark quality measurement`);
     }
     if (receipt.recordHash !== ref.contentHash || receipt.authority !== ref.authority ||
         receipt.outcomeReceiptId !== outcome.receiptId || receipt.outcomeReceiptHash !== outcome.recordHash ||
@@ -634,6 +731,47 @@ export class PairedEvaluationReceiptStore {
 
 function manifestReference(manifest: PairedEvaluationManifest): EvaluationManifestRef {
   return { id: manifest.manifestId, revision: 1, contentHash: manifest.recordHash };
+}
+
+function validateProtectedEvaluationBinding(
+  input: ProtectedEvaluationManifestBinding,
+  scheduledObservations: ReadonlyArray<ScheduledPairedObservation>,
+  environmentDigest: Sha256,
+  champion: EvaluatedBundleIdentity,
+  challenger: EvaluatedBundleIdentity,
+): ProtectedEvaluationManifestBinding {
+  if (!verifyPreregisteredPairedEvaluationManifest(input.manifest)) {
+    throw new Error("Protected evaluation manifest integrity check failed");
+  }
+  const { recordHash, manifestId, ...registrationMaterial } = input.registration;
+  if (input.registration.schemaVersion !== 1 ||
+      canonicalSha256({ ...registrationMaterial, manifestId }) !== recordHash ||
+      manifestId !== `protected-manifest:${canonicalSha256(registrationMaterial).slice(7, 39)}` ||
+      input.registration.benchmarkSuiteId !== input.manifest.benchmarkSuiteId ||
+      input.registration.pairedManifestDigest !== input.manifest.manifestDigest) {
+    throw new Error("Protected evaluation manifest registration integrity check failed");
+  }
+  if (input.manifest.schedule.length !== scheduledObservations.length) {
+    throw new Error("Protected evaluation schedule does not match the promotion schedule");
+  }
+  const expected = new Set(scheduledObservations.map((item) => scheduleIdentity(item)));
+  for (const item of input.manifest.schedule) {
+    if (item.environmentDigest !== environmentDigest ||
+        !expected.delete(scheduleIdentity(item))) {
+      throw new Error("Protected evaluation schedule does not match the promotion schedule");
+    }
+  }
+  if (expected.size !== 0) throw new Error("Protected evaluation schedule does not exactly cover the promotion schedule");
+  const buildBindings = [
+    ["champion", input.builds?.champion, input.manifest.championBuildDigest, champion.bundleHash],
+    ["challenger", input.builds?.challenger, input.manifest.challengerBuildDigest, challenger.bundleHash],
+  ] as const;
+  for (const [side, build, expectedDigest, expectedBundleHash] of buildBindings) {
+    if (!build || createCandidateBuildDigest(build) !== expectedDigest || build.bundleDigest !== expectedBundleHash) {
+      throw new Error(`Protected ${side} build is not cryptographically bound to the paired Bundle`);
+    }
+  }
+  return structuredClone(input);
 }
 
 type ScheduleIdentity = Pick<ScheduledPairedObservation, "caseId" | "slice" | "repeat"> & { caseDigest: string; budgetDigest: string };

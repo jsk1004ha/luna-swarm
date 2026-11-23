@@ -18,6 +18,7 @@ interface CompanyState {
   lastSeq: number;
   setRuns: (runs: RunSummary[]) => void;
   setSnapshot: (snapshot: Snapshot, connection?: ConnectionState, seq?: number) => void;
+  resyncSnapshot: (snapshot: Snapshot, seq: number) => void;
   appendEvent: (event: CompanyEvent, seq?: number) => void;
   setConnection: (connection: ConnectionState) => void;
   setError: (error: string | null) => void;
@@ -55,8 +56,21 @@ export const useCompanyStore = create<CompanyState>((set) => ({
       ? Math.max(state.lastSeq, seq ?? 0, ...snapshot.events.map((event) => event.seq ?? 0))
       : Math.max(seq ?? 0, ...snapshot.events.map((event) => event.seq ?? 0)),
   })),
+  resyncSnapshot: (snapshot, seq) => set((state) => ({
+    snapshot,
+    connection: snapshot.run.isStale ? "stale" : "live",
+    error: null,
+    selectedAgentId: state.selectedAgentId && companyRoster(snapshot).some((agent) => agent.id === state.selectedAgentId)
+      ? state.selectedAgentId
+      : null,
+    lastSeq: seq,
+  })),
   appendEvent: (event, seq) => set((state) => {
-    if (!state.snapshot || state.snapshot.events.some((item) => item.id === event.id)) return state;
+    const eventSeq = seq ?? event.seq;
+    if (!state.snapshot || (eventSeq !== undefined && eventSeq <= state.lastSeq)) return state;
+    if (state.snapshot.events.some((item) => item.id === event.id)) {
+      return { lastSeq: Math.max(state.lastSeq, eventSeq ?? 0) };
+    }
     return {
       snapshot: { ...state.snapshot, events: [event, ...state.snapshot.events].slice(0, 1_000) },
       lastSeq: Math.max(state.lastSeq, seq ?? event.seq ?? 0),

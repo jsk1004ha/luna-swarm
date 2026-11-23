@@ -17,6 +17,7 @@ import {
   ActiveRolloutBindingStore,
   createPrePromotionRecoveryAuthorities,
   createDeploymentControlPlane,
+  createSignedOperatorApproval,
   createSignedRolloutReceipt,
   deterministicCanaryAssignment,
   DeploymentEffectLedger,
@@ -38,6 +39,7 @@ import {
   type RolloutMetrics,
   type RolloutRevision,
   type SignedRolloutReceipt,
+  type TrustedOperatorAuthority,
   type TrustedRolloutAuthority,
   type VerifiedFailureCapsuleReference,
 } from "../../src/evolution/deployment/index.js";
@@ -82,6 +84,17 @@ function signingAuthority(authority: TrustedRolloutAuthority["authority"]) {
       publicKeyPem: pair.publicKey.export({ type: "spki", format: "pem" }).toString(),
       authority,
     } satisfies TrustedRolloutAuthority,
+  };
+}
+
+function operatorAuthority() {
+  const pair = generateKeyPairSync("ed25519");
+  return {
+    privateKeyPem: pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    trusted: {
+      publicKeyPem: pair.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      authority: "operator",
+    } satisfies TrustedOperatorAuthority,
   };
 }
 
@@ -236,11 +249,15 @@ async function advanceToShadow(input: {
   });
 }
 
-async function fixture(t: test.TestContext) {
+async function fixture(
+  t: test.TestContext,
+  options: { candidateStatus?: ExecutionBundleInput["status"] } = {},
+) {
   const workspace = await mkdtemp(join(tmpdir(), "deployment-runtime-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const evaluator = signingAuthority("independent_evaluator");
   const operations = signingAuthority("operations");
+  const operator = operatorAuthority();
   const authorities = { evaluator: evaluator.trusted, operations: operations.trusted };
   const bundleStore = new ExecutionBundleStore(workspace);
   const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
@@ -249,7 +266,7 @@ async function fixture(t: test.TestContext) {
   const champion = await bundleStore.publish(bundle("bundle-runtime-champion", championGenome, { status: "stable" }));
   const candidate = await bundleStore.publish(bundle("bundle-runtime-candidate", candidateGenome, {
     parentBundleIds: [champion.bundleId],
-    status: "canary",
+    status: options.candidateStatus ?? "canary",
   }));
   const pointerStore = new StablePointerStore(workspace, {
     bundleStore,
@@ -302,6 +319,7 @@ async function fixture(t: test.TestContext) {
   const coordinator = new RolloutCoordinator({
     store: rolloutStore,
     authorities,
+    operatorAuthorities: { operator: operator.trusted },
     rollbackAuthority: recovery.rollbackAuthority,
     quarantineAuthority: recovery.quarantineAuthority,
     failureCapsuleHook: recovery.failureCapsuleHook,
@@ -334,6 +352,7 @@ async function fixture(t: test.TestContext) {
     workspace,
     evaluator,
     operations,
+    operator,
     authorities,
     champion,
     candidate,
@@ -351,6 +370,88 @@ async function fixture(t: test.TestContext) {
     router,
   };
 }
+
+test("rollout activation rejects intrinsically quarantined or retired candidate bundles", async (t) => {
+  for (const candidateStatus of ["quarantined", "retired"] as const) {
+    await assert.rejects(
+      () => fixture(t, { candidateStatus }),
+      /is not runnable/,
+    );
+  }
+});
+
+test("failed Stable promotion validation preserves the operator-approved active binding", async (t) => {
+  const f = await fixture(t);
+  let rollout = (await f.rolloutStore.read(ROLLOUT_ID))!;
+  rollout = await f.coordinator.advance({
+    rolloutId: rollout.rolloutId,
+    expectedRevision: rollout.revision,
+    target: "canary",
+    actor: "deployment-controller",
+    reason: "shadow healthy",
+    receipt: rolloutReceipt({ stage: "shadow_slo", key: f.operations, bundleHash: f.candidate.bundleHash }),
+  });
+  rollout = await f.coordinator.advance({
+    rolloutId: rollout.rolloutId,
+    expectedRevision: rollout.revision,
+    target: "promotable",
+    actor: "deployment-controller",
+    reason: "canary healthy",
+    receipt: rolloutReceipt({ stage: "canary_slo", key: f.operations, bundleHash: f.candidate.bundleHash }),
+  });
+  const operatorApproval = createSignedOperatorApproval({
+    keyId: "operator",
+    rolloutId: rollout.rolloutId,
+    rolloutRevision: rollout.revision,
+    bundleHash: rollout.bundleHash,
+    generation: rollout.generation,
+    target: "operator_promoted",
+    issuedAt: "2026-08-14T00:00:00.000Z",
+    expiresAt: "2026-08-15T00:00:00.000Z",
+    nonce: `operator-promoted-${rollout.revision}`,
+  }, f.operator.privateKeyPem);
+  rollout = await f.coordinator.advance({
+    rolloutId: rollout.rolloutId,
+    expectedRevision: rollout.revision,
+    target: "operator_promoted",
+    actor: "release-daemon",
+    reason: "operator approved",
+    operatorApproval,
+  });
+  assert.equal(rollout.state, "operator_promoted");
+
+  let guardCalls = 0;
+  const guardedPointers = new StablePointerStore(f.workspace, {
+    bundleStore: f.bindings.boundary,
+    evaluationStore: { read: async () => { throw new Error("invalid paired evaluation fixture"); } },
+    quarantineStore: f.quarantineStore,
+    assertPromotionAllowed: async (request) => {
+      guardCalls += 1;
+      const candidate = await f.bindings.boundary.read(request.bundleId);
+      await f.bindings.prepareStablePromotion({
+        workloadClass: request.workloadClass,
+        bundleId: request.bundleId,
+        bundleHash: candidate.bundleHash,
+        expectedPointerGeneration: request.expectedGeneration,
+        actor: request.actor,
+        reason: request.reason,
+      });
+    },
+  });
+  await assert.rejects(() => guardedPointers.promote({
+    workloadClass: WORKLOAD,
+    bundleId: f.candidate.bundleId,
+    expectedGeneration: 1,
+    mode: "manual",
+    actor: "release-daemon",
+    reason: "invalid evaluation must not alter rollout state",
+    evaluationReceipt: { receiptId: "evaluation:invalid", contentHash: canonicalSha256("invalid") },
+  }), /invalid paired evaluation fixture/);
+  assert.equal(guardCalls, 0, "the rollout guard runs only after all fallible evaluation checks pass");
+  const active = await f.bindings.readActive(WORKLOAD);
+  assert.equal(active?.rollout.state, "operator_promoted");
+  assert.equal(active?.binding.candidate.bundleId, f.candidate.bundleId);
+});
 
 test("shadow routes exact pins on distinct threads and isolates detached candidate output", async (t) => {
   const f = await fixture(t);
@@ -395,6 +496,35 @@ test("shadow routes exact pins on distinct threads and isolates detached candida
   assert.equal(telemetry[0]!.visibility, "detached");
   assert.equal(telemetry[0]!.resultDigest, canonicalSha256("candidate-secret api_key=shadow-must-not-leak"));
   assert.doesNotMatch(JSON.stringify(telemetry), /shadow-must-not-leak/);
+});
+
+test("a quarantined active candidate is stopped before any new shadow request", async (t) => {
+  const f = await fixture(t);
+  await f.quarantineStore.quarantine({
+    genomeId: f.candidate.genomeId,
+    genomeHash: f.candidate.componentHashes.genome as Sha256,
+    expectedRevision: 0,
+    scope: { type: "workload", workloadClass: WORKLOAD },
+    reason: "runtime admission regression",
+    quarantinedAt: FIXED_AT,
+  });
+  let candidateExecuted = false;
+  const result = await f.router.route({
+    requestId: "request-quarantined-shadow",
+    workloadClass: WORKLOAD,
+    workloadKey: "quarantined-shadow",
+    baseThreadKey: "thread-runtime",
+    championPin: f.championPin,
+    execute: async (context) => {
+      candidateExecuted ||= context.pin.selection === "candidate";
+      return context.pin.bundleId;
+    },
+  });
+  await f.router.drain();
+  assert.equal(result.mode, "stable_only");
+  assert.equal(result.value, f.champion.bundleId);
+  assert.equal(candidateExecuted, false);
+  assert.equal((await f.bindings.readIndex(WORKLOAD))?.action, "stop");
 });
 
 test("canary persists deterministic exact-generation assignment before executing the selected pin", async (t) => {
@@ -660,6 +790,7 @@ test("runtime telemetry automatically drives signed rollback and restart-safe ex
   assert.equal((await restarted.controlJournal.readCursor())?.processedCount, 1);
   assert.equal((await f.quarantineStore.read()).revision, 1);
   assert.equal((await f.failureStore.listHeads()).length, 1);
+  assert.equal(await restarted.bindings.readActive(WORKLOAD), undefined, "startup recovery releases terminal rollout bindings");
 });
 
 function canonicalAssignment(

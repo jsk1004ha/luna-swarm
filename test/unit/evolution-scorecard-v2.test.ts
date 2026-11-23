@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, sign as signBytes } from "node:crypto";
 import { link, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createExecutionBundle } from "../../src/evolution/domain/bundle.js";
+import {
+  createExecutionBundle,
+  createOrganizationGenome,
+  organizationGenomeHash,
+} from "../../src/evolution/domain/bundle.js";
 import { authoritativePromotionPolicy, evaluatePairedCandidate, type PairedCaseObservation } from "../../src/evolution/evaluation/scorecard.js";
 import {
   AUTHORITATIVE_PAIRED_EVALUATOR_VERSION,
@@ -13,20 +17,39 @@ import {
   createPairedEvaluationReceipt,
   verifyPairedEvaluationReceipt,
 } from "../../src/evolution/evaluation/receipt.js";
-import { canonicalSha256 } from "../../src/evolution/domain/canonical.js";
+import { canonicalJson, canonicalSha256 } from "../../src/evolution/domain/canonical.js";
 import {
   BenchmarkQualityReceiptStore,
   benchmarkQualityReceiptRef,
   createBenchmarkQualityReceipt,
 } from "../../src/evolution/evaluation/quality-receipt.js";
+import { createCandidateBuildDigest } from "../../src/evolution/evaluation/case-identity.js";
+import { createPreregisteredPairedEvaluationManifest } from "../../src/evolution/evaluation/paired-outcome.js";
 import { ExecutionBundleStore } from "../../src/evolution/registry/bundle-store.js";
+import { OrganizationGenomeStore } from "../../src/evolution/registry/genome-store.js";
 import { StablePointerStore } from "../../src/evolution/registry/stable-pointer-store.js";
 import { ObjectiveOutcomeReceiptStore } from "../../src/evolution/trace/outcome-store.js";
+import {
+  ProtectedExecutionReceiptStore,
+  createProtectedProcessSessionAttestation,
+  protectedProcessPolicy,
+  type ProtectedExecutionReceipt,
+} from "../../src/evolution/evaluator/index.js";
 import { createObjectiveEvidence } from "../helpers/evolution-evidence.js";
 
 const ENVIRONMENT = canonicalSha256("env");
 const BUDGET = canonicalSha256({ tokens: 10_000, timeMs: 60_000, tools: "replayed" });
 const placeholderRef = (label: string) => ({ id: `outcome-receipt:${label}`, revision: 1, contentHash: canonicalSha256(label).slice(7) });
+
+function signedProtectedExecutionReceipt(
+  input: Omit<ProtectedExecutionReceipt, "receiptId" | "signature" | "recordHash">,
+  privateKeyPem: string,
+): Readonly<ProtectedExecutionReceipt> {
+  const signature = signBytes(null, Buffer.from(canonicalJson(input)), privateKeyPem).toString("base64url");
+  const receiptId = `protected-execution:${canonicalSha256({ ...input, signature }).slice(7, 39)}` as const;
+  const withoutHash = { ...input, receiptId, signature };
+  return Object.freeze({ ...withoutHash, recordHash: canonicalSha256(withoutHash) });
+}
 
 function observations(overrides: Partial<PairedCaseObservation> = {}): PairedCaseObservation[] {
   return ["security", "integration"].flatMap((slice, sliceIndex) =>
@@ -65,6 +88,56 @@ function authoritativeObservations(prefix: string): PairedCaseObservation[] {
       challenger: { quality: .75, efficiency: .99, outcomeReceipt: placeholderRef(`challenger-${caseId}-${repeat}`), qualityMeasurementRef: qualityRef("challenger"), hardGatesPassed: true, requirementsRetained: true, evidenceRetained: true, criticalRegression: false },
     } satisfies PairedCaseObservation;
   })).flat();
+}
+
+function protectedEvaluationBinding(
+  prefix: string,
+  observations: ReadonlyArray<PairedCaseObservation>,
+  championBundleHash = canonicalSha256("bundle-a"),
+  challengerBundleHash = canonicalSha256("bundle-b"),
+) {
+  const benchmarkSuiteId = `${prefix}-protected-suite-v1`;
+  const championBuild = {
+    sourceDigest: canonicalSha256(`${prefix}-champion-source`),
+    bundleDigest: championBundleHash,
+    buildManifestDigest: canonicalSha256(`${prefix}-champion-build`),
+    dependencyLockDigest: canonicalSha256(`${prefix}-champion-lock`),
+  };
+  const challengerBuild = {
+    sourceDigest: canonicalSha256(`${prefix}-challenger-source`),
+    bundleDigest: challengerBundleHash,
+    buildManifestDigest: canonicalSha256(`${prefix}-challenger-build`),
+    dependencyLockDigest: canonicalSha256(`${prefix}-challenger-lock`),
+  };
+  const manifest = createPreregisteredPairedEvaluationManifest({
+    benchmarkSuiteId,
+    championBuildDigest: createCandidateBuildDigest(championBuild),
+    challengerBuildDigest: createCandidateBuildDigest(challengerBuild),
+    schedule: observations.map(({ caseId, slice, repeat, caseDigest, budgetDigest }) => ({
+      scheduleId: `${prefix}:${caseId}:${repeat}`,
+      caseId,
+      slice,
+      repeat,
+      caseDigest: caseDigest as never,
+      environmentDigest: ENVIRONMENT as never,
+      budgetDigest: budgetDigest as never,
+    })),
+  });
+  const registrationMaterial = {
+    schemaVersion: 1 as const,
+    benchmarkSuiteId,
+    benchmarkSuiteHash: canonicalSha256({ benchmarkSuiteId, prefix }),
+    pairedManifestDigest: manifest.manifestDigest,
+    authorizationNonceHash: canonicalSha256(`${prefix}-nonce`),
+    registeredAt: new Date().toISOString(),
+  };
+  const manifestId = `protected-manifest:${canonicalSha256(registrationMaterial).slice(7, 39)}` as const;
+  const withoutHash = { ...registrationMaterial, manifestId };
+  return {
+    manifest,
+    registration: { ...withoutHash, recordHash: canonicalSha256(withoutHash) },
+    builds: { champion: championBuild, challenger: challengerBuild },
+  };
 }
 
 const policy = {
@@ -353,6 +426,7 @@ test("evaluation rejects traces that started before the authoritative manifest c
     environmentDigest: ENVIRONMENT,
     scheduledObservations: obs.map(({ caseId, slice, repeat, caseDigest, budgetDigest }) => ({ caseId, slice, repeat, caseDigest: caseDigest as `sha256:${string}`, budgetDigest: budgetDigest as `sha256:${string}` })),
     registeredAt: new Date().toISOString(),
+    protectedEvaluation: protectedEvaluationBinding("temporal", obs),
   });
   const store = new PairedEvaluationReceiptStore(workspace);
   const registration = await store.registerManifest(manifest);
@@ -392,6 +466,7 @@ test("promotion remains fail-closed without a verified authoritative quality rec
     environmentDigest: ENVIRONMENT,
     scheduledObservations: obs.map(({ caseId, slice, repeat, caseDigest, budgetDigest }) => ({ caseId, slice, repeat, caseDigest: caseDigest as `sha256:${string}`, budgetDigest: budgetDigest as `sha256:${string}` })),
     registeredAt: new Date().toISOString(),
+    protectedEvaluation: protectedEvaluationBinding("quality", obs),
   });
   const store = new PairedEvaluationReceiptStore(workspace);
   const registration = await store.registerManifest(manifest);
@@ -436,7 +511,33 @@ test("promotion remains fail-closed without a verified authoritative quality rec
   await assert.rejects(() => store.append(receipt), /authoritative quality measurement receipt is unavailable or invalid/);
 });
 
-test("real CAS outcomes plus signed benchmark quality authorize manual promotion", { timeout: 600_000 }, async (t) => {
+test("protected evaluation rejects a favorable build bound to a different challenger Bundle", () => {
+  const observations = authoritativeObservations("build-mismatch");
+  const binding = protectedEvaluationBinding("build-mismatch", observations);
+  const mismatched = {
+    ...binding,
+    builds: {
+      ...binding.builds,
+      challenger: {
+        ...binding.builds.challenger,
+        bundleDigest: canonicalSha256("unrelated-challenger-bundle"),
+      },
+    },
+  };
+  assert.throws(() => createPairedEvaluationManifest({
+    workloadClass: "engineering.bugfix",
+    champion: { bundleId: "bundle-a", bundleHash: canonicalSha256("bundle-a") },
+    challenger: { bundleId: "bundle-b", bundleHash: canonicalSha256("bundle-b") },
+    environmentDigest: ENVIRONMENT,
+    scheduledObservations: observations.map(({ caseId, slice, repeat, caseDigest, budgetDigest }) => ({
+      caseId, slice, repeat, caseDigest: caseDigest as `sha256:${string}`, budgetDigest: budgetDigest as `sha256:${string}`,
+    })),
+    registeredAt: new Date().toISOString(),
+    protectedEvaluation: mismatched,
+  }), /not cryptographically bound to the paired Bundle/);
+});
+
+test("real CAS outcomes plus host-attested protected execution authorize manual promotion", { timeout: 600_000 }, async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "evolution-quality-signed-"));
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const benchmarkSuiteId = "engineering-bugfix-suite-v1";
@@ -447,14 +548,66 @@ test("real CAS outcomes plus signed benchmark quality authorize manual promotion
     publicKeyEncoding: { type: "spki", format: "pem" },
     privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
+  const hostKeys = generateKeyPairSync("ed25519", {
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  const hostKeyId = "protected-process-host-key-v1";
+  const processPolicy = protectedProcessPolicy({
+    evaluatorExecutableSha256: canonicalSha256("scorecard-evaluator-executable"),
+    evaluatorCommandSha256: canonicalSha256("scorecard-evaluator-command"),
+    evaluatorClosureRoot: workspace,
+    evaluatorIntegrityFiles: [{
+      path: join(workspace, "attested", "evaluator.mjs"),
+      sha256: canonicalSha256("scorecard-evaluator-closure"),
+    }],
+    trustedRunnerExecutableSha256: canonicalSha256("scorecard-runner-executable"),
+    trustedRunnerCommandSha256: canonicalSha256("scorecard-runner-command"),
+    trustedRunnerClosureRoot: workspace,
+    trustedRunnerIntegrityFiles: [{
+      path: join(workspace, "attested", "runner.mjs"),
+      sha256: canonicalSha256("scorecard-runner-closure"),
+    }],
+  });
   const bundleStore = new ExecutionBundleStore(workspace);
+  const genomeStore = new OrganizationGenomeStore(workspace, bundleStore);
+  const evaluationGenome = await genomeStore.publish(createOrganizationGenome({
+    genomeId: "genome-authoritative-evaluation",
+    parentGenomeIds: [],
+    topologyRef: "topology:authoritative-evaluation",
+    roleContracts: { evaluator: "role:authoritative-evaluation" },
+    promptModules: { evaluator: "prompt:authoritative-evaluation" },
+    workflowGraphRef: "workflow:authoritative-evaluation",
+    assignmentPolicyRef: "assignment:authoritative-evaluation",
+    contextPolicyRef: "context:authoritative-evaluation",
+    memoryPolicyRef: "memory:authoritative-evaluation",
+    meetingPolicyRef: "meeting:authoritative-evaluation",
+    schedulerPolicyRef: "scheduler:authoritative-evaluation",
+    toolPolicyRefs: ["tools:authoritative-evaluation"],
+    evaluatorRefs: ["evaluator:protected-process-v1"],
+    protectedGateHash: canonicalSha256("authoritative-evaluation-gates"),
+    mutationManifest: {
+      mutationId: "mutation-authoritative-evaluation",
+      targetFailureIds: [],
+      hypothesis: "Protected paired evidence authorizes only its exact candidate",
+      mechanism: "Bind benchmark execution, build, and Bundle identities",
+      changedComponents: [],
+      predictedBenefits: ["promotion integrity"],
+      predictedRisks: ["strict legacy rejection"],
+      rollbackPlan: "retain the prior Stable Pointer",
+    },
+  }));
+  const evaluationGenomeHash = organizationGenomeHash(evaluationGenome);
   const championBundle = createExecutionBundle({
     bundleId: "bundle-authoritative-champion",
     genomeId: "genome-authoritative-evaluation",
     parentBundleIds: [],
     sourceCommit: "test-source-identity",
     modelConfigHash: canonicalSha256("model-config"),
-    componentHashes: { orchestrator: canonicalSha256("orchestrator-champion") },
+    componentHashes: {
+      genome: evaluationGenomeHash,
+      orchestrator: canonicalSha256("orchestrator-champion"),
+    },
     schemaVersions: { genome: 1, bundle: 1 },
     workloadClasses: ["engineering.bugfix"],
     createdAt: "2026-08-13T00:00:00.000Z",
@@ -466,7 +619,10 @@ test("real CAS outcomes plus signed benchmark quality authorize manual promotion
     parentBundleIds: [championBundle.bundleId],
     sourceCommit: "test-source-identity",
     modelConfigHash: canonicalSha256("model-config"),
-    componentHashes: { orchestrator: canonicalSha256("orchestrator-challenger") },
+    componentHashes: {
+      genome: evaluationGenomeHash,
+      orchestrator: canonicalSha256("orchestrator-challenger"),
+    },
     schemaVersions: { genome: 1, bundle: 1 },
     workloadClasses: ["engineering.bugfix"],
     createdAt: "2026-08-13T00:00:01.000Z",
@@ -475,6 +631,48 @@ test("real CAS outcomes plus signed benchmark quality authorize manual promotion
   await bundleStore.publish(championBundle);
   await bundleStore.publish(challengerBundle);
   const obs = authoritativeObservations("signed");
+  const championBuild = {
+    sourceDigest: canonicalSha256({ side: "champion", source: championBundle.bundleId }),
+    bundleDigest: championBundle.bundleHash,
+    buildManifestDigest: canonicalSha256({ side: "champion", manifest: "protected-scorecard" }),
+    dependencyLockDigest: canonicalSha256({ side: "champion", dependencyLock: "test-fixture" }),
+  };
+  const challengerBuild = {
+    sourceDigest: canonicalSha256({ side: "challenger", source: challengerBundle.bundleId }),
+    bundleDigest: challengerBundle.bundleHash,
+    buildManifestDigest: canonicalSha256({ side: "challenger", manifest: "protected-scorecard" }),
+    dependencyLockDigest: canonicalSha256({ side: "challenger", dependencyLock: "test-fixture" }),
+  };
+  const championBuildDigest = createCandidateBuildDigest(championBuild);
+  const challengerBuildDigest = createCandidateBuildDigest(challengerBuild);
+  const protectedManifest = createPreregisteredPairedEvaluationManifest({
+    benchmarkSuiteId,
+    championBuildDigest,
+    challengerBuildDigest,
+    schedule: obs.map(({ caseId, slice, repeat, caseDigest, budgetDigest }) => ({
+      scheduleId: `schedule:${caseId}:${repeat}`,
+      caseId,
+      slice,
+      repeat,
+      caseDigest: caseDigest as never,
+      environmentDigest: ENVIRONMENT as never,
+      budgetDigest: budgetDigest as never,
+    })),
+  });
+  const protectedRegistrationMaterial = {
+    schemaVersion: 1 as const,
+    benchmarkSuiteId,
+    benchmarkSuiteHash,
+    pairedManifestDigest: protectedManifest.manifestDigest,
+    authorizationNonceHash: canonicalSha256("scorecard-protected-nonce"),
+    registeredAt: new Date().toISOString(),
+  };
+  const protectedManifestId = `protected-manifest:${canonicalSha256(protectedRegistrationMaterial).slice(7, 39)}` as const;
+  const protectedRegistrationWithoutHash = { ...protectedRegistrationMaterial, manifestId: protectedManifestId };
+  const protectedRegistration = {
+    ...protectedRegistrationWithoutHash,
+    recordHash: canonicalSha256(protectedRegistrationWithoutHash),
+  };
   const manifest = createPairedEvaluationManifest({
     workloadClass: "engineering.bugfix",
     champion: { bundleId: championBundle.bundleId, bundleHash: championBundle.bundleHash },
@@ -488,10 +686,21 @@ test("real CAS outcomes plus signed benchmark quality authorize manual promotion
       budgetDigest: budgetDigest as `sha256:${string}`,
     })),
     registeredAt: new Date().toISOString(),
+    protectedEvaluation: {
+      manifest: protectedManifest,
+      registration: protectedRegistration,
+      builds: { champion: championBuild, challenger: challengerBuild },
+    },
   });
   const qualityStore = new BenchmarkQualityReceiptStore(workspace);
+  const protectedExecutionStore = new ProtectedExecutionReceiptStore(workspace, {
+    trustedProcessAuthorities: {
+      [hostKeyId]: { publicKeyPem: hostKeys.publicKey, policy: processPolicy },
+    },
+  });
   const store = new PairedEvaluationReceiptStore(workspace, {
     qualityReceiptStore: qualityStore,
+    protectedExecutionReceiptStore: protectedExecutionStore,
     trustedBenchmarkAuthorities: {
       [keyId]: {
         evaluatorVersion,
@@ -522,6 +731,47 @@ test("real CAS outcomes plus signed benchmark quality authorize manual promotion
       });
       const outcome = await outcomeStore.read(objectiveRef.id);
       metrics.outcomeReceipt = objectiveRef;
+      const measuredAt = new Date(Date.parse(registration.committedAt) + 3_000).toISOString();
+      const execution = signedProtectedExecutionReceipt({
+        schemaVersion: 1,
+        authority: "protected-evaluator-v1",
+        keyId,
+        evaluatorVersion,
+        manifestId: protectedRegistration.manifestId,
+        manifestHash: protectedRegistration.recordHash,
+        benchmarkSuiteId,
+        benchmarkSuiteHash,
+        scheduleId: `schedule:${item.caseId}:${item.repeat}`,
+        side,
+        candidateBuildDigest: side === "champion" ? championBuildDigest : challengerBuildDigest,
+        bundleId: bundle.bundleId,
+        bundleHash: bundle.bundleHash,
+        runId: outcome.runId,
+        workOrderId: outcome.workOrderId,
+        attemptId: outcome.attemptId,
+        outcomeReceiptId: outcome.receiptId,
+        outcomeReceiptHash: outcome.recordHash,
+        caseDigest: item.caseDigest as `sha256:${string}`,
+        environmentDigest: ENVIRONMENT,
+        budgetDigest: BUDGET,
+        rawResultHash: canonicalSha256({ quality: metrics.quality }),
+        toolReceiptHashes: [],
+        toolReceiptSetHash: canonicalSha256([]),
+        metricSchema: { id: "primary-quality", version: 1, minimum: 0, maximum: 1, higherIsBetter: true },
+        primaryQuality: metrics.quality,
+        efficiencyCost: metrics.efficiency,
+        terminalState: "SUCCEEDED",
+        measuredAt,
+      }, keys.privateKey);
+      const processAttestation = createProtectedProcessSessionAttestation({
+        hostKeyId,
+        processId: process.pid,
+        sessionId: `process-session:${"a".repeat(32)}`,
+        executionReceipt: execution,
+        policy: processPolicy,
+        verifiedAt: measuredAt,
+      }, hostKeys.privateKey);
+      await protectedExecutionStore.append({ executionReceipt: execution, processAttestation });
       const quality = createBenchmarkQualityReceipt({
         keyId,
         benchmarkSuiteId,
@@ -535,8 +785,14 @@ test("real CAS outcomes plus signed benchmark quality authorize manual promotion
         outcomeReceiptId: outcome.receiptId,
         outcomeReceiptHash: outcome.recordHash,
         primaryQuality: metrics.quality,
-        measuredAt: new Date(Date.parse(registration.committedAt) + 3_000).toISOString(),
+        measuredAt,
         evaluatorVersion,
+        protectedExecutionRef: {
+          id: execution.receiptId,
+          revision: 1,
+          contentHash: execution.recordHash,
+          authority: execution.authority,
+        },
       }, keys.privateKey);
       await qualityStore.append(quality);
       metrics.qualityMeasurementRef = benchmarkQualityReceiptRef(quality);
@@ -556,6 +812,52 @@ test("real CAS outcomes plus signed benchmark quality authorize manual promotion
   });
   assert.equal(receipt.scorecard.outcome, "PROMOTABLE");
   assert.equal((await store.append(receipt)).receiptId, receipt.receiptId);
+
+  const unsignedProcessObservation = structuredClone(obs);
+  const firstObservation = unsignedProcessObservation[0]!;
+  const firstOutcome = await outcomeStore.read(firstObservation.champion.outcomeReceipt.id);
+  const firstProtectedQuality = await qualityStore.read(firstObservation.champion.qualityMeasurementRef!.id);
+  const firstProtectedEvidence = await protectedExecutionStore.read(firstProtectedQuality.protectedExecutionRef!.id);
+  await assert.rejects(
+    () => protectedExecutionStore.append({ executionReceipt: firstProtectedEvidence.executionReceipt } as never),
+    /integrity check failed|not attested by a trusted pinned process/,
+    "an evaluator signature alone cannot enter the protected process evidence store",
+  );
+  const directQuality = createBenchmarkQualityReceipt({
+    keyId,
+    benchmarkSuiteId,
+    benchmarkSuiteHash,
+    caseDigest: firstObservation.caseDigest as `sha256:${string}`,
+    bundleId: manifest.champion.bundleId,
+    bundleHash: manifest.champion.bundleHash,
+    runId: firstOutcome.runId,
+    workOrderId: firstOutcome.workOrderId,
+    attemptId: firstOutcome.attemptId,
+    outcomeReceiptId: firstOutcome.receiptId,
+    outcomeReceiptHash: firstOutcome.recordHash,
+    primaryQuality: firstObservation.champion.quality,
+    measuredAt: new Date(Date.parse(registration.committedAt) + 3_000).toISOString(),
+    evaluatorVersion,
+  }, keys.privateKey);
+  await qualityStore.append(directQuality);
+  firstObservation.champion.qualityMeasurementRef = benchmarkQualityReceiptRef(directQuality);
+  const directSignedReceipt = createPairedEvaluationReceipt({
+    workloadClass: manifest.workloadClass,
+    champion: manifest.champion,
+    challenger: manifest.challenger,
+    environmentDigest: manifest.environmentDigest,
+    observations: unsignedProcessObservation,
+    manifestRef: { id: manifest.manifestId, revision: 1, contentHash: manifest.recordHash },
+    registrationRef: { id: registration.registrationId, generation: registration.generation, contentHash: registration.recordHash },
+    policy: authoritativePromotionPolicy(manifest.workloadClass),
+    evaluatorVersion: AUTHORITATIVE_PAIRED_EVALUATOR_VERSION,
+    evaluatedAt: new Date(Date.parse(evaluatedAt) + 1).toISOString(),
+  });
+  await assert.rejects(
+    () => store.append(directSignedReceipt),
+    /missing protected process execution evidence/,
+    "a directly signed quality score cannot substitute for protected process execution",
+  );
 
   const pointers = new StablePointerStore(workspace, {
     bundleStore,

@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 2,
+  "comparisonId": "actual-v3",
+  "arm": "luna-swarm",
+  "startedAt": "2026-08-23T21:58:00.074Z",
+  "completedAttempts": 0,
+  "message": "Actual Luna Swarm Company OS coding run did not complete successfully"
+}

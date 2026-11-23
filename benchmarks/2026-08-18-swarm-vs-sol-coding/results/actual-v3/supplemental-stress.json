@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "comparisonId": "actual-v3",
+  "testedAt": "2026-08-17T19:54:24.1714059Z",
+  "diagnosticOnly": true,
+  "scoreAffecting": false,
+  "test": {
+    "name": "synchronous-failure-drain",
+    "scheduled": 15001,
+    "expectedRejected": 15000,
+    "scriptSha256": "sha256:4704eef015ceee9210312b9dcfebac304f3bd408be66748a573f818e737107f2"
+  },
+  "arms": {
+    "luna": {
+      "rawCandidateSha256": "sha256:6c8a5793f991296527e6c157fe77f249f289ded169f05459120abfd743862b56",
+      "exitCode": 0,
+      "passed": true,
+      "fulfilled": 1,
+      "rejected": 15000,
+      "idle": true,
+      "metrics": {
+        "queued": 0,
+        "active": 0,
+        "submitted": 15001,
+        "started": 15001,
+        "succeeded": 1,
+        "failed": 15000,
+        "aborted": 0,
+        "timedOut": 0,
+        "maxActive": 1
+      }
+    },
+    "sol": {
+      "rawCandidateSha256": "sha256:cf4177c55e86e950e3c0f09b0bd57bb1fdd70cfdb6bcab08a387b8ba90f43179",
+      "exitCode": 1,
+      "passed": false,
+      "error": "RangeError: Maximum call stack size exceeded",
+      "failurePath": "_settleUnderlying -> _drain -> _start recursive re-entry"
+    }
+  }
+}

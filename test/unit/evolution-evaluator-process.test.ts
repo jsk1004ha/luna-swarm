@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createPublicKey, generateKeyPairSync } from "node:crypto";
-import { chmod, copyFile, link, mkdir, mkdtemp, readdir, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, mkdir, mkdtemp, readdir, rm, stat, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -20,8 +20,11 @@ import {
 } from "../../src/evolution/evaluation/index.js";
 import {
   buildProtectedEvaluatorEnvironment,
+  cleanupAbandonedRunnerMaterializations,
   computeProtectedExecutableDigest,
   materializeAllowlistedRunner,
+  ProtectedExecutionReceiptStore,
+  protectedProcessPolicy,
   startProtectedEvaluatorProcess,
   verifyProtectedQualityReceiptPair,
   type CandidateEvidenceBinding,
@@ -41,6 +44,38 @@ const metricSchema: ProtectedMetricSchema = {
   maximum: 1,
   higherIsBetter: true,
 };
+
+test("protected process policy binds relative closure paths as well as file bytes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "luna-evaluator-closure-policy-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const firstDigest = digest("first-role-bytes");
+  const secondDigest = digest("second-role-bytes");
+  const common = {
+    evaluatorExecutableSha256: digest("evaluator-executable"),
+    evaluatorCommandSha256: digest("evaluator-command"),
+    evaluatorClosureRoot: root,
+    trustedRunnerExecutableSha256: digest("runner-executable"),
+    trustedRunnerCommandSha256: digest("runner-command"),
+    trustedRunnerClosureRoot: root,
+  };
+  const first = protectedProcessPolicy({
+    ...common,
+    evaluatorIntegrityFiles: [
+      { path: join(root, "loader.mjs"), sha256: firstDigest },
+      { path: join(root, "worker.mjs"), sha256: secondDigest },
+    ],
+    trustedRunnerIntegrityFiles: [{ path: join(root, "runner.mjs"), sha256: firstDigest }],
+  });
+  const swapped = protectedProcessPolicy({
+    ...common,
+    evaluatorIntegrityFiles: [
+      { path: join(root, "loader.mjs"), sha256: secondDigest },
+      { path: join(root, "worker.mjs"), sha256: firstDigest },
+    ],
+    trustedRunnerIntegrityFiles: [{ path: join(root, "runner.mjs"), sha256: firstDigest }],
+  });
+  assert.notEqual(first.evaluatorIntegritySha256, swapped.evaluatorIntegritySha256);
+});
 const environmentDigest = createEvaluationEnvironmentDigest({
   evaluatorDigest: digest("process-evaluator"),
   harnessDigest: digest("process-harness"),
@@ -92,6 +127,30 @@ test("protected evaluator process exposes only public descriptors and signed rec
     assert.ok(challenger.every((pair) => pair.qualityReceipt.primaryQuality === 1));
     assert.ok(challenger.every((pair) => pair.outcome.promotionEligible));
     assert.ok(challenger.every((pair) => verifyProtectedQualityReceiptPair(pair, fixture.client.keyId, fixture.client.authority)));
+    const processPolicy = protectedProcessPolicy({
+      evaluatorExecutableSha256: fixture.pins.evaluatorExecutableSha256,
+      evaluatorCommandSha256: fixture.pins.evaluatorCommandSha256,
+      evaluatorClosureRoot: fixture.pins.evaluatorClosureRoot,
+      evaluatorIntegrityFiles: fixture.pins.evaluatorIntegrityFiles,
+      trustedRunnerExecutableSha256: fixture.pins.trustedRunnerExecutableSha256,
+      trustedRunnerCommandSha256: fixture.pins.trustedRunnerCommandSha256,
+      trustedRunnerClosureRoot: fixture.pins.trustedRunnerClosureRoot,
+      trustedRunnerIntegrityFiles: fixture.pins.trustedRunnerIntegrityFiles,
+    });
+    const executionStore = new ProtectedExecutionReceiptStore(fixture.directory, {
+      trustedProcessAuthorities: {
+        [fixture.hostAttestation.keyId]: {
+          publicKeyPem: createPublicKey(fixture.hostAttestation.privateKeyPem).export({ type: "spki", format: "pem" }).toString(),
+          policy: processPolicy,
+        },
+      },
+    });
+    const persisted = await executionStore.append(challenger[0]!);
+    assert.equal((await executionStore.read(persisted.executionReceipt.receiptId)).recordHash, persisted.recordHash);
+    await assert.rejects(
+      () => executionStore.append({ ...challenger[1]!, processAttestation: challenger[0]!.processAttestation }),
+      /not attested by a trusted pinned process/,
+    );
     const resultView = JSON.stringify(challenger);
     assert.equal(resultView.includes("confidential-process-case"), false);
     assert.equal(resultView.includes("protected-score-key"), false);
@@ -169,6 +228,7 @@ test("runner allowlist tamper and evaluator startup timeout are rejected with se
           startupTimeoutMs: 60,
           commandTimeoutMs: 1_000,
           pins: { ...prepared.pins, evaluatorCommandSha256: canonicalSha256(["-e", "setInterval(() => {}, 1000)", "--"]) },
+          hostAttestation: prepared.hostAttestation,
         }),
         (error: Error & { code?: string }) => error.code === "STARTUP_TIMEOUT",
       );
@@ -209,6 +269,32 @@ test("verified runner bytes remain causal after the mutable source is removed an
     await rm(directory, { recursive: true, force: true });
   }
   await assert.rejects(() => stat(materialized.directory), /ENOENT/);
+});
+
+test("runner materialization scavenger removes only stale abandoned direct children", async () => {
+  const root = await mkdtemp(join(tmpdir(), "luna-runner-cleanup-root-"));
+  const now = Date.now();
+  const old = new Date(now - 2 * 24 * 60 * 60 * 1_000);
+  const abandoned = join(root, "luna-protected-runner-abandoned");
+  const legacy = join(root, "luna-protected-runner-legacy");
+  const active = join(root, "luna-protected-runner-active");
+  const recent = join(root, "luna-protected-runner-recent");
+  try {
+    for (const directory of [abandoned, legacy, active, recent]) await mkdir(directory);
+    await writeFile(join(abandoned, ".luna-runner-owner.json"), `${JSON.stringify({ schemaVersion: 1, pid: 99_999_999, createdAt: old.toISOString() })}\n`);
+    await writeFile(join(active, ".luna-runner-owner.json"), `${JSON.stringify({ schemaVersion: 1, pid: process.pid, createdAt: old.toISOString() })}\n`);
+    for (const directory of [abandoned, legacy, active]) await utimes(directory, old, old);
+
+    const result = await cleanupAbandonedRunnerMaterializations(root, now);
+
+    assert.deepEqual(result, { scanned: 4, removed: 2, skippedActive: 1, failed: 0 });
+    await assert.rejects(() => stat(abandoned), /ENOENT/);
+    await assert.rejects(() => stat(legacy), /ENOENT/);
+    assert.equal((await stat(active)).isDirectory(), true);
+    assert.equal((await stat(recent)).isDirectory(), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("verified evaluator entry, loader, and dependency closure execute after all mutable originals are removed", async () => {
@@ -338,6 +424,7 @@ test("client rejects a self-consistent child authority and runner identity that 
         sealedConfigPath: prepared.configPath,
         command: { executablePath: process.execPath, arguments: ["--import", workerPath, tsxLoaderPath] },
         pins: prepared.pins,
+        hostAttestation: prepared.hostAttestation,
       }), /command does not match the authority pin/);
     } finally {
       await rm(prepared.directory, { recursive: true, force: true });
@@ -351,6 +438,7 @@ test("client rejects a self-consistent child authority and runner identity that 
         sealedConfigPath: prepared.configPath,
         command: { executablePath: process.execPath, arguments: ["--import", tsxLoaderPath, workerPath] },
         pins: { ...prepared.pins, authority: { ...prepared.pins.authority, publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString() } },
+        hostAttestation: prepared.hostAttestation,
         startupTimeoutMs: 30_000,
       }), (error: Error & { code?: string }) => error.code === "PROTOCOL_ERROR");
     } finally {
@@ -363,7 +451,12 @@ test("client rejects a self-consistent child authority and runner identity that 
       await assert.rejects(() => startProtectedEvaluatorProcess({
         sealedConfigPath: prepared.configPath,
         command: { executablePath: process.execPath, arguments: ["--import", tsxLoaderPath, workerPath] },
-        pins: { ...prepared.pins, trustedRunnerIntegritySha256: [`sha256:${"0".repeat(64)}`] },
+        pins: {
+          ...prepared.pins,
+          trustedRunnerIntegrityFiles: prepared.pins.trustedRunnerIntegrityFiles.map((file, index) =>
+            index === 0 ? { ...file, sha256: `sha256:${"0".repeat(64)}` as const } : file),
+        },
+        hostAttestation: prepared.hostAttestation,
         startupTimeoutMs: 30_000,
       }), (error: Error & { code?: string }) => error.code === "PROTOCOL_ERROR");
     } finally {
@@ -398,6 +491,8 @@ interface ProcessFixture {
   client: Readonly<ProtectedEvaluatorProcessClient>;
   manifest: Readonly<PreregisteredPairedEvaluationManifest>;
   registrationId?: `protected-manifest:${string}`;
+  pins: AuthorityPins;
+  hostAttestation: ProtectedEvaluatorProcessClientOptions["hostAttestation"];
 }
 
 async function createProcessFixture(options: {
@@ -407,7 +502,13 @@ async function createProcessFixture(options: {
   const prepared = await prepareConfig(options);
   try {
     const client = await startClient(prepared, 30_000);
-    return { directory: prepared.directory, client, manifest: prepared.manifest };
+    return {
+      directory: prepared.directory,
+      client,
+      manifest: prepared.manifest,
+      pins: prepared.pins,
+      hostAttestation: prepared.hostAttestation,
+    };
   } catch (error) {
     await rm(prepared.directory, { recursive: true, force: true });
     throw error;
@@ -415,7 +516,13 @@ async function createProcessFixture(options: {
 }
 
 type AuthorityPins = ProtectedEvaluatorProcessClientOptions["pins"];
-type PreparedConfig = { directory: string; configPath: string; manifest: Readonly<PreregisteredPairedEvaluationManifest>; pins: AuthorityPins };
+type PreparedConfig = {
+  directory: string;
+  configPath: string;
+  manifest: Readonly<PreregisteredPairedEvaluationManifest>;
+  pins: AuthorityPins;
+  hostAttestation: ProtectedEvaluatorProcessClientOptions["hostAttestation"];
+};
 
 async function startClient(prepared: PreparedConfig, startupTimeoutMs: number): Promise<Readonly<ProtectedEvaluatorProcessClient>> {
   return startProtectedEvaluatorProcess({
@@ -425,6 +532,7 @@ async function startClient(prepared: PreparedConfig, startupTimeoutMs: number): 
     commandTimeoutMs: 15_000,
     maxMessageBytes: 8 * 1024 * 1024,
     pins: prepared.pins,
+    hostAttestation: prepared.hostAttestation,
   });
 }
 
@@ -436,6 +544,7 @@ async function prepareConfig(options: {
   const directory = await mkdtemp(join(tmpdir(), "luna-evaluator-process-"));
   const configPath = join(directory, "sealed-evaluator.json");
   const { privateKey } = generateKeyPairSync("ed25519");
+  const { privateKey: hostPrivateKey } = generateKeyPairSync("ed25519");
   const cases = createCases(options.behavior);
   const schedule = cases.flatMap((item) => [1, 2, 3].map((repeat): PreregisteredPairScheduleEntry => ({
     scheduleId: `${item.caseId}-r${repeat}`,
@@ -497,8 +606,13 @@ async function prepareConfig(options: {
       evaluatorCommandSha256: canonicalSha256(["--import", tsxLoaderPath, workerPath]),
       evaluatorIntegrityFiles: closure,
       trustedRunnerExecutableSha256: await executableDigestPromise,
-      trustedRunnerIntegritySha256: config.trustedRunner.integrityFiles.map((file) => file.sha256),
+      trustedRunnerClosureRoot: repoRoot,
+      trustedRunnerIntegrityFiles: config.trustedRunner.integrityFiles,
       trustedRunnerCommandSha256: canonicalSha256(config.trustedRunner.arguments),
+    },
+    hostAttestation: {
+      keyId: "process-host-attestation-key-v1",
+      privateKeyPem: hostPrivateKey.export({ type: "pkcs8", format: "pem" }).toString(),
     },
   };
 }

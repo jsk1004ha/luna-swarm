@@ -1,0 +1,10 @@
+{
+  "name": "crash-safe-lease-log-benchmark",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check src/crash-safe-lease-log.mjs",
+    "test": "node --test test/public/*.test.mjs"
+  }
+}

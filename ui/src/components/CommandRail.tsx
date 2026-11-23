@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { refreshRuns, sendUiControl, type UiControlPayload } from "../api/client";
 import { companyRoster, useCompanyStore } from "../store/companyStore";
 
-type CommandAction = Exclude<UiControlPayload["action"], "cancel_task">;
+type CommandAction = Exclude<UiControlPayload["action"], "cancel_task" | "recover">;
 
 type RandomUuidSource = { randomUUID?: () => string };
 
@@ -37,7 +37,7 @@ export function CommandRail() {
       setAction("start");
       setExpanded(true);
       setFeedback(snapshot
-        ? "이 기록은 관찰 전용입니다. 새 목표를 입력해야 새 실행이 시작됩니다."
+        ? "이 기록은 관찰 전용입니다. 중단된 Web UI 실행은 Overview의 Recover run으로 복구할 수 있습니다."
         : "목표를 입력하기 전에는 모든 직원과 모델 호출이 대기합니다.");
     }
   }, [startOnly, snapshot?.run.id]);
@@ -106,6 +106,6 @@ export function CommandRail() {
       </select></label>
     </div>
     <button className="command-submit" disabled={busy || actionBlocked || (needsText && !text.trim())}>{busy ? "전달 중" : effectiveAction === "start" ? "새 실행 시작" : "명령 실행"}<kbd>↵</kbd></button>
-    <output aria-live="polite">{feedback || (readOnly ? "기존 기록 · 자동 실행 안 함" : "이 UI가 소유한 실행만 제어합니다.")}</output>
+    <output aria-live="polite">{feedback || (readOnly ? "기존 기록 · 복구 또는 새 실행 가능" : "이 UI가 소유한 실행만 제어합니다.")}</output>
   </form>;
 }

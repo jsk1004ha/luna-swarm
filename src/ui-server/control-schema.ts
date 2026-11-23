@@ -18,6 +18,7 @@ export const uiControlCommandSchema = z.discriminatedUnion("action", [
   }).strict(),
   z.object({ action: z.literal("pause"), runId }).strict(),
   z.object({ action: z.literal("resume"), runId }).strict(),
+  z.object({ action: z.literal("recover"), runId }).strict(),
   z.object({ action: z.literal("cancel"), runId }).strict(),
   z.object({
     action: z.literal("concurrency"),

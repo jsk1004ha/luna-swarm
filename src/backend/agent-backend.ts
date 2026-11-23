@@ -1,6 +1,12 @@
 import type { AgentRole, Department, JsonValue, ModelTokenUsage } from "../types.js";
 import type { HarnessGate } from "../capabilities.js";
-import type { AgentRoleContract, ArtifactRef } from "../harness-v2/contracts.js";
+import type {
+  AgentRoleContract,
+  ArtifactRef,
+  CanonicalSha256,
+  WorkOrder,
+  WorkOrderBudgetEnvelope,
+} from "../harness-v2/contracts.js";
 import type { NormalizedToolPolicy } from "../harness-v2/tool-policy.js";
 import type { AttemptIdentity, RunBundlePin } from "../evolution/domain/bundle.js";
 
@@ -46,10 +52,33 @@ export interface HostToolInvocationResult {
   receipt?: unknown;
 }
 
+export interface HostToolAuthorityBinding {
+  schemaVersion: 1;
+  runId: string;
+  agentId: string;
+  workOrderId: string;
+  workOrderRevision: number;
+  workOrderHash: CanonicalSha256;
+  toolPolicyHash: CanonicalSha256;
+  executionRevision: number;
+  attemptId: string;
+  fencingToken: number;
+  budgetHash: CanonicalSha256;
+}
+
 /** A host-owned, single-turn binding that is never rendered into the prompt. */
 export interface HostToolSession {
   tools: readonly HostToolSpec[];
+  /** Required on strict Company OS calls; absent only for legacy read-only sessions. */
+  authority?: Readonly<HostToolAuthorityBinding>;
   invoke(call: HostToolCall): Promise<HostToolInvocationResult>;
+}
+
+export interface CompanyAgentRequestAuthority extends HostToolAuthorityBinding {
+  workOrder: Readonly<WorkOrder>;
+  budget: Readonly<WorkOrderBudgetEnvelope>;
+  budgetArtifactRef: ArtifactRef;
+  strictMetering: boolean;
 }
 
 export interface AgentRequest {
@@ -61,6 +90,10 @@ export interface AgentRequest {
   purpose: string;
   taskId?: string;
   workOrderId?: string;
+  /** Host-only marker requiring fail-closed Company authority at the gateway boundary. */
+  companyAuthorityRequired?: true;
+  /** Host-only Company OS execution identity. Never rendered into prompts. */
+  companyAuthority?: Readonly<CompanyAgentRequestAuthority>;
   agentSlotId?: string;
   roleContract?: AgentRoleContract;
   /** Canonical Work Order policy after it has been narrowed against roleContract. */
@@ -87,10 +120,15 @@ export interface AgentRequest {
   memoryIds?: string[];
   harnessPolicyVersion?: string;
   harnessDecisionId?: string;
+  /** Host-selected task portfolio identity; never model-authored authority. */
+  harnessPortfolioId?: string;
+  harnessPortfolioOwner?: string;
   harnessRisk?: "low" | "medium" | "high";
   harnessSelectionReasons?: string[];
   harnessGates?: HarnessGate[];
   prompt: string;
+  /** Host-verified workspace-local images supplied as actual multimodal inputs. */
+  localImagePaths?: readonly string[];
   outputSchema?: JsonValue;
   reasoningEffort: "low" | "medium" | "high" | "xhigh";
   hostToolSession?: HostToolSession;

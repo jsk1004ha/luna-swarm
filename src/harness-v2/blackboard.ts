@@ -22,6 +22,11 @@ import type {
   ArtifactRevision,
   ArtifactVerificationStatus,
 } from "./contracts.js";
+import { canonicalJson } from "./canonical-json.js";
+import {
+  validateCompanyArtifactContent,
+  validateCompanyArtifactProducer,
+} from "./company-os.js";
 
 const ARTIFACT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
@@ -60,6 +65,7 @@ export class ImmutableBlackboard {
   private paths: BlackboardPaths | undefined;
   private generationContext: RunGenerationContext | undefined;
   private generationAuthority: RunGenerationAuthority | undefined;
+  private companyAuthorityRequired = false;
 
   constructor(
     readonly runDirectory: string,
@@ -104,11 +110,15 @@ export class ImmutableBlackboard {
     await this.assertGenerationBoundary();
   }
 
+  setCompanyAuthorityRequired(required: boolean): void {
+    this.companyAuthorityRequired = required;
+  }
+
   async publish<T extends JsonValue>(
     submission: ArtifactSubmission<T>,
     expectedHeadRevision: number | null,
   ): Promise<ArtifactRevision<T>> {
-    validateSubmission(submission, this.runId);
+    validateSubmission(submission, this.runId, this.companyAuthorityRequired);
     await this.assertGenerationBoundary();
     await this.init();
     return this.withArtifactLock(submission.artifactId, async () => {
@@ -252,19 +262,20 @@ export class ImmutableBlackboard {
   }
 
   async isStale(ref: ArtifactRef): Promise<boolean> {
-    return this.isStaleInternal(ref, new Set());
+    return this.isStaleInternal(ref, new Set(), new Map());
   }
 
   async staleHeads(): Promise<ArtifactRef[]> {
     await this.init();
     const names = await readdir(this.headsDirectory);
     const stale: ArtifactRef[] = [];
+    const memo = new Map<string, boolean>();
     for (const name of names.sort()) {
       if (!name.endsWith(".json")) continue;
       const artifactId = name.slice(0, -5);
       if (!ARTIFACT_ID_PATTERN.test(artifactId)) continue;
       const head = await this.readHead(artifactId);
-      if (await this.inputsAreStale(head, new Set([formatRef(head)]))) stale.push(toRef(head));
+      if (await this.inputsAreStale(head, new Set([formatRef(head)]), memo)) stale.push(toRef(head));
     }
     return stale;
   }
@@ -389,22 +400,37 @@ export class ImmutableBlackboard {
     }
   }
 
-  private async isStaleInternal(ref: ArtifactRef, visiting: Set<string>): Promise<boolean> {
+  private async isStaleInternal(
+    ref: ArtifactRef,
+    visiting: Set<string>,
+    memo: Map<string, boolean>,
+  ): Promise<boolean> {
+    const key = formatRef(ref);
+    const memoized = memo.get(key);
+    if (memoized !== undefined) return memoized;
     const record = await this.read(ref);
     const head = await this.readHead(record.artifactId);
-    if (!sameRef(record, head)) return true;
-    const key = formatRef(ref);
+    if (!sameRef(record, head)) {
+      memo.set(key, true);
+      return true;
+    }
     if (visiting.has(key)) {
       throw new BlackboardIntegrityError(`Artifact input cycle detected at ${key}`);
     }
     const next = new Set(visiting);
     next.add(key);
-    return this.inputsAreStale(record, next);
+    const stale = await this.inputsAreStale(record, next, memo);
+    memo.set(key, stale);
+    return stale;
   }
 
-  private async inputsAreStale(record: ArtifactRevision, visiting: Set<string>): Promise<boolean> {
+  private async inputsAreStale(
+    record: ArtifactRevision,
+    visiting: Set<string>,
+    memo: Map<string, boolean>,
+  ): Promise<boolean> {
     for (const input of record.inputs) {
-      if (await this.isStaleInternal(input, visiting)) return true;
+      if (await this.isStaleInternal(input, visiting, memo)) return true;
     }
     return false;
   }
@@ -572,21 +598,7 @@ function blackboardPaths(storageRoot: string): BlackboardPaths {
   };
 }
 
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return JSON.stringify(value);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("Canonical JSON does not support non-finite numbers");
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (typeof value !== "object" || value === undefined) {
-    throw new Error(`Canonical JSON does not support ${typeof value}`);
-  }
-  const entries = Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
-  return `{${entries.map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`).join(",")}}`;
-}
+export { canonicalJson } from "./canonical-json.js";
 
 export class BlackboardStore extends ImmutableBlackboard {}
 
@@ -598,7 +610,11 @@ export function toRef(record: ArtifactRevision): ArtifactRef {
   };
 }
 
-function validateSubmission(submission: ArtifactSubmission, runId: string): void {
+function validateSubmission(
+  submission: ArtifactSubmission,
+  runId: string,
+  companyAuthorityRequired = false,
+): void {
   validateArtifactId(submission.artifactId);
   if (submission.runId !== runId) throw new Error(`Artifact runId does not match this run: ${submission.runId}`);
   if (!Number.isFinite(Date.parse(submission.createdAt))) throw new Error("Artifact createdAt is invalid");
@@ -607,6 +623,17 @@ function validateSubmission(submission: ArtifactSubmission, runId: string): void
   }
   submission.inputs.forEach(validateRef);
   if (submission.supersedes) validateRef(submission.supersedes);
+  if (
+    companyAuthorityRequired ||
+    submission.kind === "handoff" ||
+    submission.kind === "budget-receipt" ||
+    submission.kind === "mission-cell-admission" ||
+    submission.kind === "source-isolation" ||
+    submission.createdBy.authorityKind !== undefined
+  ) {
+    validateCompanyArtifactProducer(submission.createdBy, runId);
+    validateCompanyArtifactContent(submission.kind, submission.content);
+  }
 }
 
 function validateArtifactId(artifactId: string): void {

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "supersedes": "preregistration.json",
+  "createdAt": "2026-08-17T13:11:21.8086279Z",
+  "reason": "The first Luna r1 attempt stopped before model launch because Windows resolved codex.cmd, which Node cannot spawn directly. The runner now resolves a native codex.exe; mission, hidden suite, scoring, model order, base commit, and budgets are unchanged.",
+  "excludedInfrastructureAttempt": "luna-r1-pre-spawn-EPERM",
+  "protocol": "direct-codex-model-coding-paired-v2",
+  "baseCommit": "99af081e99226cfc3cb36297325a10c093fae19d",
+  "executionOrder": [
+    ["gpt-5.6-luna", "gpt-5.6-sol"],
+    ["gpt-5.6-sol", "gpt-5.6-luna"],
+    ["gpt-5.6-luna", "gpt-5.6-sol"]
+  ],
+  "unchangedFileHashes": {
+    "mission.txt": "sha256:a7c17910d9ad08f1adacf70c311e2f80fd9e5f69cdeed494c07e0731b7c92dd9",
+    "hidden/fake-codex-early-usage.mjs": "sha256:bd263359ee632063e7c593f7d65e0fcfdc6f711de4b5b00697752bf878ff05e1",
+    "hidden/early-raw-response.test.ts": "sha256:fe95daf1d10b26e4f1ffeecf08f42e5af6e08c2a973722749b224d81f51c169f",
+    "score-candidate.mjs": "sha256:fb2c2a76ad866d0315bdc264087a6fd238e35d37882e212b31c68a6a82af8f3e"
+  },
+  "updatedRunnerHash": "sha256:421c50a9f71d1ddc41ecba8ce01423e08172d43fa348291a8c155838a02d7ef8",
+  "interpretation": "This remains a model-level coding diagnostic, not a full Luna Swarm coding benchmark."
+}

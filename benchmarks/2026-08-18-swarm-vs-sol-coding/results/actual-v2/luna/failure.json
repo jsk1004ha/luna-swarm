@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "arm": "luna",
+  "startedAt": "2026-08-17T19:07:23.435Z",
+  "message": "Candidate changed paths outside the preregistered scope: []"
+}

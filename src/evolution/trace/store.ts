@@ -1,6 +1,7 @@
-import { lstat, mkdir, open, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { ExecutionBundleStore, assertNoLinks } from "../registry/bundle-store.js";
+import { durableCreateText } from "../registry/durable-file.js";
 import { canonicalEvolutionJson, deepFreezeEvolution, evolutionHash } from "./integrity.js";
 import { verifyDecisionTrace } from "./decision-trace.js";
 import type { DecisionTrace } from "./types.js";
@@ -28,7 +29,7 @@ export class DecisionTraceStore {
     if (!verifyDecisionTrace(trace)) throw new DecisionTraceIntegrityError("Decision trace integrity check failed");
     await this.init();
     try {
-      await writeFile(this.tracePath(trace.traceId), `${canonicalEvolutionJson(trace)}\n`, { encoding: "utf8", flag: "wx" });
+      await durableCreateText(this.tracePath(trace.traceId), `${canonicalEvolutionJson(trace)}\n`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new DecisionTraceConflictError(`Decision trace already exists: ${trace.traceId}`);
       throw error;

@@ -10,6 +10,7 @@ import { createSignedRolloutReceipt, verifySignedRolloutReceipt, type CreateRoll
 import {
   ActiveRolloutBindingStore,
   DeploymentRuntimeJournal,
+  isTerminalBindingState,
   type DeploymentTelemetryRecord,
 } from "./runtime-store.js";
 import type {
@@ -330,6 +331,16 @@ export class DeploymentOperationalControlLoop {
       for (const active of await this.options.bindings.listActive()) {
         if (active.rollout.state === "rolled_back" && active.rollout.recovery) {
           await this.options.coordinator.reconcileRecovery(active.rollout.rolloutId);
+        }
+        const current = await this.options.bindings.rolloutStore.read(active.rollout.rolloutId);
+        if (current && isTerminalBindingState(current.state)) {
+          await this.options.bindings.stop({
+            workloadClass: active.binding.workloadClass,
+            rolloutId: active.binding.rolloutId,
+            expectedIndexRevision: active.index.revision,
+            actor: "deployment-reconciler",
+            reason: `release terminal rollout ${current.rolloutId}:${current.state}`,
+          });
         }
       }
       const telemetry = await this.options.runtimeJournal.listTelemetry();

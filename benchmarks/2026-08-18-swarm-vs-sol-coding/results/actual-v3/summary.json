@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "comparisonId": "actual-v3",
+  "scoredAt": "2026-08-17T19:57:28.374Z",
+  "preregistration": {
+    "baseCommit": "b8db554d6952f42f2e82758eaa00cae21f754302",
+    "intendedHiddenSuiteSha256": "sha256:052e5cb5dcd4b8ac67348089581d53260ea1174a567a591e29cf45df82141ece",
+    "postFreezeHiddenSuiteSha256": "sha256:60340e65e40f15082b0f285014d62d2754323d2adc2d95fe87b68636a27ea078",
+    "hiddenSuitePreregistrationRecovered": false,
+    "contractSha256": "sha256:5f7eb5443ccbcab4bf2aba24e586ac39f60a4761a26587bb27249ad6c81cddf4",
+    "publicTestsSha256": "sha256:74dae4ae19c50a5164c6c9526879965fa844a138db54c25796bddeecf1ec5b75"
+  },
+  "arms": [
+    {
+      "arm": "luna",
+      "system": "actual-luna-swarm-coding",
+      "model": "gpt-5.6-luna",
+      "candidateCommit": "5f697729ef336beb73f74c4389ec9685f569e431",
+      "score": 40,
+      "maxScore": 100,
+      "allGatesPassed": false,
+      "gates": {
+        "hidden": {
+          "passed": false,
+          "points": 0,
+          "maxPoints": 60,
+          "exitCode": 1,
+          "timedOut": false,
+          "wallMs": 204
+        },
+        "public": {
+          "passed": true,
+          "points": 15,
+          "maxPoints": 15,
+          "exitCode": 0,
+          "timedOut": false,
+          "wallMs": 142
+        },
+        "syntax": {
+          "passed": true,
+          "points": 10,
+          "maxPoints": 10,
+          "exitCode": 0,
+          "timedOut": false,
+          "wallMs": 53
+        },
+        "scopeAndRepository": {
+          "passed": true,
+          "points": 10,
+          "maxPoints": 10,
+          "details": {
+            "changedPaths": [
+              "src/task-pool.mjs"
+            ],
+            "repositoryExitCode": 0,
+            "contractHash": "5f7eb5443ccbcab4bf2aba24e586ac39f60a4761a26587bb27249ad6c81cddf4",
+            "publicHash": "74dae4ae19c50a5164c6c9526879965fa844a138db54c25796bddeecf1ec5b75"
+          }
+        },
+        "completeness": {
+          "passed": true,
+          "points": 5,
+          "maxPoints": 5
+        }
+      },
+      "wallMs": 896903,
+      "metrics": {
+        "modelCalls": 13,
+        "retries": 0,
+        "rateLimitEvents": 0,
+        "maxActiveCalls": 3,
+        "tokenUsage": {
+          "totalTokens": 596745,
+          "inputTokens": 538694,
+          "cachedInputTokens": 116736,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 58051,
+          "reasoningOutputTokens": 39567
+        },
+        "tokenMeteredCalls": 13,
+        "tokenUnmeteredCalls": 0,
+        "tokenUsageComplete": true,
+        "callBreakdown": []
+      },
+      "source": {
+        "bytes": 11024,
+        "lines": 405,
+        "sha256": "sha256:4af607e5f5a5829a51fea3ba16ddeb9b11bbfa166492fe6e819bc118e6e2adf2"
+      }
+    },
+    {
+      "arm": "sol",
+      "system": "single-codex-sol-session",
+      "model": "gpt-5.6-sol",
+      "candidateCommit": "a8b1dc18307c90035671350a159cfb45befb882c",
+      "score": 40,
+      "maxScore": 100,
+      "allGatesPassed": false,
+      "gates": {
+        "hidden": {
+          "passed": false,
+          "points": 0,
+          "maxPoints": 60,
+          "exitCode": 1,
+          "timedOut": false,
+          "wallMs": 214
+        },
+        "public": {
+          "passed": true,
+          "points": 15,
+          "maxPoints": 15,
+          "exitCode": 0,
+          "timedOut": false,
+          "wallMs": 145
+        },
+        "syntax": {
+          "passed": true,
+          "points": 10,
+          "maxPoints": 10,
+          "exitCode": 0,
+          "timedOut": false,
+          "wallMs": 47
+        },
+        "scopeAndRepository": {
+          "passed": true,
+          "points": 10,
+          "maxPoints": 10,
+          "details": {
+            "changedPaths": [
+              "src/task-pool.mjs"
+            ],
+            "repositoryExitCode": 0,
+            "contractHash": "5f7eb5443ccbcab4bf2aba24e586ac39f60a4761a26587bb27249ad6c81cddf4",
+            "publicHash": "74dae4ae19c50a5164c6c9526879965fa844a138db54c25796bddeecf1ec5b75"
+          }
+        },
+        "completeness": {
+          "passed": true,
+          "points": 5,
+          "maxPoints": 5
+        }
+      },
+      "wallMs": 200429,
+      "metrics": {
+        "modelCalls": 1,
+        "eventCount": 20,
+        "completedToolActions": 6,
+        "tokenUsage": {
+          "totalTokens": 228051,
+          "inputTokens": 219407,
+          "cachedInputTokens": 180480,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 8644,
+          "reasoningOutputTokens": 3855
+        },
+        "tokenMeteredCalls": 1,
+        "tokenUnmeteredCalls": 0,
+        "tokenUsageComplete": true,
+        "totalTokensDerivedFromComponents": true
+      },
+      "source": {
+        "bytes": 10355,
+        "lines": 385,
+        "sha256": "sha256:2ea31225586834d3170579f5ec4b8f475f244b614a025b8c5ee1f09e3f6d2e29"
+      }
+    }
+  ],
+  "qualityWinner": {
+    "verdict": "inconclusive",
+    "reason": "Neither arm passed every gate and scores are tied"
+  },
+  "efficiency": {
+    "comparableOnlyWhenQualityPasses": true,
+    "wallMs": {
+      "luna": 896903,
+      "sol": 200429,
+      "delta": 696474
+    },
+    "modelCalls": {
+      "luna": 13,
+      "sol": 1
+    },
+    "totalTokens": {
+      "luna": 596745,
+      "sol": 228051,
+      "complete": true
+    }
+  },
+  "diagnosticOnly": true,
+  "promotionEligible": false
+}

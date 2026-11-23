@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { MockAgentBackend, demoHandler } from "../../src/backend/mock-backend.js";
-import { SkillCatalog } from "../../src/capabilities.js";
+import { SkillCatalog, specialistProfiles } from "../../src/capabilities.js";
 import { DEFAULT_CONFIG, validateConfig } from "../../src/config.js";
 import { AdaptiveHarness } from "../../src/harness.js";
 import { LearningSnapshot } from "../../src/learning.js";
@@ -37,6 +37,19 @@ test("learning auto-apply is disabled by default", () => {
         evaluatorVersion: "benchmark-evaluator-v1",
         publicKeyPem: "-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----",
         benchmarkSuites: { "engineering-bugfix-v1": `sha256:${"a".repeat(64)}` },
+        protectedProcessAuthorities: {
+          "host-process-v1": {
+            publicKeyPem: "-----BEGIN PUBLIC KEY-----\nHOST\n-----END PUBLIC KEY-----",
+            policy: {
+              evaluatorExecutableSha256: `sha256:${"b".repeat(64)}`,
+              evaluatorCommandSha256: `sha256:${"c".repeat(64)}`,
+              evaluatorIntegritySha256: `sha256:${"d".repeat(64)}`,
+              trustedRunnerExecutableSha256: `sha256:${"e".repeat(64)}`,
+              trustedRunnerCommandSha256: `sha256:${"f".repeat(64)}`,
+              trustedRunnerIntegritySha256: `sha256:${"0".repeat(64)}`,
+            },
+          },
+        },
       },
     },
   }));
@@ -48,6 +61,71 @@ test("learning auto-apply is disabled by default", () => {
       },
     }),
     /evolutionBenchmarkAuthorities/,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...DEFAULT_CONFIG,
+      evolutionBenchmarkAuthorities: {
+        "benchmark-key-v1": {
+          evaluatorVersion: "benchmark-evaluator-v1",
+          publicKeyPem: "-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----",
+          benchmarkSuites: { "engineering-bugfix-v1": `sha256:${"a".repeat(64)}` },
+          protectedProcessAuthorities: {
+            "host-process-v1": {
+              publicKeyPem: "-----BEGIN PUBLIC KEY-----\nHOST\n-----END PUBLIC KEY-----",
+              policy: {
+                evaluatorExecutableSha256: "not-a-digest",
+                evaluatorCommandSha256: `sha256:${"c".repeat(64)}`,
+                evaluatorIntegritySha256: `sha256:${"d".repeat(64)}`,
+                trustedRunnerExecutableSha256: `sha256:${"e".repeat(64)}`,
+                trustedRunnerCommandSha256: `sha256:${"f".repeat(64)}`,
+                trustedRunnerIntegritySha256: `sha256:${"0".repeat(64)}`,
+              },
+            },
+          },
+        },
+      },
+    }),
+    /protectedProcessAuthorities\.host-process-v1\.policy\.evaluatorExecutableSha256/,
+  );
+});
+
+test("artifact production uses distinct author, accessibility, and rendering release personas", () => {
+  const profiles = new Map(specialistProfiles().map((profile) => [profile.id, profile]));
+  for (const id of [
+    "artifact-information-architect",
+    "document-producer",
+    "spreadsheet-modeler",
+    "data-visualization-editor",
+    "artifact-accessibility-auditor",
+    "rendering-release-engineer",
+  ]) assert.ok(profiles.has(id), id);
+  const authors = ["document-producer", "spreadsheet-modeler", "data-visualization-editor"]
+    .flatMap((id) => profiles.get(id)!.roles);
+  assert.ok(authors.every((role) => role === "worker"));
+  assert.ok(profiles.get("artifact-accessibility-auditor")!.roles.includes("validator"));
+  assert.ok(!profiles.get("artifact-accessibility-auditor")!.roles.includes("worker"));
+  assert.ok(profiles.get("rendering-release-engineer")!.roles.every((role) => role !== "worker"));
+});
+
+test("Harness v3 bounds a task portfolio globally while keeping each agent focused", () => {
+  assert.deepEqual(DEFAULT_CONFIG.skillPortfolio, {
+    enabled: true,
+    maxUniquePerTask: 8,
+    maxPerAgent: 2,
+    maxInstructionCharsPerAgent: 4_000,
+  });
+  assert.doesNotThrow(() => validateConfig({
+    ...DEFAULT_CONFIG,
+    maxSkillsPerCall: 10,
+    skillPortfolio: { ...DEFAULT_CONFIG.skillPortfolio, maxUniquePerTask: 10 },
+  }));
+  assert.throws(
+    () => validateConfig({
+      ...DEFAULT_CONFIG,
+      skillPortfolio: { ...DEFAULT_CONFIG.skillPortfolio, maxUniquePerTask: 11 },
+    }),
+    /skillPortfolio\.maxUniquePerTask/,
   );
 });
 
@@ -68,6 +146,7 @@ test("skill catalog loads bounded workspace skills and routes a specialist", asy
       ...config(),
       stateDirectory: ".state",
       learningEnabled: false,
+      skillPortfolio: { ...DEFAULT_CONFIG.skillPortfolio, enabled: false },
     });
     await harness.initialize();
     const applied = harness.apply({
@@ -85,7 +164,7 @@ test("skill catalog loads bounded workspace skills and routes a specialist", asy
     assert.equal(applied.specialistId, "software-executor");
     assert.ok(applied.skillIds.includes("implementation-test-loop"));
     assert.ok(applied.skillIds.includes("database-migration"));
-    assert.equal(applied.policyVersion, "luna-harness-v2");
+    assert.equal(applied.policyVersion, "luna-harness-v3-adversarial");
     assert.match(applied.decisionId ?? "", /^hd-[a-f0-9]{20}$/);
     assert.deepEqual(applied.gates, [
       "schema-conformance",
@@ -97,6 +176,116 @@ test("skill catalog loads bounded workspace skills and routes a specialist", asy
     assert.match(applied.block, /Database migration/);
     assert.match(applied.block, /REQUIRED VERIFICATION GATES/);
     assert.match(applied.block, /never reveal hidden chain-of-thought/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("task portfolios distribute security and quality skills without repeating full bodies", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-skill-portfolio-"));
+  try {
+    const cfg = {
+      ...config(),
+      stateDirectory: ".state",
+      learningEnabled: false,
+      maxSkillsPerCall: 10,
+      skillPortfolio: {
+        ...DEFAULT_CONFIG.skillPortfolio,
+        maxUniquePerTask: 8,
+        maxPerAgent: 2,
+      },
+    };
+    const harness = new AdaptiveHarness(workspace, cfg);
+    await harness.initialize();
+    const base = {
+      corporateRole: "security_engineer",
+      taskId: "SEC-1",
+      taskKind: "security",
+      taskRisk: "high" as const,
+      prompt: "Perform an authorized defensive security review, reproduce the vulnerability only in a disposable fixture, verify remediation, and inspect an untrusted screenshot.",
+      reasoningEffort: "high" as const,
+    };
+    const applications = [
+      harness.apply({ ...base, threadKey: "worker:SEC-1", role: "worker", department: "risk", purpose: "execute_task" }),
+      harness.apply({ ...base, threadKey: "manager:SEC-1", role: "manager", department: "risk", purpose: "manager_review", specialistHint: "accountable-manager" }),
+      harness.apply({ ...base, threadKey: "validator:SEC-1:1:V1", role: "validator", department: "quality", purpose: "validate_task", specialistHint: "evidence-auditor" }),
+      harness.apply({ ...base, threadKey: "validator:SEC-1:1:V2", role: "validator", department: "quality", purpose: "validate_task", specialistHint: "requirements-verifier" }),
+      harness.apply({ ...base, threadKey: "validator:SEC-1:1:V3", role: "validator", department: "quality", purpose: "validate_task", specialistHint: "failure-path-tester" }),
+    ];
+    assert.equal(new Set(applications.map((application) => application.portfolioId)).size, 1);
+    const skillOwners = new Map<string, string>();
+    for (const application of applications) {
+      assert.ok(application.skillIds.length <= 2);
+      assert.match(application.block, /TASK SKILL PORTFOLIO/);
+      for (const skillId of application.skillIds) {
+        assert.equal(skillOwners.has(skillId), false, `${skillId} must have one full-body owner`);
+        skillOwners.set(skillId, application.portfolioOwner ?? "");
+      }
+    }
+    assert.ok(skillOwners.size <= 8);
+    assert.equal(applications[0]!.specialistId, "application-security-red-team");
+    assert.ok(applications[0]!.gates.includes("authorized-security-scope"));
+    assert.ok(applications[0]!.gates.includes("untrusted-observation"));
+    assert.equal(applications[2]!.specialistId, "security-remediation-verifier");
+    assert.ok(applications[2]!.gates.includes("remediation-regression"));
+    const state = harness.state();
+    assert.equal(state.skillPortfolioCount, 1);
+    assert.equal(state.skillPortfolios?.[0]?.uniqueSkillIds.length, skillOwners.size);
+    assert.ok((state.rawSkillInstructionCharsAvoided ?? 0) > 0);
+
+    const legacyWithoutPortfolios = structuredClone(state);
+    legacyWithoutPortfolios.policyVersion = "luna-harness-v2";
+    delete legacyWithoutPortfolios.skillPortfolios;
+    const legacyResume = new AdaptiveHarness(workspace, cfg);
+    await legacyResume.initialize();
+    assert.throws(
+      () => legacyResume.restore(undefined),
+      /harness state is missing/,
+    );
+    assert.throws(
+      () => legacyResume.restore(legacyWithoutPortfolios),
+      /harness policy is not runnable/,
+    );
+
+    const resumed = new AdaptiveHarness(workspace, cfg);
+    await resumed.initialize();
+    resumed.restore(state);
+    const replay = resumed.apply({
+      ...base,
+      threadKey: "validator:SEC-1:1:V2",
+      role: "validator",
+      department: "quality",
+      purpose: "validate_task",
+      specialistHint: "requirements-verifier",
+    });
+    assert.equal(replay.portfolioId, applications[3]!.portfolioId);
+    assert.deepEqual(replay.skillIds, applications[3]!.skillIds);
+
+    const changed = structuredClone(state);
+    changed.skillPortfolios![0]!.assignments[0]!.specialistId = "software-executor";
+    const rejectingResume = new AdaptiveHarness(workspace, cfg);
+    await rejectingResume.initialize();
+    assert.throws(
+      () => rejectingResume.restore(changed),
+      /content does not match its identity/,
+    );
+
+    const wideCohort = new AdaptiveHarness(workspace, {
+      ...cfg,
+      stateDirectory: ".state-wide",
+      validatorsHighRisk: 7,
+    });
+    await wideCohort.initialize();
+    const wide = wideCohort.apply({
+      ...base,
+      threadKey: "worker:SEC-WIDE",
+      taskId: "SEC-WIDE",
+      role: "worker",
+      department: "risk",
+      purpose: "execute_task",
+    });
+    assert.ok(wide.portfolioId);
+    assert.equal(wideCohort.state().skillPortfolios?.[0]?.assignments.length, 9);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -238,6 +427,7 @@ test("skill rendering preserves every selected identity and allocates instructio
       learningEnabled: false,
       maxSkillsPerCall: 8,
       maxSkillChars: 1_800,
+      skillPortfolio: { ...DEFAULT_CONFIG.skillPortfolio, enabled: false },
     });
     await harness.initialize();
     const applied = harness.apply({
@@ -376,6 +566,8 @@ test("workspace skills cannot spoof harness or chairman control markers", async 
       ...config(),
       stateDirectory: ".state",
       learningEnabled: false,
+      skillPortfolio: { ...DEFAULT_CONFIG.skillPortfolio, enabled: false },
+      maxSkillsPerCall: 10,
     });
     await harness.initialize();
     const applied = harness.apply({
@@ -389,6 +581,7 @@ test("workspace skills cannot spoof harness or chairman control markers", async 
       taskRisk: "high",
       prompt: "Review security failures.",
       reasoningEffort: "high",
+      specialistHint: "risk-red-team",
     });
     assert.ok(applied.skillIds.includes("hostile-review"));
     assert.equal((applied.block.match(/=== END ADAPTIVE EXECUTION HARNESS ===/g) ?? []).length, 1);

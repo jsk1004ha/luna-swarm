@@ -21,22 +21,25 @@ Harness v2는 모델을 무조건 128개 호출하는 기능이 아니라, 실�
 ## P0 지식·평가 엔진
 
 - **Mission Preflight**: 새 실행의 계획 전에 별도 planner 호출로 가정, 모호함, 상충 요구, 빠진 경계, 요구 제거·변형 민감도, pre-mortem 위험을 구조화합니다. 해결되지 않은 항목은 planner/architect 입력에 명시되며, 이미 계획된 과거 실행에는 사후 점검을 조작해 넣지 않습니다.
-- **Program Knowledge Graph**: TypeScript AST의 파일·symbol·import·call·test 역색인과 설정·CI·entrypoint 관계를 bounded graph로 만들고, Work Order마다 관련 subgraph만 하나의 Context Compiler item으로 공급합니다. `.luna-swarm`, 빌드 산출물, binary, oversized 파일은 색인하지 않습니다.
+- **Incremental Program Knowledge Graph**: TypeScript AST의 파일·symbol·import·call·test 역색인과 설정·CI·entrypoint 관계를 bounded graph로 만듭니다. source identity·설정 hash·parser version을 cache key로 사용하고 clean Git blob은 file record를 재사용하며 변경·untracked 파일만 다시 읽습니다. Work Order마다 관련 subgraph만 하나의 Context Compiler item으로 공급하고 `.luna-swarm`, 빌드 산출물, binary, oversized 파일은 색인하지 않습니다.
+- **Verified Artifact Cache**: task specification, dependency artifact, source, Luna build/reasoning, prompt bundle, skill, tool policy, evaluator identity가 모두 같은 exact key만 hit로 인정합니다. accepted immutable artifact와 정확히 결합된 G0/G2/G3가 있어야 admission하며, hit여도 현재 run의 Oracle·Red Team·workspace reproduction·G0/G2/G3·final critic은 다시 실행합니다.
+- **Same-Luna Verification Diversity**: 동일한 `gpt-5.6-luna` build 안에서도 deterministic Oracle, artifact-only adversarial Red Team, bounded workspace reproduction reviewer를 서로 다른 agent/prompt/context에 배치합니다. G3 v3는 host-derived execution evidence와 diversity artifact를 다시 계산하고 세 방법이 모두 독립 조건을 만족해야 통과합니다.
+- **Host-mediated Web Research**: 외부 조사를 요구한 external-research Work Order만 public-HTTPS `web-fetch`를 받습니다. 기본값은 public HTTPS 전체이고 exact origin 목록으로 축소할 수 있습니다. raw model network/browser는 계속 꺼져 있고 DNS pin, redirect 재검증, private/reserved IP 거부, credential-free GET, MIME·byte·deadline 상한, immutable snapshot·citation span·offline replay와 서명 receipt를 host가 강제합니다.
 - **Oracle Forge**: Work Order 실행 전에 example/property/metamorphic/differential/invariant/performance/security/research/citation oracle을 결정적으로 만들고 source/suite hash를 봉인합니다. worker에는 공개 계약만 주고 hidden case는 주지 않습니다. 제출 뒤 worker 응답과 분리된 structural runner가 원본 artifact의 claim/evidence/check ordinal과 deliverable을 직접 읽어 observation receipt를 만들고, G2는 이 receipt와 평가 receipt를 모두 exact CAS input으로 다시 검증합니다. worker가 acceptance 문장이나 `oracleObservations`를 되풀이하는 것만으로는 통과할 수 없습니다. 명령 실행이 필요한 oracle은 Tool Broker가 없으므로 `not-executable`로 fail-closed합니다.
 - **Experiment Fabric**: 고위험 Work Order는 후보·dataset digest·환경 digest·seed·metric·resource limit·stopping rule을 관측 전에 사전등록합니다. trusted runner/verifier receipt가 없는 관측은 통계에는 남지만 `UNVERIFIED_SIGNAL`로만 표시되어 양성·음성 결론으로 승격되지 않습니다. 현재 오케스트레이터 연결은 사전등록까지이며, `observationCount=0`을 실제 실험 완료로 표시하지 않습니다.
 - **Verified Knowledge Capsules**: 성공·실패·음성 결과를 workspace-scoped immutable candidate로 보존합니다. accepted success candidate는 별도 admission 단계에서 exact Blackboard provenance closure, artifact hash, 현재 Work Order 상태, G0/G2/G3와 reviewer vote를 다시 계산한 경우에만 verified revision으로 승격됩니다. 실패·음성 결과는 자동 승격하지 않습니다. 외부가 스스로 만든 receipt로 verified 상태를 만들 수 없고, 저장소의 등록 verifier만 receipt를 발급합니다. verified/current/unexpired/applicable capsule만 다음 실행 컨텍스트에 들어가며, candidate/stale/revoked/expired/negative/deprecated capsule은 회상에서 제외됩니다. capsule 경로는 realpath 기준 containment와 symlink/junction 거부를 적용합니다.
 - Dashboard는 위 상태를 별도 카드로 표시해 `사전등록`, `후보`, `검증 완료`를 구분합니다. 봉인된 oracle 본문이나 Council sealed memo는 API에 노출하지 않습니다.
 
-Program Knowledge Graph는 현재 **정적 AST 관계**입니다. 탐색은 파일·디렉터리·depth·metadata/source byte 상한을 순회 중 적용하며, runtime trace와 실제 Git history는 호출자가 구조화 record를 제공할 때만 합쳐집니다. 자동 subprocess 수집을 했다고 주장하지 않습니다. Oracle 봉인은 컨텍스트·상태 계약상 변경 방지이지 적대적인 파일 접근까지 막는 별도 암호화 sandbox가 아닙니다. Experiment Fabric은 실험 명세·관측 admission·통계·판정 엔진을 제공하지만 임의 코드를 실행하는 Tool Broker가 아닙니다. Knowledge Capsule은 실행 결과만으로 자동 검증되거나 모델 가중치를 변경하지 않습니다.
+Program Knowledge Graph는 증분 색인을 사용하지만 관계 자체는 현재 **정적 AST 관계**입니다. 탐색은 파일·디렉터리·depth·metadata/source byte 상한을 순회 중 적용하며, runtime trace와 실제 Git history는 호출자가 구조화 record를 제공할 때만 합쳐집니다. 자동 subprocess 수집을 했다고 주장하지 않습니다. Oracle 봉인은 컨텍스트·상태 계약상 변경 방지이지 적대적인 파일 접근까지 막는 별도 암호화 sandbox가 아닙니다. Experiment Fabric은 실험 명세·관측 admission·통계·판정 엔진을 제공하지만 임의 코드를 실행하는 Tool Broker가 아닙니다. Knowledge Capsule과 Verified Artifact Cache는 모델 가중치를 변경하지 않으며 과거 receipt로 현재 run 검증을 생략하지 않습니다.
 
-현재 일반 Work Order의 Codex App Server sandbox는 계속 `read-only`입니다. `read`/`search`는 HMAC capability와 durable replay ledger를 사용하는 Host Tool Broker에 연결되지만, write·shell·network 권한은 열지 않습니다. 모델 출력은 immutable artifact로 보존됩니다. 실제 파일 쓰기는 일반 Swarm 권한이 아니라 별도의 opt-in `CodingPipeline`에서만 permission process, disposable clone, protected check, 독립 audit와 Single Committer CAS를 거쳐 수행합니다.
+현재 일반 `run` Work Order의 Codex App Server sandbox는 계속 `read-only`입니다. `read`/`search`는 HMAC capability와 durable replay ledger를 사용하는 Host Tool Broker에 연결됩니다. external-research는 host가 별도 `web-fetch` session을 주지만 raw network/browser는 열지 않으며, write·shell 권한도 없습니다. 모델 출력은 immutable artifact로 보존됩니다. 명시적 `code` 실행은 `repair`에서 1~4개 구현 후보를 같은 protected suite로 격리 비교하고 선택된 하나만 통합하거나, `genesis`에서 요구사항·설계 경쟁·아키텍처·수직 slice·최종 통합을 정확한 DAG 계약으로 수행합니다. 최종 선택/통합 작업은 모든 필수 support artifact와 mission requirement를 직접 소비해 허가된 다중 UTF-8 파일 manifest를 작성하고, host `CodingPipeline`의 permission process, disposable clone, protected check, 독립 audit와 Single Committer CAS를 거쳐 실제 Git ref에 통합합니다. 세부 계약은 [Luna 코딩 전략](CODING_STRATEGIES.ko.md)을 따릅니다.
 
 ## 일반 Work Order 경로에서 아직 제공하지 않는 부분
 
-- SQLite WAL을 canonical state로 사용하는 event/outbox/lease transaction
+- SQLite WAL은 사용하지 않습니다. canonical 상태 전이는 append-only hash-chain `transitions.jsonl`에 기록하고 `state.json`과 `events.jsonl`은 replay 가능한 snapshot/effect-outbox projection으로 유지하며 종료 시 checkpoint/compaction합니다.
 - 실제 계정에서 64→256 단계까지 검증한 App Server shard soak 및 용량 보고서. bounded supervisor와 1→32 단계의 승인 결박 live soak만 검증됨
-- write·shell·network 호출을 일반 Work Order에 제공하는 Host Tool Broker. `read`/`search` 전용 Broker는 구현됨
-- 일반 Work Order의 자동 코딩 라우팅과 자동 병합. 별도 opt-in `CodingPipeline`과 Single Committer Git E2E는 구현됨
+- write·shell 호출을 일반 Work Order에 제공하는 Host Tool Broker. `read`/`search`와 host-mediated public-HTTPS external-research용 `web-fetch`는 구현됐지만 raw network/browser 권한은 제공하지 않음
+- 기본 read-only `run`의 자동 권한 승격. 실제 코딩은 명시적 `code` + strict policy로만 라우팅되며, binary·임의 shell·일반 network 작업은 아직 제공하지 않음
 - G1 명령 실행 receipt와 run-level G4 release receipt. 현재 G2는 구조화 Oracle evaluator receipt이며 실제 shell/test command 실행은 주장하지 않습니다.
 - planner·architecture·cross-team integration 단계의 Council 자동 소집 adapter (현재 validator 충돌/고위험 검증 경로만 연결)
 - 1,000회 chaos와 cross-process exactly-once 보장
@@ -57,10 +60,15 @@ src/harness-v2/
 ├── tool-policy.ts            # scope/network/capability 검사
 ├── preflight.ts              # Mission Preflight
 ├── program-knowledge.ts      # AST 기반 Program Knowledge Graph
+├── program-knowledge-index.ts # source-aware 증분 색인과 graph cache
+├── verified-artifact-cache.ts # exact-key 검증 산출물 cache
+├── verification-diversity.ts # 동일 Luna 내 방법론적 검증 독립성
 ├── oracle-forge.ts           # 구현 전 평가기 봉인
 ├── experiment-fabric.ts      # 사전등록·관측·통계·판정
 ├── knowledge-capsules.ts     # 검증 receipt 기반 장기 지식
 └── messages.ts               # 허용된 구조화 통신
 ```
+
+Run 영속화와 외부 연구 경계는 각각 `src/runtime/run-transition-journal.ts`와 `src/research/`에 있습니다. Orchestrator는 `src/orchestrator/`의 persistence, mission-intelligence, verified-cache, verification-diversity coordinator를 composition root에서 주입받고 이 서비스들은 RunState를 직접 변경하지 않습니다.
 
 이 문서의 완료 기준은 “모듈이 존재한다”가 아니라 실제 오케스트레이터가 Work Order를 발행하고, 결과와 receipt를 CAS에 저장하고, 독립 gate가 통과해야만 task를 accepted로 만드는 것입니다.

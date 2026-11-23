@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runId": "sol-r1-v5",
+  "score": 100,
+  "criticalPass": true,
+  "gates": {
+    "hiddenPass": true,
+    "focusedPass": true,
+    "typecheckPass": true,
+    "scopePass": true
+  },
+  "candidatePaths": [
+    "src/backend/codex-app-server.ts",
+    "test/fixtures/fake-codex.mjs",
+    "test/unit/app-server.test.ts"
+  ],
+  "diffStat": "15\t7\tsrc/backend/codex-app-server.ts\n108\t1\ttest/fixtures/fake-codex.mjs\n85\t0\ttest/unit/app-server.test.ts",
+  "focusedDurationMs": 22661,
+  "hiddenDurationMs": 2812,
+  "typecheckDurationMs": 9528
+}

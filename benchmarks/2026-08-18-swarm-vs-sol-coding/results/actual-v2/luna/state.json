@@ -1,0 +1,3023 @@
+{
+  "schemaVersion": 1,
+  "revision": 35,
+  "checksum": "eb2db9669770276c9817fc421f4c883f451dc17a278647027ae81d6a3fa7e2f7",
+  "generation": "d2172396-a647-4e56-8c72-8bdce9a02c2f",
+  "state": {
+    "schemaVersion": 1,
+    "revision": 35,
+    "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+    "status": "failed",
+    "goal": "# Coding mission: production-grade asynchronous task pool\n\nImplement the complete contract in `src/task-pool.mjs`.\n\nRead `README.md` and the public tests. Run the policy-pinned public test and syntax check. You may modify only `src/task-pool.mjs`; do not alter tests or package metadata.\n\nDo not access the network, install dependencies, use subagents, or read files outside this workspace. Do not weaken or disable tests. Finish with a short summary of the implementation and commands actually run.\n",
+    "workspace": "C:\\Users\\js100\\AppData\\Local\\Temp\\luna-swarm-actual-v2-luna-ys1PWs",
+    "createdAt": "2026-08-17T19:07:24.969Z",
+    "updatedAt": "2026-08-17T19:19:42.894Z",
+    "config": {
+      "model": "gpt-5.6-luna",
+      "organizationHeadcount": "auto",
+      "evolutionReleaseEpoch": 1,
+      "maxConcurrency": 4,
+      "appServerShardCount": 1,
+      "initialConcurrency": 2,
+      "minConcurrency": 1,
+      "maxTasks": 1,
+      "maxTeams": 4,
+      "maxHierarchyDepth": 3,
+      "maxDirectReports": 4,
+      "maxAgentTurns": 96,
+      "planningCommitteeSize": 1,
+      "validatorsLowRisk": 2,
+      "validatorsHighRisk": 3,
+      "validationQuorum": 0.6666666666666666,
+      "maxAttempts": 2,
+      "maxRepairRounds": 1,
+      "maxContextChars": 60000,
+      "callTimeoutMs": 600000,
+      "retryBaseMs": 1000,
+      "retryMaxMs": 15000,
+      "gatewayMaxAttempts": 2,
+      "growthEverySuccesses": 8,
+      "growthIncrement": 1,
+      "rateLimitCooldownMs": 15000,
+      "schedulerAgingMs": 1000,
+      "allowNetwork": false,
+      "ephemeralThreads": true,
+      "stateDirectory": ".luna-swarm",
+      "storageMaintenance": {
+        "enabled": false,
+        "autoCompact": false,
+        "maxStateBytes": 5368709120,
+        "minArchiveAgeHours": 168,
+        "keepRecentRuns": 20,
+        "maxRunsPerPass": 2,
+        "maxArchiveFiles": 100000,
+        "maxArchiveBytes": 2147483648
+      },
+      "harnessEnabled": true,
+      "skillPortfolio": {
+        "enabled": true,
+        "maxUniquePerTask": 8,
+        "maxPerAgent": 2,
+        "maxInstructionCharsPerAgent": 4000
+      },
+      "maxSkillsPerCall": 3,
+      "maxSkillChars": 6000,
+      "learningEnabled": false,
+      "learningAutoApply": false,
+      "maxMemoriesPerCall": 0,
+      "maxMemoryChars": 0,
+      "learningHistoryRuns": 20,
+      "learningMinSamples": 3,
+      "reasoning": {
+        "planner": "high",
+        "architect": "high",
+        "manager": "high",
+        "worker": "high",
+        "validator": "high",
+        "reducer": "high",
+        "judge": "high"
+      }
+    },
+    "organization": {
+      "template": "company-v1",
+      "roles": [
+        {
+          "id": "user_ceo",
+          "title": "회장 / 의뢰인",
+          "department": "executive",
+          "level": 0,
+          "reportsTo": null,
+          "mission": "목표와 최종 의사결정 기준을 정한다.",
+          "decisionRights": [
+            "목표 승인",
+            "최종 결과 채택",
+            "쓰기 권한 승인"
+          ],
+          "contextPolicy": "전체 목표와 최종 결과를 본다."
+        },
+        {
+          "id": "chief_of_staff",
+          "title": "부회장 / 수석 아키텍트",
+          "department": "executive",
+          "level": 1,
+          "reportsTo": "user_ceo",
+          "mission": "부서별 기획을 하나의 충돌 없는 실행 DAG로 통합한다.",
+          "decisionRights": [
+            "작업 분해",
+            "부서 배정",
+            "의존성 승인"
+          ],
+          "contextPolicy": "독립 기획안을 모두 보되 실무 결과를 대신 작성하지 않는다."
+        },
+        {
+          "id": "executive_judge",
+          "title": "최종 심의관",
+          "department": "executive",
+          "level": 1,
+          "reportsTo": "user_ceo",
+          "mission": "검증된 결과가 의뢰인의 요구를 실제로 충족하는지 최종 판정한다.",
+          "decisionRights": [
+            "최종 커버리지 판정",
+            "한정사항 공개 요구"
+          ],
+          "contextPolicy": "병합 결과와 감사 상태는 보지만 실무 초안의 권위에는 기대지 않는다."
+        },
+        {
+          "id": "strategy_director",
+          "title": "전략 부서장",
+          "department": "strategy",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "목표, 우선순위, 의사결정 기준을 구조화한다.",
+          "decisionRights": [
+            "전략 작업 제안",
+            "우선순위 권고"
+          ],
+          "contextPolicy": "사용자 목표와 전략 관련 증거에 집중한다."
+        },
+        {
+          "id": "research_director",
+          "title": "리서치 부서장",
+          "department": "research",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "사실, 출처, 알려지지 않은 점을 분리해 조사 계획을 만든다.",
+          "decisionRights": [
+            "조사 범위 제안",
+            "근거 품질 기준 설정"
+          ],
+          "contextPolicy": "출처와 사실성에 집중하고 구현 편의에 맞춰 결론을 바꾸지 않는다."
+        },
+        {
+          "id": "engineering_director",
+          "title": "엔지니어링 부서장",
+          "department": "engineering",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "구현 가능성, 인터페이스, 테스트 가능한 산출물을 설계한다.",
+          "decisionRights": [
+            "기술 작업 제안",
+            "구현 계약 설정"
+          ],
+          "contextPolicy": "명시된 기술 계약과 의존 산출물만 권위 있는 입력으로 취급한다."
+        },
+        {
+          "id": "risk_director",
+          "title": "레드팀 / 리스크 부서장",
+          "department": "risk",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "반례, 실패 조건, 보안 및 운영 위험을 독립적으로 찾는다.",
+          "decisionRights": [
+            "위험 작업 제안",
+            "고위험 분류 권고"
+          ],
+          "contextPolicy": "다른 부서의 낙관적 결론을 전제로 삼지 않는다."
+        },
+        {
+          "id": "quality_director",
+          "title": "품질감사 부서장",
+          "department": "quality",
+          "level": 2,
+          "reportsTo": "user_ceo",
+          "mission": "경영 라인과 독립적으로 산출물의 증거와 기준 충족 여부를 감사한다.",
+          "decisionRights": [
+            "재작업 요구",
+            "검증표 발행"
+          ],
+          "contextPolicy": "실무자의 자기평가와 다른 감사자의 표를 보지 않는다."
+        },
+        {
+          "id": "integration_director",
+          "title": "통합 이사",
+          "department": "integration",
+          "level": 2,
+          "reportsTo": "chief_of_staff",
+          "mission": "승인된 산출물을 출처 손실 없이 계층적으로 병합한다.",
+          "decisionRights": [
+            "중복 제거",
+            "충돌 및 공백 표면화"
+          ],
+          "contextPolicy": "accepted 결과만 입력으로 받고 새로운 사실을 만들지 않는다."
+        },
+        {
+          "id": "strategy_analyst",
+          "title": "전략 분석 담당",
+          "department": "strategy",
+          "level": 3,
+          "reportsTo": "strategy_director",
+          "mission": "배정된 전략 계약을 근거와 함께 수행한다.",
+          "decisionRights": [
+            "전략 초안 제출"
+          ],
+          "contextPolicy": "자신의 작업과 승인된 의존 결과만 본다."
+        },
+        {
+          "id": "research_specialist",
+          "title": "리서치 담당",
+          "department": "research",
+          "level": 3,
+          "reportsTo": "research_director",
+          "mission": "배정된 조사 계약을 출처 중심으로 수행한다.",
+          "decisionRights": [
+            "조사 결과 제출"
+          ],
+          "contextPolicy": "자신의 조사 범위와 승인된 의존 결과만 본다."
+        },
+        {
+          "id": "software_engineer",
+          "title": "구현 담당",
+          "department": "engineering",
+          "level": 3,
+          "reportsTo": "engineering_director",
+          "mission": "테스트 가능한 기술 산출물이나 구현안을 만든다.",
+          "decisionRights": [
+            "구현안 제출",
+            "테스트 결과 보고"
+          ],
+          "contextPolicy": "작업 계약과 승인된 인터페이스만 본다. 기본 권한은 읽기 전용이다."
+        },
+        {
+          "id": "risk_analyst",
+          "title": "레드팀 분석 담당",
+          "department": "risk",
+          "level": 3,
+          "reportsTo": "risk_director",
+          "mission": "배정된 결과의 반례와 실패 경로를 적극적으로 찾는다.",
+          "decisionRights": [
+            "위험 보고",
+            "반례 제출"
+          ],
+          "contextPolicy": "합의 유도 문구와 자기평가를 증거로 취급하지 않는다."
+        },
+        {
+          "id": "quality_auditor",
+          "title": "독립 감사 담당",
+          "department": "quality",
+          "level": 3,
+          "reportsTo": "quality_director",
+          "mission": "사전에 정한 기준으로 결과를 블라인드 검증한다.",
+          "decisionRights": [
+            "accept/revise/reject 투표"
+          ],
+          "contextPolicy": "다른 감사표, 투표 수, 실무자의 내부 추론을 보지 않는다."
+        }
+      ]
+    },
+    "teams": {
+      "task-pool": {
+        "id": "task-pool",
+        "name": "Asynchronous Task Pool Delivery",
+        "mission": "Centralize contract discovery, bounded implementation, local verification, scope auditing, and traceable handoff for the production-grade asynchronous task pool.",
+        "department": "engineering",
+        "leadRole": "engineering_director",
+        "leadRank": "president",
+        "parentTeamId": null,
+        "requirementIds": [
+          "REQ-01",
+          "REQ-02",
+          "REQ-03",
+          "REQ-04",
+          "REQ-05",
+          "REQ-06",
+          "REQ-07"
+        ],
+        "synthesisCriteria": [
+          "Every implementation decision is traceable to README.md, public tests, or existing src/task-pool.mjs evidence.",
+          "Only src/task-pool.mjs is modified.",
+          "Exact test and syntax commands are identified from local evidence and their observed outcomes are reported.",
+          "Prohibited network, installation, subagent, outside-workspace, test-weakening, and disabled-check actions are absent.",
+          "Unresolved contract or verification gaps remain explicit."
+        ],
+        "priority": 1,
+        "depth": 0,
+        "childTeamIds": [],
+        "status": "waiting"
+      }
+    },
+    "tasks": {
+      "implement-pool": {
+        "id": "implement-pool",
+        "title": "Inspect pinned workspace context and implement the complete evidenced task-pool contract while preserving no-network, no-installation, no-subagent, no-outside-workspace, no-test-weakening, and single-file scope demands",
+        "objective": "Read README.md, all relevant public tests, existing src/task-pool.mjs, and repository-local command evidence; author the complete bounded implementation manifest and implement every evidenced requirement directly in src/task-pool.mjs. Run only locally supported public-test and syntax checks, verify the write boundary, and report exact commands, results, and unresolved gaps. Do not claim any unobserved action or gate as successful.",
+        "kind": "implementation",
+        "executionMode": "workspace-change",
+        "requiredCapabilities": [
+          "workspace-read",
+          "workspace-search",
+          "workspace-write",
+          "command-execution"
+        ],
+        "department": "engineering",
+        "ownerRole": "software_engineer",
+        "teamId": "task-pool",
+        "assigneeRank": "staff",
+        "dependencies": [],
+        "requirementIds": [
+          "REQ-01",
+          "REQ-02",
+          "REQ-03",
+          "REQ-04",
+          "REQ-05",
+          "REQ-06",
+          "REQ-07"
+        ],
+        "deliverable": "A complete implementation in src/task-pool.mjs plus a concise traceable handoff containing the contract-to-code coverage, exact commands actually executed, observed results, authorized-file status/diff evidence, and explicit unresolved gaps. The handoff must preserve all unavailable-demand prohibitions: no network, dependency installation, subagents, outside-workspace reads, test weakening, disabled checks, or modifications outside src/task-pool.mjs.",
+        "acceptanceCriteria": [
+          "README.md, every relevant public test, and existing src/task-pool.mjs are inspected before implementation; the resulting implementation covers only evidenced API, lifecycle, concurrency, ordering, error, and interruption behavior.",
+          "Only src/task-pool.mjs is changed according to repository status or equivalent local diff evidence; tests and package metadata remain unchanged.",
+          "The exact repository-local public-test command and syntax-check command are identified and run, with observed output recorded; if either cannot be identified or executed, the gap is explicitly reported.",
+          "No network access, dependency installation, subagent invocation, outside-workspace read, test/assertion weakening, or disabled check is performed.",
+          "The final handoff includes a concise implementation summary and exact commands actually run, without invented sources, outputs, or verification claims."
+        ],
+        "risk": "high",
+        "priority": 1,
+        "depth": 0,
+        "maxAttempts": 2,
+        "status": "failed",
+        "attempts": 2,
+        "validationRound": 2,
+        "votes": [
+          {
+            "validatorId": "MANAGER",
+            "verdict": "accept",
+            "criteria": [
+              {
+                "criterion": "schema-conformance",
+                "passed": true,
+                "note": "The revised result contains a bounded manifest, claims, evidence, checks, uncertainties, and handoff deliverables."
+              },
+              {
+                "criterion": "requirement-traceability",
+                "passed": true,
+                "note": "All REQ-01 through REQ-07 are linked to implementation claims and evidence or checks."
+              },
+              {
+                "criterion": "evidence-provenance",
+                "passed": true,
+                "note": "The report accurately preserves prior findings, documents the two repairs, and does not claim unavailable execution or diff results."
+              },
+              {
+                "criterion": "test-or-verification",
+                "passed": true,
+                "note": "The exact test and syntax commands are identified; non-execution is explicitly reported as a host-owned verification gap, consistent with the contract and responsibility boundary."
+              },
+              {
+                "criterion": "counterexample-search",
+                "passed": true,
+                "note": "The two previously identified defects are repaired in the manifest: terminal counters use explicit private-field updates, and queued cancellation releases reserved IDs. No additional blocking counterexample is established from the supplied artifact."
+              }
+            ],
+            "issues": [
+              "Host application and execution of node --test test/public/*.test.mjs, node --check src/task-pool.mjs, and repository status/diff verification remain pending and must be evaluated independently."
+            ],
+            "confidence": 0.94
+          },
+          {
+            "validatorId": "V1",
+            "verdict": "revise",
+            "criteria": [
+              {
+                "criterion": "schema-conformance",
+                "passed": true,
+                "note": "The submission is structurally represented and contains a single authorized upsert for src/task-pool.mjs."
+              },
+              {
+                "criterion": "requirement-traceability",
+                "passed": true,
+                "note": "All REQ-01 through REQ-07 have linked claims, evidence descriptions, or explicit limitation records."
+              },
+              {
+                "criterion": "evidence-provenance",
+                "passed": true,
+                "note": "The submission distinguishes manifest/static evidence from unavailable host-applied and runtime evidence and does not claim successful execution."
+              },
+              {
+                "criterion": "test-or-verification",
+                "passed": false,
+                "note": "The required public test and syntax commands were identified but explicitly not executed; no observed output or applied-worktree diff evidence is provided."
+              },
+              {
+                "criterion": "counterexample-search",
+                "passed": false,
+                "note": "Static review of the manifest supports the two reported repairs and matches the observed README/public test, but runtime and applied-file verification remain absent."
+              },
+              {
+                "criterion": "independent-review",
+                "passed": true,
+                "note": "No definite contract violation was found in the supplied implementation manifest from the available contract and public test evidence."
+              }
+            ],
+            "issues": [
+              "Run node --test test/public/*.test.mjs and node --check src/task-pool.mjs, then record exact observed results.",
+              "Apply the manifest and provide repository status/diff evidence showing only src/task-pool.mjs changed.",
+              "Host-side runtime verification remains necessary before treating the implementation as complete."
+            ],
+            "confidence": 0.97
+          },
+          {
+            "validatorId": "V2",
+            "verdict": "accept",
+            "criteria": [
+              {
+                "criterion": "Schema and deliverable representation",
+                "passed": true,
+                "note": "The result contains a single authorized upsert manifest, implementation summary, claims, evidence, checks, uncertainties, and deliverables."
+              },
+              {
+                "criterion": "Requirement traceability",
+                "passed": true,
+                "note": "All REQ-01 through REQ-07 are referenced by claims with supporting evidence or checks; the implementation source covers the stated pool lifecycle and control paths."
+              },
+              {
+                "criterion": "Evidence provenance",
+                "passed": true,
+                "note": "Evidence references use declared ordinals, and the result does not claim unavailable runtime or applied-worktree verification."
+              },
+              {
+                "criterion": "Test and verification handling",
+                "passed": true,
+                "note": "The exact public-test and syntax commands are identified. Their non-execution and resulting validation gap are explicitly reported without invented output."
+              },
+              {
+                "criterion": "Authorized-file and prohibition handling",
+                "passed": true,
+                "note": "The manifest contains only src/task-pool.mjs, with no test or metadata operations, and explicitly states that applied-worktree diff evidence is unavailable. Prohibited actions are disclaimed."
+              },
+              {
+                "criterion": "Counterexample and independent review",
+                "passed": true,
+                "note": "The revised source visibly addresses the two reported defects: explicit private counter updates and queued reservation deletion. No contradictory success claim was found."
+              }
+            ],
+            "issues": [
+              "Public tests, syntax checks, and applied-worktree status/diff remain unverified and require host-side execution."
+            ],
+            "confidence": 0.86
+          },
+          {
+            "validatorId": "V3",
+            "verdict": "revise",
+            "criteria": [
+              {
+                "criterion": "schema-conformance",
+                "passed": true,
+                "note": "The result contains the required implementation manifest, claims, evidence, checks, uncertainties, and deliverables."
+              },
+              {
+                "criterion": "requirement-traceability",
+                "passed": true,
+                "note": "All REQ-01 through REQ-07 are referenced by claims and evidence or checks."
+              },
+              {
+                "criterion": "evidence-provenance",
+                "passed": true,
+                "note": "The result distinguishes authored manifest content from unavailable host-applied and host-executed evidence."
+              },
+              {
+                "criterion": "test-or-verification",
+                "passed": false,
+                "note": "The required public test and syntax commands were identified but explicitly not executed; no observed output is available."
+              },
+              {
+                "criterion": "counterexample-search",
+                "passed": true,
+                "note": "Static review found no definitive additional defect, but timeout, abort, close, ordering, and metrics interactions remain dynamically unverified."
+              },
+              {
+                "criterion": "independent-review",
+                "passed": true,
+                "note": "The implementation and handoff were independently assessed for failure modes and costly propagation paths."
+              },
+              {
+                "criterion": "REQ-02 authorized-file status",
+                "passed": false,
+                "note": "The manifest has one authorized upsert, but applied-worktree status or diff evidence is explicitly unavailable."
+              },
+              {
+                "criterion": "REQ-03 required commands",
+                "passed": false,
+                "note": "node --test test/public/*.test.mjs and node --check src/task-pool.mjs were not run."
+              },
+              {
+                "criterion": "REQ-07 verification evidence",
+                "passed": false,
+                "note": "Runtime and syntax verification remain unresolved."
+              }
+            ],
+            "issues": [
+              "The submitted result is an unapplied implementation manifest rather than verified evidence that src/task-pool.mjs contains the implementation.",
+              "Required public tests and syntax check were not executed, so runtime behavior and syntax remain unverified.",
+              "Repository status/diff evidence confirming that only src/task-pool.mjs changed is absent.",
+              "Host application and verification are required before acceptance."
+            ],
+            "confidence": 0.98
+          }
+        ],
+        "feedback": [
+          "MANAGER (revise): Fix terminal metric updates using explicit private-field branches or another valid counter update mechanism.",
+          "MANAGER (revise): Delete reserved IDs when queued tasks are cancelled, including pre-aborted and close-aborted tasks.",
+          "MANAGER (revise): Apply the manifest and run the identified public test and syntax-check commands before independent audit; preserve any resulting failures as explicit gaps.",
+          "V1 (reject): Metrics terminal counters remain unchanged because dynamic access to private fields via this[`#${classification}`] is ordinary property access, producing NaN on an unrelated property.",
+          "V1 (reject): Queued abort and pre-aborted tasks do not delete the task ID from #reserved, so the claimed queued ID reuse behavior fails.",
+          "V1 (reject): Dynamic tests and syntax checks were not run, leaving these defects undiscovered.",
+          "V2 (revise): Fix #recordTerminal to increment the actual private counters; computed property access does not access private fields.",
+          "V2 (revise): Delete the task ID from #reserved when a queued task is canceled, while retaining reservation until underlying settlement for active tasks if required by the contract.",
+          "V2 (revise): Run the identified public test and syntax-check commands after applying the corrected implementation, or preserve the explicit verification gap.",
+          "G3: Receipt artifact status is rejected",
+          "G3: manager did not accept the output",
+          "G3: verifier reported failure",
+          "Council outcome ADOPTED did not adopt acceptance"
+        ],
+        "startedAt": "2026-08-17T19:14:35.305Z",
+        "evolution": {
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "attemptId": "attempt:28ffd14e17378c8e98a1d09c98310f71",
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "budgetDigest": "sha256:e0b320cec9b2add45fc2a5abaa739f87eabde6ce3cc7484ac4bff68224ad7cb5",
+          "fencingToken": 2,
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "workloadClass": "engineering.feature",
+          "pointerGeneration": 1,
+          "workOrderRevision": 1,
+          "executionAttempt": 2,
+          "validationAttempt": 2,
+          "startedAt": "2026-08-17T19:14:35.305Z",
+          "promptComponentHashes": [
+            "8d91b17709dd1075ba552dad0112c86f567747e810e9aab6a7ecbf4385f856a6"
+          ],
+          "memoryCapsuleIds": [],
+          "contextManifestHash": "a4ca34d38d83c0cd3b81eb8bcbb256c241e301d517b3c2ea3d6092d5ece910fd",
+          "queueMs": 0,
+          "modelTurns": 1
+        },
+        "deployment": {
+          "schemaVersion": 1,
+          "mode": "stable_only",
+          "selection": "champion",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b"
+        },
+        "hostToolReceiptArtifactIds": [
+          "tool-receipt-271d43ee37a37d6b66c7e8a04664a197",
+          "tool-receipt-5417ec9e7dca407cb58664975fd8f72d",
+          "tool-receipt-5b0314fac81c45c205577e3ca97269ed",
+          "tool-receipt-7e50167e4d68b6da1545a3c4ecd6e084",
+          "tool-receipt-8c5274cb1899cf1f8a9330c5402c5c61",
+          "tool-receipt-b07bdaa3f284be005e204e1291da0889",
+          "tool-receipt-bdde9aa2cdbad76ad643c0539a708c15",
+          "tool-receipt-c6141b1e0ca77afcfce959240c2cc693"
+        ],
+        "result": {
+          "taskId": "implement-pool",
+          "summary": "Revised the implementation manifest to fix the reported private-counter update defect and queued-task ID reservation leak. Runtime tests, syntax checks, and repository diff checks remain unavailable under the host-owned manifest contract.",
+          "claims": [
+            {
+              "statement": "The revised manifest fixes terminal metric accounting by incrementing the actual private counters through an explicit classification switch.",
+              "support": "The prior gate finding identified computed property access as invalid for private fields; the revised source uses explicit private-field updates.",
+              "requirementIds": [
+                "REQ-01",
+                "REQ-05"
+              ],
+              "evidenceRefs": [
+                {
+                  "kind": "evidence",
+                  "ordinal": 0
+                },
+                {
+                  "kind": "evidence",
+                  "ordinal": 3
+                }
+              ]
+            },
+            {
+              "statement": "The revised manifest releases task IDs when queued tasks are canceled, while active-task IDs remain reserved until underlying settlement.",
+              "support": "The queued cancellation path now deletes the ID from the reservation set; the active settlement path retains deletion at underlying settlement.",
+              "requirementIds": [
+                "REQ-01",
+                "REQ-05"
+              ],
+              "evidenceRefs": [
+                {
+                  "kind": "evidence",
+                  "ordinal": 0
+                },
+                {
+                  "kind": "evidence",
+                  "ordinal": 3
+                }
+              ]
+            },
+            {
+              "statement": "The manifest contains exactly one authorized upsert for src/task-pool.mjs.",
+              "support": "implementationManifest.changes contains one upsert and no other file operation.",
+              "requirementIds": [
+                "REQ-02"
+              ],
+              "evidenceRefs": [
+                {
+                  "kind": "evidence",
+                  "ordinal": 3
+                }
+              ]
+            },
+            {
+              "statement": "The repository-local commands are node --test test/public/*.test.mjs and node --check src/task-pool.mjs, but they were not executed in this attempt.",
+              "support": "The commands are defined in package.json; the host contract requires manifest-only authoring and reserves application and testing to the host.",
+              "requirementIds": [
+                "REQ-03",
+                "REQ-07"
+              ],
+              "evidenceRefs": [
+                {
+                  "kind": "evidence",
+                  "ordinal": 2
+                },
+                {
+                  "kind": "check",
+                  "ordinal": 2
+                }
+              ]
+            },
+            {
+              "statement": "No network, dependency installation, subagent invocation, outside-workspace read, test weakening, disabled check, or modification outside src/task-pool.mjs was performed.",
+              "support": "The output is limited to the authorized implementation manifest and structured evidence.",
+              "requirementIds": [
+                "REQ-04"
+              ],
+              "evidenceRefs": [
+                {
+                  "kind": "check",
+                  "ordinal": 3
+                }
+              ]
+            },
+            {
+              "statement": "The revised handoff explicitly records the two repaired defects, exact identified commands, unavailable execution evidence, and remaining validation gaps.",
+              "support": "The deliverables, checks, and uncertainties distinguish authored manifest content from host-applied and host-executed results.",
+              "requirementIds": [
+                "REQ-06",
+                "REQ-07"
+              ],
+              "evidenceRefs": [
+                {
+                  "kind": "evidence",
+                  "ordinal": 0
+                },
+                {
+                  "kind": "evidence",
+                  "ordinal": 2
+                },
+                {
+                  "kind": "check",
+                  "ordinal": 0
+                },
+                {
+                  "kind": "check",
+                  "ordinal": 1
+                },
+                {
+                  "kind": "check",
+                  "ordinal": 2
+                }
+              ]
+            }
+          ],
+          "evidence": [
+            "The prior gate-finding artifact explicitly reported two defects: computed property access did not update private counters, and queued cancellation did not delete the reserved task ID.",
+            "The inspected README and public tests define task lifecycle, reservation, cancellation, concurrency, ordering, and metrics behavior covered by the implementation.",
+            "The inspected package.json defines the public test command node --test test/public/*.test.mjs and syntax command node --check src/task-pool.mjs.",
+            "The revised implementation manifest contains one UTF-8 upsert for src/task-pool.mjs and includes explicit private-counter updates plus queued reservation deletion."
+          ],
+          "deliverables": [
+            "A complete implementation in src/task-pool.mjs plus a concise traceable handoff containing the contract-to-code coverage, exact commands actually executed, observed results, authorized-file status/diff evidence, and explicit unresolved gaps. The handoff must preserve all unavailable-demand prohibitions: no network, dependency installation, subagents, outside-workspace reads, test weakening, disabled checks, or modifications outside src/task-pool.mjs.",
+            "Repair details: #recordTerminal now updates #succeeded, #failed, #aborted, and #timedOut via explicit private-field branches; #cancelQueued now deletes the canceled task ID from #reserved. Active tasks still release IDs only when the underlying run settles.",
+            "Exact commands identified: node --test test/public/*.test.mjs; node --check src/task-pool.mjs. Neither was executed in this attempt because the host contract requires manifest-only authoring and reserves application/testing to the host.",
+            "Authorized-file evidence: one upsert at src/task-pool.mjs, mode 100644; no test or package metadata operation. Applied-worktree status/diff evidence remains unavailable."
+          ],
+          "checks": [
+            "Static review confirmed #recordTerminal no longer uses computed property access for private fields and has explicit branches for all four terminal classifications.",
+            "Static review confirmed queued cancellation deletes the task ID from #reserved, while active settlement retains the existing reservation-release behavior.",
+            "Public test and syntax commands were identified but not executed: node --test test/public/*.test.mjs; node --check src/task-pool.mjs.",
+            "No repository status/diff command was executed; no applied-worktree state is claimed."
+          ],
+          "uncertainties": [
+            "The revised manifest has not been applied or dynamically executed by this worker, so public-test, syntax, and hidden-test outcomes remain unverified.",
+            "Host execution is still required to confirm runtime behavior and repository status/diff evidence."
+          ],
+          "confidence": 0.9,
+          "implementationManifest": {
+            "schemaVersion": 1,
+            "baseCommit": "b8db554d6952f42f2e82758eaa00cae21f754302",
+            "changes": [
+              {
+                "path": "src/task-pool.mjs",
+                "operation": "upsert",
+                "mode": "100644",
+                "contentUtf8": "export class TaskPoolClosedError extends Error {\n  constructor(message = \"Task pool is closed\") {\n    super(message);\n    this.name = \"TaskPoolClosedError\";\n  }\n}\n\nexport class TaskPoolTimeoutError extends Error {\n  constructor(taskId) {\n    super(`Task timed out: ${taskId}`);\n    this.name = \"TaskPoolTimeoutError\";\n    this.taskId = taskId;\n  }\n}\n\nfunction abortError() {\n  const error = new Error(\"The operation was aborted\");\n  error.name = \"AbortError\";\n  return error;\n}\n\nfunction isObject(value) {\n  return value !== null && typeof value === \"object\";\n}\n\nfunction assertPositiveSafeInteger(value, name) {\n  if (!Number.isSafeInteger(value) || value <= 0) {\n    throw new TypeError(`${name} must be a positive safe integer`);\n  }\n}\n\nfunction assertNonNegativeSafeInteger(value, name) {\n  if (!Number.isSafeInteger(value) || value < 0) {\n    throw new TypeError(`${name} must be a non-negative safe integer`);\n  }\n}\n\nexport class AsyncTaskPool {\n  #concurrency;\n  #perKeyConcurrency;\n  #agingMs;\n  #now;\n  #closed = false;\n  #queue = [];\n  #reserved = new Set();\n  #keyActive = new Map();\n  #active = 0;\n  #sequence = 0;\n  #pumping = false;\n  #idleWaiters = [];\n  #submitted = 0;\n  #started = 0;\n  #succeeded = 0;\n  #failed = 0;\n  #aborted = 0;\n  #timedOut = 0;\n  #maxActive = 0;\n\n  constructor(options) {\n    if (!isObject(options)) {\n      throw new TypeError(\"options must be an object\");\n    }\n\n    const {\n      concurrency,\n      perKeyConcurrency = 1,\n      agingMs = 100,\n      now = Date.now,\n    } = options;\n\n    assertPositiveSafeInteger(concurrency, \"concurrency\");\n    assertPositiveSafeInteger(perKeyConcurrency, \"perKeyConcurrency\");\n    assertNonNegativeSafeInteger(agingMs, \"agingMs\");\n    if (typeof now !== \"function\") {\n      throw new TypeError(\"now must be a function\");\n    }\n\n    this.#concurrency = concurrency;\n    this.#perKeyConcurrency = perKeyConcurrency;\n    this.#agingMs = agingMs;\n    this.#now = now;\n  }\n\n  schedule(options) {\n    if (this.#closed) {\n      throw new TaskPoolClosedError();\n    }\n    if (!isObject(options)) {\n      throw new TypeError(\"task options must be an object\");\n    }\n\n    const {\n      id,\n      key = \"default\",\n      priority = 0,\n      timeoutMs,\n      signal,\n      run,\n    } = options;\n\n    if (typeof id !== \"string\" || id.length === 0) {\n      throw new TypeError(\"id must be a non-empty string\");\n    }\n    if (typeof key !== \"string\" || key.length === 0) {\n      throw new TypeError(\"key must be a non-empty string\");\n    }\n    if (typeof priority !== \"number\" || !Number.isFinite(priority)) {\n      throw new TypeError(\"priority must be finite\");\n    }\n    if (typeof run !== \"function\") {\n      throw new TypeError(\"run must be a function\");\n    }\n    if (timeoutMs !== undefined) {\n      assertPositiveSafeInteger(timeoutMs, \"timeoutMs\");\n    }\n\n    const callerSignal = signal === null ? undefined : signal;\n    if (callerSignal !== undefined) {\n      if (!isObject(callerSignal)\n        || typeof callerSignal.addEventListener !== \"function\"\n        || typeof callerSignal.removeEventListener !== \"function\"\n        || typeof callerSignal.aborted !== \"boolean\") {\n        throw new TypeError(\"signal must be an AbortSignal\");\n      }\n    }\n    if (this.#reserved.has(id)) {\n      throw new Error(`Task ID is already reserved: ${id}`);\n    }\n\n    const submittedAt = this.#readClock();\n    let resolvePromise;\n    let rejectPromise;\n    const promise = new Promise((resolve, reject) => {\n      resolvePromise = resolve;\n      rejectPromise = reject;\n    });\n\n    const task = {\n      id,\n      key,\n      priority,\n      timeoutMs,\n      timeoutRemaining: timeoutMs,\n      callerSignal,\n      abortListener: null,\n      controller: new AbortController(),\n      run,\n      submittedAt,\n      sequence: this.#sequence++,\n      state: \"queued\",\n      callerSettled: false,\n      terminalRecorded: false,\n      resolve: resolvePromise,\n      reject: rejectPromise,\n      timeoutHandle: null,\n    };\n\n    this.#reserved.add(id);\n    this.#submitted += 1;\n    this.#queue.push(task);\n\n    if (callerSignal !== undefined) {\n      task.abortListener = () => this.#handleAbort(task);\n      callerSignal.addEventListener(\"abort\", task.abortListener, { once: true });\n      if (callerSignal.aborted) {\n        this.#cancelQueued(task, abortError(), false);\n      }\n    }\n\n    if (task.state === \"queued\") {\n      this.#pump();\n    }\n    return promise;\n  }\n\n  close(options = {}) {\n    if (!isObject(options)) {\n      throw new TypeError(\"close options must be an object\");\n    }\n\n    this.#closed = true;\n    if (options.abortQueued === true) {\n      const queued = [...this.#queue];\n      for (const task of queued) {\n        this.#cancelQueued(task, new TaskPoolClosedError(), false);\n      }\n    }\n    this.#pump();\n    this.#resolveIdle();\n  }\n\n  whenIdle() {\n    if (this.#queue.length === 0 && this.#active === 0) {\n      return Promise.resolve();\n    }\n    return new Promise((resolve) => {\n      this.#idleWaiters.push(resolve);\n    });\n  }\n\n  metrics() {\n    return Object.freeze({\n      queued: this.#queue.length,\n      active: this.#active,\n      submitted: this.#submitted,\n      started: this.#started,\n      succeeded: this.#succeeded,\n      failed: this.#failed,\n      aborted: this.#aborted,\n      timedOut: this.#timedOut,\n      maxActive: this.#maxActive,\n    });\n  }\n\n  #readClock() {\n    const value = this.#now();\n    if (!Number.isFinite(value)) {\n      throw new TypeError(\"now must return a finite number\");\n    }\n    return value;\n  }\n\n  #effectivePriority(task, currentTime) {\n    if (this.#agingMs === 0) {\n      return task.priority;\n    }\n    const waitedMs = Math.max(0, currentTime - task.submittedAt);\n    return task.priority + Math.floor(waitedMs / this.#agingMs);\n  }\n\n  #pump() {\n    if (this.#pumping) {\n      return;\n    }\n\n    this.#pumping = true;\n    try {\n      while (this.#active < this.#concurrency && this.#queue.length > 0) {\n        const currentTime = this.#agingMs === 0 ? 0 : this.#readClock();\n        let selectedIndex = -1;\n        let selectedPriority = -Infinity;\n\n        for (let index = 0; index < this.#queue.length; index += 1) {\n          const task = this.#queue[index];\n          if (task.state !== \"queued\") {\n            continue;\n          }\n          if ((this.#keyActive.get(task.key) ?? 0) >= this.#perKeyConcurrency) {\n            continue;\n          }\n          const effectivePriority = this.#effectivePriority(task, currentTime);\n          if (selectedIndex === -1 || effectivePriority > selectedPriority) {\n            selectedIndex = index;\n            selectedPriority = effectivePriority;\n          }\n        }\n\n        if (selectedIndex === -1) {\n          break;\n        }\n        const [task] = this.#queue.splice(selectedIndex, 1);\n        this.#start(task);\n      }\n    } finally {\n      this.#pumping = false;\n    }\n    this.#resolveIdle();\n  }\n\n  #start(task) {\n    task.state = \"running\";\n    this.#active += 1;\n    this.#started += 1;\n    const keyCount = this.#keyActive.get(task.key) ?? 0;\n    this.#keyActive.set(task.key, keyCount + 1);\n    this.#maxActive = Math.max(this.#maxActive, this.#active);\n    if (task.timeoutMs !== undefined) {\n      this.#armTimeout(task);\n    }\n\n    let result;\n    try {\n      result = task.run(task.controller.signal);\n    } catch (error) {\n      this.#underlyingSettled(task, false, error);\n      return;\n    }\n    Promise.resolve(result).then(\n      (value) => this.#underlyingSettled(task, true, value),\n      (error) => this.#underlyingSettled(task, false, error),\n    );\n  }\n\n  #armTimeout(task) {\n    const delay = Math.min(task.timeoutRemaining, 2_147_483_647);\n    task.timeoutRemaining -= delay;\n    task.timeoutHandle = setTimeout(() => {\n      task.timeoutHandle = null;\n      if (task.state !== \"running\" || task.callerSettled) {\n        return;\n      }\n      if (task.timeoutRemaining > 0) {\n        this.#armTimeout(task);\n        return;\n      }\n      this.#terminateActive(task, \"timedOut\", new TaskPoolTimeoutError(task.id));\n    }, delay);\n  }\n\n  #handleAbort(task) {\n    if (task.state === \"queued\") {\n      this.#cancelQueued(task, abortError());\n    } else if (task.state === \"running\") {\n      this.#terminateActive(task, \"aborted\", abortError());\n    }\n  }\n\n  #cancelQueued(task, error, shouldPump = true) {\n    if (task.state !== \"queued\") {\n      return;\n    }\n    this.#removeQueued(task);\n    task.state = \"settled\";\n    this.#cleanupListener(task);\n    this.#reserved.delete(task.id);\n    if (!task.controller.signal.aborted) {\n      task.controller.abort(error);\n    }\n    this.#recordTerminal(task, \"aborted\");\n    this.#settleCaller(task, false, error);\n    if (shouldPump) {\n      this.#pump();\n    }\n    this.#resolveIdle();\n  }\n\n  #terminateActive(task, classification, error) {\n    if (task.state !== \"running\" || task.callerSettled) {\n      return;\n    }\n    this.#recordTerminal(task, classification);\n    this.#settleCaller(task, false, error);\n    if (!task.controller.signal.aborted) {\n      task.controller.abort(error);\n    }\n  }\n\n  #underlyingSettled(task, succeeded, value) {\n    if (task.state !== \"running\") {\n      return;\n    }\n    this.#clearTimeout(task);\n    this.#cleanupListener(task);\n    task.state = \"settled\";\n    this.#active -= 1;\n    const keyCount = (this.#keyActive.get(task.key) ?? 1) - 1;\n    if (keyCount === 0) {\n      this.#keyActive.delete(task.key);\n    } else {\n      this.#keyActive.set(task.key, keyCount);\n    }\n    this.#reserved.delete(task.id);\n\n    if (!task.callerSettled) {\n      this.#recordTerminal(task, succeeded ? \"succeeded\" : \"failed\");\n      this.#settleCaller(task, succeeded, value);\n    }\n    this.#pump();\n    this.#resolveIdle();\n  }\n\n  #recordTerminal(task, classification) {\n    if (task.terminalRecorded) {\n      return;\n    }\n    task.terminalRecorded = true;\n    switch (classification) {\n      case \"succeeded\":\n        this.#succeeded += 1;\n        break;\n      case \"failed\":\n        this.#failed += 1;\n        break;\n      case \"aborted\":\n        this.#aborted += 1;\n        break;\n      case \"timedOut\":\n        this.#timedOut += 1;\n        break;\n      default:\n        throw new Error(`Unknown terminal classification: ${classification}`);\n    }\n  }\n\n  #settleCaller(task, succeeded, value) {\n    if (task.callerSettled) {\n      return;\n    }\n    task.callerSettled = true;\n    if (succeeded) {\n      task.resolve(value);\n    } else {\n      task.reject(value);\n    }\n  }\n\n  #removeQueued(task) {\n    const index = this.#queue.indexOf(task);\n    if (index !== -1) {\n      this.#queue.splice(index, 1);\n    }\n  }\n\n  #cleanupListener(task) {\n    if (task.callerSignal !== undefined && task.abortListener !== null) {\n      task.callerSignal.removeEventListener(\"abort\", task.abortListener);\n      task.abortListener = null;\n    }\n  }\n\n  #clearTimeout(task) {\n    if (task.timeoutHandle !== null) {\n      clearTimeout(task.timeoutHandle);\n      task.timeoutHandle = null;\n    }\n  }\n\n  #resolveIdle() {\n    if (this.#queue.length !== 0 || this.#active !== 0 || this.#idleWaiters.length === 0) {\n      return;\n    }\n    const waiters = this.#idleWaiters.splice(0);\n    for (const resolve of waiters) {\n      resolve();\n    }\n  }\n}\n"
+              }
+            ]
+          }
+        },
+        "error": "MANAGER (accept): Host application and execution of node --test test/public/*.test.mjs, node --check src/task-pool.mjs, and repository status/diff verification remain pending and must be evaluated independently.; V1 (revise): Run node --test test/public/*.test.mjs and node --check src/task-pool.mjs, then record exact observed results.; V1 (revise): Apply the manifest and provide repository status/diff evidence showing only src/task-pool.mjs changed.; V1 (revise): Host-side runtime verification remains necessary before treating the implementation as complete.; V2 (accept): Public tests, syntax checks, and applied-worktree status/diff remain unverified and require host-side execution.; V3 (revise): The submitted result is an unapplied implementation manifest rather than verified evidence that src/task-pool.mjs contains the implementation.; V3 (revise): Required public tests and syntax check were not executed, so runtime behavior and syntax remain unverified.; V3 (revise): Repository status/diff evidence confirming that only src/task-pool.mjs changed is absent.; V3 (revise): Host application and verification are required before acceptance.; G3: Receipt artifact status is rejected; G3: verifier reported failure; Council outcome UNRESOLVED did not adopt acceptance"
+      }
+    },
+    "threadIds": {
+      "mission-preflight": "01a0111f-1c60-7443-8d8e-8456af7f84d5",
+      "planner:strategy_director:1": "01a01120-48b2-7300-a294-586258e246a8",
+      "architect": "01a01120-faa7-7b80-a71c-5c8d2fa52b15",
+      "worker:software_engineer:implement-pool": "01a01121-675a-79d1-a3e3-6849df8fbdf2",
+      "validator:implement-pool:1:V1": "01a01124-8ab0-74b1-b516-ef551483cad4",
+      "team-lead:task-pool": "01a01124-8aaf-7451-bbf2-78d57122d1a1",
+      "validator:implement-pool:1:V2": "01a01124-f882-7302-96af-965a4224caa0",
+      "validator:implement-pool:2:V2": "01a01127-1c92-7ae2-b786-18e01180edca",
+      "validator:implement-pool:2:V1": "01a01127-1ca1-7493-83f1-6ffed2f36db2",
+      "validator:implement-pool:2:V3": "01a01129-0b1e-75b2-9971-91054616345c"
+    },
+    "metrics": {
+      "modelCalls": 12,
+      "retries": 0,
+      "rateLimitEvents": 0,
+      "maxActiveCalls": 3,
+      "maxQueueWaitMs": 28391,
+      "queueP95Ms": 28391,
+      "priorityDispatches": 0,
+      "threadLocks": 0,
+      "tokenUsage": {
+        "totalTokens": 626864,
+        "inputTokens": 580375,
+        "cachedInputTokens": 204032,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 46489,
+        "reasoningOutputTokens": 29956
+      },
+      "tokenMeteredCalls": 12,
+      "tokenUnmeteredCalls": 0,
+      "callBreakdown": [
+        {
+          "role": "architect",
+          "purpose": "architect_plan",
+          "calls": 1,
+          "promptCharacters": 20651,
+          "promptUtf8Bytes": 20844,
+          "totalDurationMs": 27626,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 27458,
+            "inputTokens": 26105,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 1353,
+            "reasoningOutputTokens": 238
+          }
+        },
+        {
+          "role": "manager",
+          "purpose": "manager_review",
+          "calls": 2,
+          "promptCharacters": 62714,
+          "promptUtf8Bytes": 63254,
+          "totalDurationMs": 77722,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 2,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 72282,
+            "inputTokens": 68212,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 4070,
+            "reasoningOutputTokens": 3498
+          }
+        },
+        {
+          "role": "planner",
+          "purpose": "candidate_plan",
+          "calls": 1,
+          "promptCharacters": 15792,
+          "promptUtf8Bytes": 15970,
+          "totalDurationMs": 45367,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 27484,
+            "inputTokens": 25197,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 2287,
+            "reasoningOutputTokens": 1034
+          }
+        },
+        {
+          "role": "planner",
+          "purpose": "mission_preflight",
+          "calls": 1,
+          "promptCharacters": 5381,
+          "promptUtf8Bytes": 5575,
+          "totalDurationMs": 75694,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 26888,
+            "inputTokens": 22954,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 3934,
+            "reasoningOutputTokens": 1661
+          }
+        },
+        {
+          "role": "validator",
+          "purpose": "validate_task",
+          "calls": 5,
+          "promptCharacters": 150487,
+          "promptUtf8Bytes": 151296,
+          "totalDurationMs": 357994,
+          "totalQueueWaitMs": 28391,
+          "tokenMeteredCalls": 5,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 348059,
+            "inputTokens": 329434,
+            "cachedInputTokens": 176640,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 18625,
+            "reasoningOutputTokens": 16547
+          }
+        },
+        {
+          "role": "worker",
+          "purpose": "execute_task",
+          "calls": 2,
+          "promptCharacters": 50984,
+          "promptUtf8Bytes": 51024,
+          "totalDurationMs": 300604,
+          "totalQueueWaitMs": 0,
+          "tokenMeteredCalls": 2,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsage": {
+            "totalTokens": 124693,
+            "inputTokens": 108473,
+            "cachedInputTokens": 27392,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 16220,
+            "reasoningOutputTokens": 6978
+          }
+        }
+      ]
+    },
+    "harness": {
+      "enabled": true,
+      "learningEnabled": false,
+      "catalogSkills": 12,
+      "selections": 12,
+      "specialistIds": [
+        "accountable-manager",
+        "evidence-auditor",
+        "failure-mode-critic",
+        "requirements-auditor",
+        "requirements-strategist",
+        "software-executor",
+        "systems-architect"
+      ],
+      "skillIds": [
+        "adversarial-risk-review",
+        "critical-path-planning",
+        "evidence-first-research",
+        "implementation-test-loop",
+        "operational-debugging",
+        "requirements-traceability",
+        "workflow-recipe-engineering"
+      ],
+      "skillUses": 19,
+      "memoriesRecalled": 0,
+      "learnedExperiences": 0,
+      "policyVersion": "luna-harness-v3",
+      "learningPolicyVersion": "lp-baseline-v1",
+      "learningPolicyStatus": "collecting",
+      "learningPolicySamples": 0,
+      "learningPolicyHoldoutSamples": 0,
+      "learningPolicyImprovement": 0,
+      "learningPolicyRollbacks": 0,
+      "highRiskSelections": 9,
+      "independentReviewSelections": 5,
+      "gateApplications": 59,
+      "skillPortfolioCount": 1,
+      "rawSkillInstructionCharsAvoided": 931,
+      "skillPortfolios": [
+        {
+          "schemaVersion": 1,
+          "taskId": "implement-pool",
+          "portfolioId": "sp-0176a5fad790a6f099e5a086",
+          "policyVersion": "luna-harness-v3",
+          "maxUniqueSkills": 8,
+          "uniqueSkillIds": [
+            "adversarial-risk-review",
+            "evidence-first-research",
+            "implementation-test-loop",
+            "operational-debugging",
+            "requirements-traceability",
+            "workflow-recipe-engineering"
+          ],
+          "rawInstructionCharsAvoided": 931,
+          "assignments": [
+            {
+              "ownerId": "worker",
+              "role": "worker",
+              "specialistId": "software-executor",
+              "skills": [
+                {
+                  "id": "implementation-test-loop",
+                  "version": "1",
+                  "contentHash": "52e3bd2f33c45dcda54cfd75533a98d505d95492512b4c10fe814737e1defeab"
+                },
+                {
+                  "id": "operational-debugging",
+                  "version": "1",
+                  "contentHash": "c49ea4863df8e71ee3f4fb3b46e860a1002812439c40dca548512dba9511d247"
+                }
+              ]
+            },
+            {
+              "ownerId": "manager",
+              "role": "manager",
+              "specialistId": "accountable-manager",
+              "skills": [
+                {
+                  "id": "requirements-traceability",
+                  "version": "1",
+                  "contentHash": "91f0d6f7dfdddb80e5c333bdaa3891f23f1a8fd417f6fff768bfc39d23e9486e"
+                },
+                {
+                  "id": "workflow-recipe-engineering",
+                  "version": "1",
+                  "contentHash": "f7a23daaf6ea92e80f7bcbf9505db623e73020a2b81fc47785c02a50aeb93c73"
+                }
+              ]
+            },
+            {
+              "ownerId": "validator:1",
+              "role": "validator",
+              "specialistId": "evidence-auditor",
+              "skills": [
+                {
+                  "id": "evidence-first-research",
+                  "version": "1",
+                  "contentHash": "52bcfee2f241f276c16227ea32a035cb472d2db9373c5f9c76f269dda581eabb"
+                }
+              ]
+            },
+            {
+              "ownerId": "validator:2",
+              "role": "validator",
+              "specialistId": "requirements-auditor",
+              "skills": []
+            },
+            {
+              "ownerId": "validator:3",
+              "role": "validator",
+              "specialistId": "failure-mode-critic",
+              "skills": [
+                {
+                  "id": "adversarial-risk-review",
+                  "version": "1",
+                  "contentHash": "28f61204a422d77dcf9db5402a7e0add77188c9b03c88f48c1783c5217eb05d0"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "harnessV2": {
+      "orgVersion": "lab-128@2",
+      "organizationHeadcount": 15,
+      "organizationReviewerSlots": 3,
+      "workOrders": {
+        "implement-pool": {
+          "order": {
+            "id": "implement-pool",
+            "revision": 1,
+            "missionId": "mission:2026-08-17T19-07-24-369Z-6300b6f7",
+            "requirementIds": [
+              "REQ-01",
+              "REQ-02",
+              "REQ-03",
+              "REQ-04",
+              "REQ-05",
+              "REQ-06",
+              "REQ-07"
+            ],
+            "objective": "Read README.md, all relevant public tests, existing src/task-pool.mjs, and repository-local command evidence; author the complete bounded implementation manifest and implement every evidenced requirement directly in src/task-pool.mjs. Run only locally supported public-test and syntax checks, verify the write boundary, and report exact commands, results, and unresolved gaps. Do not claim any unobserved action or gate as successful.",
+            "constraints": [],
+            "nonGoals": [],
+            "ownerTeam": "hq:engineering/division:architecture/team:system-architecture",
+            "reviewerPool": [
+              "hq:quality/division:deterministic-testing/team:unit-testing"
+            ],
+            "risk": "high",
+            "dependencies": [],
+            "inputArtifactIds": [],
+            "deliverables": [
+              "A complete implementation in src/task-pool.mjs plus a concise traceable handoff containing the contract-to-code coverage, exact commands actually executed, observed results, authorized-file status/diff evidence, and explicit unresolved gaps. The handoff must preserve all unavailable-demand prohibitions: no network, dependency installation, subagents, outside-workspace reads, test weakening, disabled checks, or modifications outside src/task-pool.mjs."
+            ],
+            "acceptanceTests": [
+              "README.md, every relevant public test, and existing src/task-pool.mjs are inspected before implementation; the resulting implementation covers only evidenced API, lifecycle, concurrency, ordering, error, and interruption behavior.",
+              "Only src/task-pool.mjs is changed according to repository status or equivalent local diff evidence; tests and package metadata remain unchanged.",
+              "The exact repository-local public-test command and syntax-check command are identified and run, with observed output recorded; if either cannot be identified or executed, the gap is explicitly reported.",
+              "No network access, dependency installation, subagent invocation, outside-workspace read, test/assertion weakening, or disabled check is performed.",
+              "The final handoff includes a concise implementation summary and exact commands actually run, without invented sources, outputs, or verification claims."
+            ],
+            "requiredGateIds": [
+              "G0",
+              "G2",
+              "G3"
+            ],
+            "toolPolicy": {
+              "allowedTools": [
+                "read",
+                "search"
+              ],
+              "network": "off",
+              "allowedDomains": [],
+              "readScopes": [
+                "workspace/README.md",
+                "workspace/package.json",
+                "workspace/src/task-pool.mjs",
+                "workspace/test/public/task-pool.public.test.mjs"
+              ],
+              "writeScopes": []
+            },
+            "maxExecutionAttempts": 2,
+            "maxValidationAttempts": 2,
+            "priority": 1
+          },
+          "state": "FAILED",
+          "assignedAgentId": "luna-006",
+          "reviewerAgentIds": [
+            "luna-008"
+          ],
+          "executionRevision": 2,
+          "executionAttempts": 2,
+          "validationAttempts": 1,
+          "artifactIds": [
+            "task-implement-pool-83a82aeba7c8-result"
+          ],
+          "updatedAt": "2026-08-17T19:19:42.727Z",
+          "lease": {
+            "leaseId": "990f5a90-a7bc-4735-9580-995d6e9546b9",
+            "fencingToken": 2,
+            "agentId": "luna-006",
+            "acquiredAt": "2026-08-17T19:14:35.305Z"
+          },
+          "lastError": "MANAGER (accept): Host application and execution of node --test test/public/*.test.mjs, node --check src/task-pool.mjs, and repository status/diff verification remain pending and must be evaluated independently.; V1 (revise): Run node --test test/public/*.test.mjs and node --check src/task-pool.mjs, then record exact observed results.; V1 (revise): Apply the manifest and provide repository status/diff evidence showing only src/task-pool.mjs changed.; V1 (revise): Host-side runtime verification remains necessary before treating the implementation as complete.; V2 (accept): Public tests, syntax checks, and applied-worktree status/diff remain unverified and require host-side execution.; V3 (revise): The submitted result is an unapplied implementation manifest rather than verified evidence that src/task-pool.mjs contains the implementation.; V3 (revise): Required public tests and syntax check were not executed, so runtime behavior and syntax remain unverified.; V3 (revise): Repository status/diff evidence confirming that only src/task-pool.mjs changed is absent.; V3 (revise): Host application and verification are required before acceptance.; G3: Receipt artifact status is rejected; G3: verifier reported failure; Council outcome UNRESOLVED did not adopt acceptance"
+        }
+      },
+      "artifactHeads": {
+        "tool-receipt-c6141b1e0ca77afcfce959240c2cc693": {
+          "artifactId": "tool-receipt-c6141b1e0ca77afcfce959240c2cc693",
+          "revision": 1,
+          "contentHash": "b8c89ef73161e36a96e69c8b1cac7a3a9d908d65f5d3dfbb06d701bd7aa3161f"
+        },
+        "tool-receipt-5b0314fac81c45c205577e3ca97269ed": {
+          "artifactId": "tool-receipt-5b0314fac81c45c205577e3ca97269ed",
+          "revision": 1,
+          "contentHash": "c2ba3449b007bc121fbaf7762921a05dacdd6c2ae9bc7de6818e34113a513116"
+        },
+        "tool-receipt-bdde9aa2cdbad76ad643c0539a708c15": {
+          "artifactId": "tool-receipt-bdde9aa2cdbad76ad643c0539a708c15",
+          "revision": 1,
+          "contentHash": "e52b28260ce9a5c601639afb5f28ddee91c070c14fc85d6e5b783dd749270da9"
+        },
+        "tool-receipt-271d43ee37a37d6b66c7e8a04664a197": {
+          "artifactId": "tool-receipt-271d43ee37a37d6b66c7e8a04664a197",
+          "revision": 1,
+          "contentHash": "7483f420ae8e4b49ca71b58a58d03830e15c15a02f4cec1ec14ffbd4b894bf2a"
+        },
+        "task-implement-pool-83a82aeba7c8-result": {
+          "artifactId": "task-implement-pool-83a82aeba7c8-result",
+          "revision": 2,
+          "contentHash": "fd0c6564140ca2dd745d81d3ba10b5729fe42cc4de89413837bef96f15a50cb6"
+        },
+        "gate-implement-pool-83a82aeba7c8-g0": {
+          "artifactId": "gate-implement-pool-83a82aeba7c8-g0",
+          "revision": 2,
+          "contentHash": "270d320ae6827f2551b6a73cb963cee94e9b83bbab5841ae6aab310a87b1cc4b"
+        },
+        "vote-implement-pool-83a82aeba7-r1-MANAGER": {
+          "artifactId": "vote-implement-pool-83a82aeba7-r1-MANAGER",
+          "revision": 1,
+          "contentHash": "5aff95f92f5e5dd3752abf243ba5d2155df9b54d7e02fcdb24dcefa68605dfd3"
+        },
+        "vote-implement-pool-83a82aeba7-r1-V1": {
+          "artifactId": "vote-implement-pool-83a82aeba7-r1-V1",
+          "revision": 1,
+          "contentHash": "b7da32772d25a8fce828a2026f79f413fd5729cb30c65fead5d065286087bbeb"
+        },
+        "vote-implement-pool-83a82aeba7-r1-V2": {
+          "artifactId": "vote-implement-pool-83a82aeba7-r1-V2",
+          "revision": 1,
+          "contentHash": "6ee1a81119bbc355c4ecd0c36aa882fbe024f41a09846024835a09d965fe0d2d"
+        },
+        "oracle-observation-implement-pool-83a82aeba7c8": {
+          "artifactId": "oracle-observation-implement-pool-83a82aeba7c8",
+          "revision": 2,
+          "contentHash": "169c9a55a9ecbd7e6e0acb9742f39ba6662ee2a94d9e9f427222f0f81e2cc662"
+        },
+        "oracle-receipt-implement-pool-83a82aeba7c8": {
+          "artifactId": "oracle-receipt-implement-pool-83a82aeba7c8",
+          "revision": 2,
+          "contentHash": "d1d6bd4b6865e1e452afa6faccb9bf2e5a364a4dd611dc0fc3908277cb1ba357"
+        },
+        "gate-implement-pool-83a82aeba7c8-g2": {
+          "artifactId": "gate-implement-pool-83a82aeba7c8-g2",
+          "revision": 2,
+          "contentHash": "a42e1fbaeda45ad7f8d8308d352e417f4807354efd0bb44bd60bad60888e6a4e"
+        },
+        "gate-implement-pool-83a82aeba7c8-g3": {
+          "artifactId": "gate-implement-pool-83a82aeba7c8-g3",
+          "revision": 2,
+          "contentHash": "4864797b4ee4b1f622aa240ba5f5223fc66494e3e08f4f20b6fc57bb7537895a"
+        },
+        "decision-implement-pool-r1": {
+          "artifactId": "decision-implement-pool-r1",
+          "revision": 1,
+          "contentHash": "7a455237a5d4643c579ebdf07a76d1d873d6fa3ad926c950bfce78eda3c40d4c"
+        },
+        "tool-receipt-7e50167e4d68b6da1545a3c4ecd6e084": {
+          "artifactId": "tool-receipt-7e50167e4d68b6da1545a3c4ecd6e084",
+          "revision": 1,
+          "contentHash": "617b401359c66b74b14e5d2302a66c4dcc12ce89d4168c9c94fd951fcea0da95"
+        },
+        "tool-receipt-8c5274cb1899cf1f8a9330c5402c5c61": {
+          "artifactId": "tool-receipt-8c5274cb1899cf1f8a9330c5402c5c61",
+          "revision": 1,
+          "contentHash": "a41a4611d6160e24c8863fb8bf706d15ba96a2f1b5a02da6a2002acc2892b180"
+        },
+        "tool-receipt-b07bdaa3f284be005e204e1291da0889": {
+          "artifactId": "tool-receipt-b07bdaa3f284be005e204e1291da0889",
+          "revision": 1,
+          "contentHash": "f560b2ad1420aecd90ebed38a054798ce47c4849f86bf055c76775f3c7476808"
+        },
+        "tool-receipt-5417ec9e7dca407cb58664975fd8f72d": {
+          "artifactId": "tool-receipt-5417ec9e7dca407cb58664975fd8f72d",
+          "revision": 1,
+          "contentHash": "50b87da92d65d83bf85ce2abfe2ffc0a5a86c2d360a6d6f318bf3d8561dd849c"
+        },
+        "vote-implement-pool-83a82aeba7-r2-MANAGER": {
+          "artifactId": "vote-implement-pool-83a82aeba7-r2-MANAGER",
+          "revision": 1,
+          "contentHash": "d21a610293fdac131c787c1a7ff6144f4a729e3a1d189310dc78c5060dead136"
+        },
+        "vote-implement-pool-83a82aeba7-r2-V1": {
+          "artifactId": "vote-implement-pool-83a82aeba7-r2-V1",
+          "revision": 1,
+          "contentHash": "1a9559c850ed3bf70e0ba6e643f646c77b9b61492491a3a2250510dc19df7d82"
+        },
+        "vote-implement-pool-83a82aeba7-r2-V2": {
+          "artifactId": "vote-implement-pool-83a82aeba7-r2-V2",
+          "revision": 1,
+          "contentHash": "34cd6694dbbb51d35791bd94506f4074db21926ee1c629c93dba2324fe7bc779"
+        },
+        "vote-implement-pool-83a82aeba7-r2-V3": {
+          "artifactId": "vote-implement-pool-83a82aeba7-r2-V3",
+          "revision": 1,
+          "contentHash": "ef4fcc251b92179942791035ea6565779030848cbafbe6cc2f7e299a35f17f60"
+        },
+        "decision-implement-pool-r2": {
+          "artifactId": "decision-implement-pool-r2",
+          "revision": 1,
+          "contentHash": "edd17c292e2e962e20234ef400d7e6a8929daddfa3d98923f61c13d33ff72da0"
+        }
+      },
+      "councils": {
+        "validation-implement-pool-r1": {
+          "agenda": {
+            "councilId": "validation-implement-pool-r1",
+            "type": "final-assurance",
+            "question": "Should Work Order implement-pool pass independent semantic gate G3?",
+            "options": [
+              "accept",
+              "revise",
+              "reject"
+            ],
+            "criteria": {
+              "requirementCoverage": 0.4,
+              "evidenceQuality": 0.35,
+              "riskContainment": 0.25
+            },
+            "requiredEvidence": [
+              "task-implement-pool-83a82aeba7c8-result",
+              "vote-implement-pool-83a82aeba7-r1-MANAGER",
+              "vote-implement-pool-83a82aeba7-r1-V1",
+              "vote-implement-pool-83a82aeba7-r1-V2"
+            ],
+            "participantIds": [
+              "luna-007",
+              "luna-008",
+              "luna-009"
+            ],
+            "artifactAuthorIds": [
+              "luna-006"
+            ],
+            "maxRounds": 1,
+            "createdAt": "2026-08-17T19:09:56.884Z"
+          },
+          "state": "CLOSED",
+          "round": 1,
+          "sealedMemos": {
+            "luna-007": {
+              "participantId": "luna-007",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-f1a6573207f0dc6b",
+                "claim-2-cae03242cf900d7d",
+                "claim-3-2ccb131343f5b431",
+                "claim-4-def05c612a9cc601",
+                "claim-5-d304b4ef870635d4",
+                "claim-6-06e4b0d1d8202139",
+                "claim-7-0edd3a2e5bdd2037"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r1-MANAGER"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-007"
+              ],
+              "risks": [
+                "Fix terminal metric updates using explicit private-field branches or another valid counter update mechanism.",
+                "Delete reserved IDs when queued tasks are cancelled, including pre-aborted and close-aborted tasks.",
+                "Apply the manifest and run the identified public test and syntax-check commands before independent audit; preserve any resulting failures as explicit gaps."
+              ],
+              "falsification": "test-or-verification: The required public test and syntax check were identified but not executed; dynamic correctness remains unverified. | counterexample-search: The supplied implementation has observable defects: #recordTerminal dynamically indexes strings such as '#succeeded' instead of private fields, so metrics counters do not increment; queued cancellation does not remove the task ID from #reserved, preventing documented ID reuse.",
+              "confidence": 0.99,
+              "submittedAt": "2026-08-17T19:09:56.884Z"
+            },
+            "luna-008": {
+              "participantId": "luna-008",
+              "position": "reject",
+              "claimIds": [
+                "claim-1-f1a6573207f0dc6b",
+                "claim-2-cae03242cf900d7d",
+                "claim-3-2ccb131343f5b431",
+                "claim-4-def05c612a9cc601",
+                "claim-5-d304b4ef870635d4",
+                "claim-6-06e4b0d1d8202139",
+                "claim-7-0edd3a2e5bdd2037"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r1-V1"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-008"
+              ],
+              "risks": [
+                "Metrics terminal counters remain unchanged because dynamic access to private fields via this[`#${classification}`] is ordinary property access, producing NaN on an unrelated property.",
+                "Queued abort and pre-aborted tasks do not delete the task ID from #reserved, so the claimed queued ID reuse behavior fails.",
+                "Dynamic tests and syntax checks were not run, leaving these defects undiscovered."
+              ],
+              "falsification": "requirement-traceability: Traceability is present structurally, but the implementation does not satisfy the claimed ID-reuse and metrics behavior. | test-or-verification: Public tests, syntax checking, and diff/status verification were not executed; the submission explicitly leaves these gaps unresolved. | counterexample-search: The claimed static review missed material defects: #recordTerminal uses dynamic property access (this[`#${classification}`]), which does not update private fields, and queued cancellation never removes the ID from #reserved, preventing queued ID reuse. | independent-review: The implementation has fundamental correctness defects that invalidate the claimed complete production-grade contract.",
+              "confidence": 0.99,
+              "submittedAt": "2026-08-17T19:09:56.884Z"
+            },
+            "luna-009": {
+              "participantId": "luna-009",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-f1a6573207f0dc6b",
+                "claim-2-cae03242cf900d7d",
+                "claim-3-2ccb131343f5b431",
+                "claim-4-def05c612a9cc601",
+                "claim-5-d304b4ef870635d4",
+                "claim-6-06e4b0d1d8202139",
+                "claim-7-0edd3a2e5bdd2037"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r1-V2"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-009"
+              ],
+              "risks": [
+                "Fix #recordTerminal to increment the actual private counters; computed property access does not access private fields.",
+                "Delete the task ID from #reserved when a queued task is canceled, while retaining reservation until underlying settlement for active tasks if required by the contract.",
+                "Run the identified public test and syntax-check commands after applying the corrected implementation, or preserve the explicit verification gap."
+              ],
+              "falsification": "requirement-traceability: Requirements are mapped to claims, but the claimed complete implementation is contradicted by concrete defects in the manifest. | test-or-verification: The required public test and syntax commands were identified but not executed, leaving a permitted but material verification gap. | counterexample-search: The claimed static review missed that #recordTerminal uses computed string access (this[`#${classification}`]) and therefore does not increment private metric fields. | independent-review: The manifest contains an additional lifecycle defect: #cancelQueued never removes the task ID from #reserved, so queued-aborted or close-aborted IDs cannot be reused. | Acceptance criteria coverage: REQ-05/REQ-06 behavior is not fully covered because terminal metrics remain unchanged and queued cancellation leaks ID reservations. Applied-worktree status/diff evidence is also explicitly unavailable.",
+              "confidence": 0.99,
+              "submittedAt": "2026-08-17T19:09:56.884Z"
+            }
+          },
+          "challenges": [],
+          "revisions": {},
+          "evidenceAddedThisRound": [],
+          "revealedMemos": [
+            {
+              "participantId": "luna-007",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-f1a6573207f0dc6b",
+                "claim-2-cae03242cf900d7d",
+                "claim-3-2ccb131343f5b431",
+                "claim-4-def05c612a9cc601",
+                "claim-5-d304b4ef870635d4",
+                "claim-6-06e4b0d1d8202139",
+                "claim-7-0edd3a2e5bdd2037"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r1-MANAGER"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-007"
+              ],
+              "risks": [
+                "Fix terminal metric updates using explicit private-field branches or another valid counter update mechanism.",
+                "Delete reserved IDs when queued tasks are cancelled, including pre-aborted and close-aborted tasks.",
+                "Apply the manifest and run the identified public test and syntax-check commands before independent audit; preserve any resulting failures as explicit gaps."
+              ],
+              "falsification": "test-or-verification: The required public test and syntax check were identified but not executed; dynamic correctness remains unverified. | counterexample-search: The supplied implementation has observable defects: #recordTerminal dynamically indexes strings such as '#succeeded' instead of private fields, so metrics counters do not increment; queued cancellation does not remove the task ID from #reserved, preventing documented ID reuse.",
+              "confidence": 0.99,
+              "submittedAt": "2026-08-17T19:09:56.884Z"
+            },
+            {
+              "participantId": "luna-008",
+              "position": "reject",
+              "claimIds": [
+                "claim-1-f1a6573207f0dc6b",
+                "claim-2-cae03242cf900d7d",
+                "claim-3-2ccb131343f5b431",
+                "claim-4-def05c612a9cc601",
+                "claim-5-d304b4ef870635d4",
+                "claim-6-06e4b0d1d8202139",
+                "claim-7-0edd3a2e5bdd2037"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r1-V1"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-008"
+              ],
+              "risks": [
+                "Metrics terminal counters remain unchanged because dynamic access to private fields via this[`#${classification}`] is ordinary property access, producing NaN on an unrelated property.",
+                "Queued abort and pre-aborted tasks do not delete the task ID from #reserved, so the claimed queued ID reuse behavior fails.",
+                "Dynamic tests and syntax checks were not run, leaving these defects undiscovered."
+              ],
+              "falsification": "requirement-traceability: Traceability is present structurally, but the implementation does not satisfy the claimed ID-reuse and metrics behavior. | test-or-verification: Public tests, syntax checking, and diff/status verification were not executed; the submission explicitly leaves these gaps unresolved. | counterexample-search: The claimed static review missed material defects: #recordTerminal uses dynamic property access (this[`#${classification}`]), which does not update private fields, and queued cancellation never removes the ID from #reserved, preventing queued ID reuse. | independent-review: The implementation has fundamental correctness defects that invalidate the claimed complete production-grade contract.",
+              "confidence": 0.99,
+              "submittedAt": "2026-08-17T19:09:56.884Z"
+            },
+            {
+              "participantId": "luna-009",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-f1a6573207f0dc6b",
+                "claim-2-cae03242cf900d7d",
+                "claim-3-2ccb131343f5b431",
+                "claim-4-def05c612a9cc601",
+                "claim-5-d304b4ef870635d4",
+                "claim-6-06e4b0d1d8202139",
+                "claim-7-0edd3a2e5bdd2037"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r1-V2"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-009"
+              ],
+              "risks": [
+                "Fix #recordTerminal to increment the actual private counters; computed property access does not access private fields.",
+                "Delete the task ID from #reserved when a queued task is canceled, while retaining reservation until underlying settlement for active tasks if required by the contract.",
+                "Run the identified public test and syntax-check commands after applying the corrected implementation, or preserve the explicit verification gap."
+              ],
+              "falsification": "requirement-traceability: Requirements are mapped to claims, but the claimed complete implementation is contradicted by concrete defects in the manifest. | test-or-verification: The required public test and syntax commands were identified but not executed, leaving a permitted but material verification gap. | counterexample-search: The claimed static review missed that #recordTerminal uses computed string access (this[`#${classification}`]) and therefore does not increment private metric fields. | independent-review: The manifest contains an additional lifecycle defect: #cancelQueued never removes the task ID from #reserved, so queued-aborted or close-aborted IDs cannot be reused. | Acceptance criteria coverage: REQ-05/REQ-06 behavior is not fully covered because terminal metrics remain unchanged and queued cancellation leaks ID reservations. Applied-worktree status/diff evidence is also explicitly unavailable.",
+              "confidence": 0.99,
+              "submittedAt": "2026-08-17T19:09:56.884Z"
+            }
+          ],
+          "decision": {
+            "councilId": "validation-implement-pool-r1",
+            "outcome": "ADOPTED",
+            "adoptedOption": "revise",
+            "evidenceClusterCount": 2,
+            "supportingParticipants": [
+              "luna-007",
+              "luna-009"
+            ],
+            "minorityReports": [
+              {
+                "participantId": "luna-008",
+                "position": "reject",
+                "claimIds": [
+                  "claim-1-f1a6573207f0dc6b",
+                  "claim-2-cae03242cf900d7d",
+                  "claim-3-2ccb131343f5b431",
+                  "claim-4-def05c612a9cc601",
+                  "claim-5-d304b4ef870635d4",
+                  "claim-6-06e4b0d1d8202139",
+                  "claim-7-0edd3a2e5bdd2037"
+                ],
+                "evidenceIds": [
+                  "task-implement-pool-83a82aeba7c8-result",
+                  "vote-implement-pool-83a82aeba7-r1-V1"
+                ],
+                "reason": "Dissenting sealed position: reject"
+              }
+            ],
+            "blockingFindingIds": [],
+            "followUpWorkOrderIds": [],
+            "decidedAt": "2026-08-17T19:09:56.884Z"
+          }
+        },
+        "validation-implement-pool-r2": {
+          "agenda": {
+            "councilId": "validation-implement-pool-r2",
+            "type": "final-assurance",
+            "question": "Should Work Order implement-pool pass independent semantic gate G3?",
+            "options": [
+              "accept",
+              "revise",
+              "reject"
+            ],
+            "criteria": {
+              "requirementCoverage": 0.4,
+              "evidenceQuality": 0.35,
+              "riskContainment": 0.25
+            },
+            "requiredEvidence": [
+              "task-implement-pool-83a82aeba7c8-result",
+              "vote-implement-pool-83a82aeba7-r2-MANAGER",
+              "vote-implement-pool-83a82aeba7-r2-V1",
+              "vote-implement-pool-83a82aeba7-r2-V2",
+              "vote-implement-pool-83a82aeba7-r2-V3"
+            ],
+            "participantIds": [
+              "luna-007",
+              "luna-008",
+              "luna-009",
+              "luna-010"
+            ],
+            "artifactAuthorIds": [
+              "luna-006"
+            ],
+            "maxRounds": 1,
+            "createdAt": "2026-08-17T19:14:35.305Z"
+          },
+          "state": "CLOSED",
+          "round": 1,
+          "sealedMemos": {
+            "luna-007": {
+              "participantId": "luna-007",
+              "position": "accept",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-MANAGER"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-007"
+              ],
+              "risks": [
+                "Host application and execution of node --test test/public/*.test.mjs, node --check src/task-pool.mjs, and repository status/diff verification remain pending and must be evaluated independently."
+              ],
+              "falsification": "A directly cited requirement, evidence item, or acceptance criterion is shown to be invalid.",
+              "confidence": 0.94,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            },
+            "luna-008": {
+              "participantId": "luna-008",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-V1"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-008"
+              ],
+              "risks": [
+                "Run node --test test/public/*.test.mjs and node --check src/task-pool.mjs, then record exact observed results.",
+                "Apply the manifest and provide repository status/diff evidence showing only src/task-pool.mjs changed.",
+                "Host-side runtime verification remains necessary before treating the implementation as complete."
+              ],
+              "falsification": "test-or-verification: The required public test and syntax commands were identified but explicitly not executed; no observed output or applied-worktree diff evidence is provided. | counterexample-search: Static review of the manifest supports the two reported repairs and matches the observed README/public test, but runtime and applied-file verification remain absent.",
+              "confidence": 0.97,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            },
+            "luna-009": {
+              "participantId": "luna-009",
+              "position": "accept",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-V2"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-009"
+              ],
+              "risks": [
+                "Public tests, syntax checks, and applied-worktree status/diff remain unverified and require host-side execution."
+              ],
+              "falsification": "A directly cited requirement, evidence item, or acceptance criterion is shown to be invalid.",
+              "confidence": 0.86,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            },
+            "luna-010": {
+              "participantId": "luna-010",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-V3"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-010"
+              ],
+              "risks": [
+                "The submitted result is an unapplied implementation manifest rather than verified evidence that src/task-pool.mjs contains the implementation.",
+                "Required public tests and syntax check were not executed, so runtime behavior and syntax remain unverified.",
+                "Repository status/diff evidence confirming that only src/task-pool.mjs changed is absent.",
+                "Host application and verification are required before acceptance."
+              ],
+              "falsification": "test-or-verification: The required public test and syntax commands were identified but explicitly not executed; no observed output is available. | REQ-02 authorized-file status: The manifest has one authorized upsert, but applied-worktree status or diff evidence is explicitly unavailable. | REQ-03 required commands: node --test test/public/*.test.mjs and node --check src/task-pool.mjs were not run. | REQ-07 verification evidence: Runtime and syntax verification remain unresolved.",
+              "confidence": 0.98,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            }
+          },
+          "challenges": [],
+          "revisions": {},
+          "evidenceAddedThisRound": [],
+          "revealedMemos": [
+            {
+              "participantId": "luna-007",
+              "position": "accept",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-MANAGER"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-007"
+              ],
+              "risks": [
+                "Host application and execution of node --test test/public/*.test.mjs, node --check src/task-pool.mjs, and repository status/diff verification remain pending and must be evaluated independently."
+              ],
+              "falsification": "A directly cited requirement, evidence item, or acceptance criterion is shown to be invalid.",
+              "confidence": 0.94,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            },
+            {
+              "participantId": "luna-008",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-V1"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-008"
+              ],
+              "risks": [
+                "Run node --test test/public/*.test.mjs and node --check src/task-pool.mjs, then record exact observed results.",
+                "Apply the manifest and provide repository status/diff evidence showing only src/task-pool.mjs changed.",
+                "Host-side runtime verification remains necessary before treating the implementation as complete."
+              ],
+              "falsification": "test-or-verification: The required public test and syntax commands were identified but explicitly not executed; no observed output or applied-worktree diff evidence is provided. | counterexample-search: Static review of the manifest supports the two reported repairs and matches the observed README/public test, but runtime and applied-file verification remain absent.",
+              "confidence": 0.97,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            },
+            {
+              "participantId": "luna-009",
+              "position": "accept",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-V2"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-009"
+              ],
+              "risks": [
+                "Public tests, syntax checks, and applied-worktree status/diff remain unverified and require host-side execution."
+              ],
+              "falsification": "A directly cited requirement, evidence item, or acceptance criterion is shown to be invalid.",
+              "confidence": 0.86,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            },
+            {
+              "participantId": "luna-010",
+              "position": "revise",
+              "claimIds": [
+                "claim-1-03cae9f27a00c010",
+                "claim-2-bba9c017f2711667",
+                "claim-3-ed574ef5ded5c707",
+                "claim-4-496999fba76ec64b",
+                "claim-5-5ea40514f4260bd6",
+                "claim-6-353d94940bf1eaec"
+              ],
+              "evidenceIds": [
+                "task-implement-pool-83a82aeba7c8-result",
+                "vote-implement-pool-83a82aeba7-r2-V3"
+              ],
+              "sourceGroupIds": [
+                "independent-review:luna-010"
+              ],
+              "risks": [
+                "The submitted result is an unapplied implementation manifest rather than verified evidence that src/task-pool.mjs contains the implementation.",
+                "Required public tests and syntax check were not executed, so runtime behavior and syntax remain unverified.",
+                "Repository status/diff evidence confirming that only src/task-pool.mjs changed is absent.",
+                "Host application and verification are required before acceptance."
+              ],
+              "falsification": "test-or-verification: The required public test and syntax commands were identified but explicitly not executed; no observed output is available. | REQ-02 authorized-file status: The manifest has one authorized upsert, but applied-worktree status or diff evidence is explicitly unavailable. | REQ-03 required commands: node --test test/public/*.test.mjs and node --check src/task-pool.mjs were not run. | REQ-07 verification evidence: Runtime and syntax verification remain unresolved.",
+              "confidence": 0.98,
+              "submittedAt": "2026-08-17T19:14:35.305Z"
+            }
+          ],
+          "decision": {
+            "councilId": "validation-implement-pool-r2",
+            "outcome": "UNRESOLVED",
+            "evidenceClusterCount": 2,
+            "supportingParticipants": [],
+            "minorityReports": [
+              {
+                "participantId": "luna-007",
+                "position": "accept",
+                "claimIds": [
+                  "claim-1-03cae9f27a00c010",
+                  "claim-2-bba9c017f2711667",
+                  "claim-3-ed574ef5ded5c707",
+                  "claim-4-496999fba76ec64b",
+                  "claim-5-5ea40514f4260bd6",
+                  "claim-6-353d94940bf1eaec"
+                ],
+                "evidenceIds": [
+                  "task-implement-pool-83a82aeba7c8-result",
+                  "vote-implement-pool-83a82aeba7-r2-MANAGER"
+                ],
+                "reason": "Dissenting sealed position: accept"
+              },
+              {
+                "participantId": "luna-008",
+                "position": "revise",
+                "claimIds": [
+                  "claim-1-03cae9f27a00c010",
+                  "claim-2-bba9c017f2711667",
+                  "claim-3-ed574ef5ded5c707",
+                  "claim-4-496999fba76ec64b",
+                  "claim-5-5ea40514f4260bd6",
+                  "claim-6-353d94940bf1eaec"
+                ],
+                "evidenceIds": [
+                  "task-implement-pool-83a82aeba7c8-result",
+                  "vote-implement-pool-83a82aeba7-r2-V1"
+                ],
+                "reason": "Dissenting sealed position: revise"
+              },
+              {
+                "participantId": "luna-009",
+                "position": "accept",
+                "claimIds": [
+                  "claim-1-03cae9f27a00c010",
+                  "claim-2-bba9c017f2711667",
+                  "claim-3-ed574ef5ded5c707",
+                  "claim-4-496999fba76ec64b",
+                  "claim-5-5ea40514f4260bd6",
+                  "claim-6-353d94940bf1eaec"
+                ],
+                "evidenceIds": [
+                  "task-implement-pool-83a82aeba7c8-result",
+                  "vote-implement-pool-83a82aeba7-r2-V2"
+                ],
+                "reason": "Dissenting sealed position: accept"
+              },
+              {
+                "participantId": "luna-010",
+                "position": "revise",
+                "claimIds": [
+                  "claim-1-03cae9f27a00c010",
+                  "claim-2-bba9c017f2711667",
+                  "claim-3-ed574ef5ded5c707",
+                  "claim-4-496999fba76ec64b",
+                  "claim-5-5ea40514f4260bd6",
+                  "claim-6-353d94940bf1eaec"
+                ],
+                "evidenceIds": [
+                  "task-implement-pool-83a82aeba7c8-result",
+                  "vote-implement-pool-83a82aeba7-r2-V3"
+                ],
+                "reason": "Dissenting sealed position: revise"
+              }
+            ],
+            "blockingFindingIds": [],
+            "followUpWorkOrderIds": [],
+            "decidedAt": "2026-08-17T19:14:35.305Z"
+          }
+        }
+      },
+      "missionCells": {},
+      "messages": [
+        {
+          "id": "work-order:implement-pool:r1",
+          "createdAt": "2026-08-17T19:09:56.855Z",
+          "type": "WORK_ORDER",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "luna-001",
+            "teamId": "hq:command/division:executive-office/team:mission-command"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [],
+          "metadata": {
+            "revision": 1,
+            "risk": "high"
+          }
+        },
+        {
+          "id": "gate-receipt:implement-pool:G0:r1",
+          "createdAt": "2026-08-17T19:13:22.213Z",
+          "type": "GATE_RECEIPT",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-gate:g0",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "gate-implement-pool-83a82aeba7c8-g0"
+          ],
+          "metadata": {
+            "gateId": "G0",
+            "passed": true,
+            "deterministic": true,
+            "contentHash": "0478a1eae57d3a65ef052c4a99f35df1e14a65aa6b8ff61564da70f34633ba6b"
+          }
+        },
+        {
+          "id": "artifact-submitted:implement-pool:r1",
+          "createdAt": "2026-08-17T19:13:22.196Z",
+          "type": "ARTIFACT_SUBMITTED",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "luna-006",
+            "teamId": "hq:engineering/division:architecture/team:system-architecture"
+          },
+          "to": {
+            "teamIds": [
+              "hq:quality/division:deterministic-testing/team:unit-testing"
+            ],
+            "agentIds": [
+              "luna-008"
+            ]
+          },
+          "artifactIds": [
+            "task-implement-pool-83a82aeba7c8-result"
+          ],
+          "metadata": {
+            "revision": 1,
+            "contentHash": "82eab29295154e73fe7e45ecf949f65f3b2a77de26eccbe632514e294deb4666"
+          }
+        },
+        {
+          "id": "gate-receipt:implement-pool:G2:r1",
+          "createdAt": "2026-08-17T19:13:22.281Z",
+          "type": "GATE_RECEIPT",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-gate:g2",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "gate-implement-pool-83a82aeba7c8-g2"
+          ],
+          "metadata": {
+            "gateId": "G2",
+            "passed": true,
+            "deterministic": true,
+            "contentHash": "9f413622fa3fd89a201ed9d337c768d4d8911536b28dbb9948b73d6f9b5505b9"
+          }
+        },
+        {
+          "id": "gate-receipt:implement-pool:G3:r1",
+          "createdAt": "2026-08-17T19:14:35.081Z",
+          "type": "GATE_RECEIPT",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-gate:g3",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "gate-implement-pool-83a82aeba7c8-g3"
+          ],
+          "metadata": {
+            "gateId": "G3",
+            "passed": false,
+            "deterministic": false,
+            "contentHash": "6f20fb7714e34c8b548ec8d8b8761fdf4b5671cc6e0511c274c1baf11d0fbc3e"
+          }
+        },
+        {
+          "id": "decision-record:validation-implement-pool-r1",
+          "createdAt": "2026-08-17T19:09:56.884Z",
+          "type": "DECISION_RECORD",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-council:validation",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "decision-implement-pool-r1"
+          ],
+          "metadata": {
+            "outcome": "ADOPTED",
+            "round": 1
+          }
+        },
+        {
+          "id": "gate-receipt:implement-pool:G0:r2",
+          "createdAt": "2026-08-17T19:16:10.931Z",
+          "type": "GATE_RECEIPT",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-gate:g0",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "gate-implement-pool-83a82aeba7c8-g0"
+          ],
+          "metadata": {
+            "gateId": "G0",
+            "passed": true,
+            "deterministic": true,
+            "contentHash": "270d320ae6827f2551b6a73cb963cee94e9b83bbab5841ae6aab310a87b1cc4b"
+          }
+        },
+        {
+          "id": "artifact-submitted:implement-pool:r2",
+          "createdAt": "2026-08-17T19:16:10.916Z",
+          "type": "ARTIFACT_SUBMITTED",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "luna-006",
+            "teamId": "hq:engineering/division:architecture/team:system-architecture"
+          },
+          "to": {
+            "teamIds": [
+              "hq:quality/division:deterministic-testing/team:unit-testing"
+            ],
+            "agentIds": [
+              "luna-008"
+            ]
+          },
+          "artifactIds": [
+            "task-implement-pool-83a82aeba7c8-result"
+          ],
+          "metadata": {
+            "revision": 2,
+            "contentHash": "fd0c6564140ca2dd745d81d3ba10b5729fe42cc4de89413837bef96f15a50cb6"
+          }
+        },
+        {
+          "id": "gate-receipt:implement-pool:G2:r2",
+          "createdAt": "2026-08-17T19:16:10.975Z",
+          "type": "GATE_RECEIPT",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-gate:g2",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "gate-implement-pool-83a82aeba7c8-g2"
+          ],
+          "metadata": {
+            "gateId": "G2",
+            "passed": true,
+            "deterministic": true,
+            "contentHash": "a42e1fbaeda45ad7f8d8308d352e417f4807354efd0bb44bd60bad60888e6a4e"
+          }
+        },
+        {
+          "id": "gate-receipt:implement-pool:G3:r2",
+          "createdAt": "2026-08-17T19:19:42.642Z",
+          "type": "GATE_RECEIPT",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-gate:g3",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "gate-implement-pool-83a82aeba7c8-g3"
+          ],
+          "metadata": {
+            "gateId": "G3",
+            "passed": false,
+            "deterministic": false,
+            "contentHash": "4864797b4ee4b1f622aa240ba5f5223fc66494e3e08f4f20b6fc57bb7537895a"
+          }
+        },
+        {
+          "id": "decision-record:validation-implement-pool-r2",
+          "createdAt": "2026-08-17T19:14:35.305Z",
+          "type": "DECISION_RECORD",
+          "runId": "2026-08-17T19-07-24-369Z-6300b6f7",
+          "workOrderId": "implement-pool",
+          "from": {
+            "agentId": "system-council:validation",
+            "teamId": "hq:quality/division:deterministic-testing/team:unit-testing"
+          },
+          "to": {
+            "teamIds": [
+              "hq:engineering/division:architecture/team:system-architecture"
+            ],
+            "agentIds": [
+              "luna-006"
+            ]
+          },
+          "artifactIds": [
+            "decision-implement-pool-r2"
+          ],
+          "metadata": {
+            "outcome": "UNRESOLVED",
+            "round": 1
+          }
+        }
+      ],
+      "oracleSuites": {
+        "implement-pool": {
+          "suiteId": "oracle-suite:implement-pool:r1:6d325323305a63f1",
+          "suiteHash": "2d12398ab4bc55066e677120cbf4d1bdae08af0fe0afd73aa0733314b75ad1b5",
+          "sourceHash": "6d325323305a63f1ee01dfa44d284ef58e8b9e7bc9d74b397225697e16301001",
+          "oracleCount": 8,
+          "kinds": [
+            "example"
+          ],
+          "hiddenCount": 0,
+          "sealedAt": "2026-08-17T19:09:56.855Z",
+          "sealedSuite": {
+            "schemaVersion": 1,
+            "id": "oracle-suite:implement-pool:r1:6d325323305a63f1",
+            "workOrderId": "implement-pool",
+            "workOrderRevision": 1,
+            "sourceHash": "6d325323305a63f1ee01dfa44d284ef58e8b9e7bc9d74b397225697e16301001",
+            "resourceBounds": {
+              "maxOracles": 64,
+              "maxCasesPerOracle": 128,
+              "maxSerializedBytes": 256000,
+              "maxRuntimeMs": 30000,
+              "maxIterations": 10000
+            },
+            "oracles": [
+              {
+                "id": "oracle:implement-pool:example:001:5eac381620ab",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-01",
+                  "REQ-02",
+                  "REQ-03",
+                  "REQ-04",
+                  "REQ-05",
+                  "REQ-06",
+                  "REQ-07"
+                ],
+                "description": "Deliverable A complete implementation in src/task-pool.mjs plus a concise traceable handoff containing the contract-to-code coverage, exact commands actually executed, observed results, authorized-file status/diff evidence, and explicit unresolved gaps. The handoff must preserve all unavailable-demand prohibitions: no network, dependency installation, subagents, outside-workspace reads, test weakening, disabled checks, or modifications outside src/task-pool.mjs. is structurally represented in the output artifact deliverables",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "deliverable-61062449",
+                      "input": {
+                        "predicate": "deliverable-represented",
+                        "deliverable": "A complete implementation in src/task-pool.mjs plus a concise traceable handoff containing the contract-to-code coverage, exact commands actually executed, observed results, authorized-file status/diff evidence, and explicit unresolved gaps. The handoff must preserve all unavailable-demand prohibitions: no network, dependency installation, subagents, outside-workspace reads, test weakening, disabled checks, or modifications outside src/task-pool.mjs."
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "oracle:implement-pool:example:002:502ba7c12bd9",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-01"
+                ],
+                "description": "Requirement REQ-01 has a claim linked to evidence or a deterministic check",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "requirement-REQ-01",
+                      "input": {
+                        "predicate": "requirement-claim-evidence",
+                        "requirementId": "REQ-01"
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "oracle:implement-pool:example:003:2c77300ec62c",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-02"
+                ],
+                "description": "Requirement REQ-02 has a claim linked to evidence or a deterministic check",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "requirement-REQ-02",
+                      "input": {
+                        "predicate": "requirement-claim-evidence",
+                        "requirementId": "REQ-02"
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "oracle:implement-pool:example:004:2808e1c2b8d0",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-03"
+                ],
+                "description": "Requirement REQ-03 has a claim linked to evidence or a deterministic check",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "requirement-REQ-03",
+                      "input": {
+                        "predicate": "requirement-claim-evidence",
+                        "requirementId": "REQ-03"
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "oracle:implement-pool:example:005:1d9a7eb5c533",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-04"
+                ],
+                "description": "Requirement REQ-04 has a claim linked to evidence or a deterministic check",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "requirement-REQ-04",
+                      "input": {
+                        "predicate": "requirement-claim-evidence",
+                        "requirementId": "REQ-04"
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "oracle:implement-pool:example:006:7bd79f139b3b",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-05"
+                ],
+                "description": "Requirement REQ-05 has a claim linked to evidence or a deterministic check",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "requirement-REQ-05",
+                      "input": {
+                        "predicate": "requirement-claim-evidence",
+                        "requirementId": "REQ-05"
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "oracle:implement-pool:example:007:e3c273e98a48",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-06"
+                ],
+                "description": "Requirement REQ-06 has a claim linked to evidence or a deterministic check",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "requirement-REQ-06",
+                      "input": {
+                        "predicate": "requirement-claim-evidence",
+                        "requirementId": "REQ-06"
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "oracle:implement-pool:example:008:5668a82351f4",
+                "kind": "example",
+                "requirementIds": [
+                  "REQ-07"
+                ],
+                "description": "Requirement REQ-07 has a claim linked to evidence or a deterministic check",
+                "metric": {
+                  "name": "contract-pass",
+                  "unit": "boolean",
+                  "aggregation": "all",
+                  "comparator": "eq",
+                  "threshold": true
+                },
+                "maxRuntimeMs": 30000,
+                "spec": {
+                  "cases": [
+                    {
+                      "name": "requirement-REQ-07",
+                      "input": {
+                        "predicate": "requirement-claim-evidence",
+                        "requirementId": "REQ-07"
+                      },
+                      "expected": true
+                    }
+                  ]
+                }
+              }
+            ],
+            "suiteHash": "2d12398ab4bc55066e677120cbf4d1bdae08af0fe0afd73aa0733314b75ad1b5"
+          }
+        }
+      },
+      "experiments": {
+        "experiment-implement-pool-6d325323305a": {
+          "experimentId": "experiment-implement-pool-6d325323305a",
+          "workOrderId": "implement-pool",
+          "specDigest": "f7d871a0ca34e4f3072853cfafcc54a42a250c7ed26a3456388f36cf06be7e1d",
+          "status": "PREREGISTERED",
+          "observationCount": 0
+        }
+      },
+      "knowledgeCapsules": {
+        "kc-implement-pool-82eab29295154e73": {
+          "capsuleId": "kc-implement-pool-82eab29295154e73",
+          "revision": 1,
+          "contentHash": "d4ef93cad261a37b4f93770f66203a4b7d4ffb107e5a897c589a0357350d9be8",
+          "kind": "negative-result",
+          "lifecycle": "candidate"
+        },
+        "kc-implement-pool-fd0c6564140ca2dd": {
+          "capsuleId": "kc-implement-pool-fd0c6564140ca2dd",
+          "revision": 1,
+          "contentHash": "f5b4ce2e02946751b8398037267af6c4da3a257528fb05349f4b96a4234405c3",
+          "kind": "negative-result",
+          "lifecycle": "candidate"
+        }
+      },
+      "staffingPlan": {
+        "schemaVersion": 1,
+        "planId": "staffing:2026-08-17T19-07-24-369Z-6300b6f7",
+        "revision": 1,
+        "parent": null,
+        "logicalAgentCount": 15,
+        "reviewerSlots": 3,
+        "workDagHash": "sha256:5fd314790ebca49b6272fc3e0c1289c0fc9c18e71d87d8bea1101af3f9d9e24b",
+        "capabilityDemand": [
+          {
+            "capabilityId": "department:engineering",
+            "requiredSlots": 1,
+            "preferredDepartmentIds": [
+              "engineering"
+            ],
+            "requiredToolContractIds": [
+              "builtin:engineering"
+            ]
+          }
+        ],
+        "organizationTemplateHash": "sha256:426ad1543cb80dc6abb9ec4e532aa26fc311bce7e3ae5e46218bb9fc5d3d8917",
+        "pluginManifestHashes": [],
+        "registryHash": "sha256:10a0b695be62ba1be2f05a1ae3d0e183828d93cf508d58dcaf8073abb6aede0e",
+        "allocations": [
+          {
+            "unitId": "hq:command/division:executive-office/team:mission-command/cell:01",
+            "departmentId": "command",
+            "logicalAgentCount": 3,
+            "agentIds": [
+              "luna-001",
+              "luna-002",
+              "luna-003"
+            ],
+            "roleCounts": {
+              "cell-lead": 1,
+              "specialist": 1,
+              "review-liaison": 1
+            }
+          },
+          {
+            "unitId": "hq:engineering/division:architecture/team:system-architecture/cell:01",
+            "departmentId": "engineering",
+            "logicalAgentCount": 2,
+            "agentIds": [
+              "luna-006",
+              "luna-007"
+            ],
+            "roleCounts": {
+              "cell-lead": 1,
+              "review-liaison": 1
+            }
+          },
+          {
+            "unitId": "hq:integration/division:final-integration/team:technical-integration/cell:01",
+            "departmentId": "integration",
+            "logicalAgentCount": 2,
+            "agentIds": [
+              "luna-014",
+              "luna-015"
+            ],
+            "roleCounts": {
+              "cell-lead": 1,
+              "review-liaison": 1
+            }
+          },
+          {
+            "unitId": "hq:quality/division:deterministic-testing/team:integration-e2e/cell:01",
+            "departmentId": "quality",
+            "logicalAgentCount": 3,
+            "agentIds": [
+              "luna-011",
+              "luna-012",
+              "luna-013"
+            ],
+            "roleCounts": {
+              "cell-lead": 1,
+              "specialist": 1,
+              "review-liaison": 1
+            }
+          },
+          {
+            "unitId": "hq:quality/division:deterministic-testing/team:unit-testing/cell:01",
+            "departmentId": "quality",
+            "logicalAgentCount": 3,
+            "agentIds": [
+              "luna-008",
+              "luna-009",
+              "luna-010"
+            ],
+            "roleCounts": {
+              "cell-lead": 1,
+              "specialist": 1,
+              "review-liaison": 1
+            }
+          },
+          {
+            "unitId": "hq:research/division:source-intelligence/team:official-sources/cell:01",
+            "departmentId": "research",
+            "logicalAgentCount": 2,
+            "agentIds": [
+              "luna-004",
+              "luna-005"
+            ],
+            "roleCounts": {
+              "cell-lead": 1,
+              "review-liaison": 1
+            }
+          }
+        ],
+        "planHash": "sha256:16fe913bb2a2f7593c800733767ea9918b8e2ba38cdcd83282a26d65b804e4a0"
+      },
+      "missionPreflight": {
+        "schemaVersion": 1,
+        "missionId": "mission:2026-08-17T19-07-24-369Z-6300b6f7",
+        "objective": "# Coding mission: production-grade asynchronous task pool Implement the complete contract in `src/task-pool.mjs`. Read `README.md` and the public tests. Run the policy-pinned public test and syntax check. You may modify only `src/task-pool.mjs`; do not alter tests or package metadata. Do not access the network, install dependencies, use subagents, or read files outside this workspace. Do not weaken or disable tests. Finish with a short summary of the implementation and commands actually run.",
+        "assumptions": [
+          {
+            "evidence": "The supplied work order explicitly requires reading README.md and public tests and prohibits reading outside the workspace.",
+            "id": "A-01",
+            "statement": "The README and public tests are located within the permitted workspace and are the authoritative observable sources for the task-pool contract.",
+            "classification": "fact",
+            "falsification": "Inspect the workspace; if either source is absent or inaccessible, record the gap instead of inferring its contents."
+          },
+          {
+            "evidence": "No README content, public-test content, API shape, or existing implementation was supplied.",
+            "id": "A-02",
+            "statement": "The complete runtime contract cannot be determined from the supplied prompt alone.",
+            "classification": "inference",
+            "falsification": "Read README.md, public tests, and src/task-pool.mjs; replace this limitation with observed contract details."
+          },
+          {
+            "evidence": "The work order requires both checks but gives no command names or package scripts.",
+            "id": "A-03",
+            "statement": "The policy-pinned public-test command and syntax-check command are not specified in the supplied material.",
+            "classification": "fact",
+            "falsification": "Inspect package metadata and repository documentation within the workspace for exact commands; do not assume commands that are not documented."
+          },
+          {
+            "evidence": "The work order explicitly authorizes modification only to src/task-pool.mjs and prohibits altering tests or package metadata.",
+            "id": "A-04",
+            "statement": "The implementation scope is limited to src/task-pool.mjs, while tests and package metadata must remain unchanged.",
+            "classification": "constraint",
+            "falsification": "Compare the preflight and post-work repository status/diff and verify no other tracked files changed."
+          },
+          {
+            "evidence": "The work order explicitly prohibits each activity.",
+            "id": "A-05",
+            "statement": "No network access, dependency installation, subagent use, or reads outside the workspace are authorized.",
+            "classification": "constraint",
+            "falsification": "Review executed commands and tool logs, and verify they contain no network, installation, subagent, or out-of-workspace operations."
+          },
+          {
+            "evidence": "The work order requires implementing the complete contract but supplies no additional semantic authority.",
+            "id": "A-06",
+            "statement": "Any task-pool behavior not specified by README.md or public tests remains unresolved rather than being filled in from generic task-pool conventions.",
+            "classification": "preference",
+            "falsification": "For each proposed behavior, identify its exact README or public-test evidence; remove or mark unresolved any behavior without evidence."
+          }
+        ],
+        "findings": [
+          {
+            "id": "AMB-01",
+            "kind": "ambiguity",
+            "statement": "The phrase complete task-pool contract does not identify the API, lifecycle states, concurrency semantics, ordering guarantees, or error behavior.",
+            "relatedIds": [
+              "Derive all semantics from README.md and public tests.",
+              "Treat unsupported semantics as unresolved.",
+              "Use an external or conventional task-pool interpretation."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "AMB-02",
+            "kind": "ambiguity",
+            "statement": "The required policy-pinned public-test command is not named.",
+            "relatedIds": [
+              "Use a command supplied by repository policy files.",
+              "Use a documented package script.",
+              "Use another repository-local test command if no pinned command exists."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "AMB-03",
+            "kind": "ambiguity",
+            "statement": "The required syntax-check command is not named.",
+            "relatedIds": [
+              "Use a direct runtime syntax check only if supported by repository evidence.",
+              "Use a documented package script.",
+              "Use the repository's documented runtime syntax checker."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "AMB-04",
+            "kind": "ambiguity",
+            "statement": "Interruption semantics for queued, active, and pending tasks are unspecified in the supplied material.",
+            "relatedIds": [
+              "Infer cancellation or shutdown semantics from conventional APIs.",
+              "Leave unsupported interruption behavior unresolved.",
+              "Support only interruption behavior evidenced by README.md/public tests."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "AMB-05",
+            "kind": "ambiguity",
+            "statement": "The phrase production-grade does not define measurable performance, fairness, memory, or backpressure thresholds.",
+            "relatedIds": [
+              "Leave quantitative thresholds unresolved.",
+              "Use thresholds explicitly stated in repository evidence.",
+              "Verify only observable performance/concurrency invariants in public tests."
+            ],
+            "resolved": false
+          },
+          {
+            "id": "CON-01",
+            "kind": "conflict",
+            "statement": "The requirement to modify only src/task-pool.mjs may conflict with the requirement to run the policy-pinned public test if that command creates generated files, caches, coverage output, or other filesystem changes outside the authorized file.",
+            "relatedIds": [
+              "REQ-03",
+              "REQ-04"
+            ],
+            "resolved": false
+          }
+        ],
+        "sensitivity": [
+          {
+            "requirementId": "REQ-01",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-01",
+                "AT-03",
+                "AT-04"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-01",
+                "mutation": "Operationalize completeness as satisfying every behavior evidenced by README.md and public tests, with no unsupported semantics added.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-01",
+                  "AT-03",
+                  "AT-04"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "REQ-02",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-01"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-02",
+                "mutation": "Require source inspection and an evidence-backed contract matrix before implementation decisions.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-01"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "REQ-03",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-03",
+                "AT-04"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-03",
+                "mutation": "Require both checks to use the exact commands discoverable from permitted repository evidence or the pinned policy, and to report their outcomes.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-03",
+                  "AT-04"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "REQ-04",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-02"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-04",
+                "mutation": "Define the authorized write set as exactly src/task-pool.mjs.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-02"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "REQ-05",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-02",
+                "AT-06"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-05",
+                "mutation": "Protect tests and package metadata through a final diff and byte-change audit.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-02",
+                  "AT-06"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "REQ-06",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-05"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-06",
+                "mutation": "Treat prohibited access and operations as auditable command and filesystem boundaries.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-05"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "REQ-07",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-04",
+                "AT-06"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-07",
+                "mutation": "Require the original public-test suite and assertions to remain active and unmodified.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-04",
+                  "AT-06"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          },
+          {
+            "requirementId": "REQ-08",
+            "removal": {
+              "detected": true,
+              "acceptanceTestIds": [
+                "AT-07"
+              ]
+            },
+            "mutations": [
+              {
+                "id": "M-08",
+                "mutation": "Constrain the handoff to a concise implementation summary plus an exact executed-command list.",
+                "detected": true,
+                "acceptanceTestIds": [
+                  "AT-07"
+                ]
+              }
+            ],
+            "mutationSensitive": true
+          }
+        ],
+        "risks": [
+          {
+            "mitigation": "Keep unsupported semantics explicitly unresolved and require targeted checks for every behavior evidenced by repository sources.",
+            "id": "RISK-01",
+            "failureMode": "Visible tests may pass while hidden evaluation fails because the contract contains semantics not exposed in the supplied prompt or visible tests.",
+            "falsification": "Build the contract matrix from README.md and every public test, then search for uncovered API, lifecycle, failure, interruption, and concurrency cases before implementation.",
+            "ownerTeam": "chief_of_staff with implementation and verification owners"
+          },
+          {
+            "mitigation": "Do not claim a gate passed unless the command source and observed output are recorded.",
+            "id": "RISK-02",
+            "failureMode": "The selected test or syntax command may be guessed incorrectly because the work order does not name it.",
+            "falsification": "Inspect permitted repository documentation and package metadata for an exact command; if none exists, report the verification gap.",
+            "ownerTeam": "verification owner"
+          },
+          {
+            "mitigation": "Preserve the conflict as unresolved until the command's side effects are observable; do not broaden the write scope.",
+            "id": "RISK-03",
+            "failureMode": "Running tests may violate the file-write boundary if tooling emits artifacts.",
+            "falsification": "Inspect repository status before and after each command and review generated-file behavior within the workspace.",
+            "ownerTeam": "implementation/verification owner"
+          }
+        ],
+        "blockers": [
+          "Unresolved ambiguity: AMB-01",
+          "Unresolved ambiguity: AMB-02",
+          "Unresolved ambiguity: AMB-03",
+          "Unresolved ambiguity: AMB-04",
+          "Unresolved ambiguity: AMB-05",
+          "Unresolved conflict: CON-01"
+        ],
+        "ready": false
+      },
+      "programKnowledge": {
+        "status": "ready",
+        "graphHash": "d9e3a2513b61a2df26b9e11e79cc203d2da9741064268dd278a625df7cc12c12",
+        "nodeCount": 10,
+        "edgeCount": 9,
+        "indexedAt": "2026-08-17T19:08:43.260Z",
+        "omittedFiles": 0
+      }
+    },
+    "evolution": {
+      "schemaVersion": 1,
+      "mode": "pinned",
+      "promotionEligible": false,
+      "bundlePins": {
+        "long-running-orchestration": {
+          "workloadClass": "long-running-orchestration",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "engineering.feature": {
+          "workloadClass": "engineering.feature",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "engineering.bugfix": {
+          "workloadClass": "engineering.bugfix",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "engineering.refactor": {
+          "workloadClass": "engineering.refactor",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "engineering.performance": {
+          "workloadClass": "engineering.performance",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "research.deep-synthesis": {
+          "workloadClass": "research.deep-synthesis",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "research.numeric": {
+          "workloadClass": "research.numeric",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "security.audit": {
+          "workloadClass": "security.audit",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "validation": {
+          "workloadClass": "validation",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        },
+        "integration": {
+          "workloadClass": "integration",
+          "bundleId": "bundle-baseline-05be6fb521756050",
+          "bundleHash": "sha256:13fd68a0ccaec65a0c9586c084dd5550d36c49283f12e45bd6818d56ed59712b",
+          "pointerGeneration": 1,
+          "environmentDigest": "sha256:c110dfbc40f56562e48ebfe18bbf8baaccc4f3dac396f208a82b2df9d966a3a0",
+          "pinnedAt": "2026-08-17T19:07:24.969Z"
+        }
+      },
+      "traceIds": [
+        "decision-trace:113c17a96659bea4cae93f3132fbd762",
+        "decision-trace:864e061ce56cbd0d512678e8886a0b79"
+      ],
+      "outcomes": {
+        "attempt:e458c37045fb037e3f7b4205c29b9f41": {
+          "level": "L3",
+          "promotionEligible": false,
+          "receiptId": "outcome-receipt:a7fab64ef7fbccd1b72341262c2f5f8f",
+          "contentHash": "e4a162804fb4ca3a3730f2812345bc85054b51915e3f83512cb0b94980569558"
+        },
+        "attempt:28ffd14e17378c8e98a1d09c98310f71": {
+          "level": "L3",
+          "promotionEligible": false,
+          "receiptId": "outcome-receipt:13f40333b3d107bd94cda192a41fa6f9",
+          "contentHash": "bb4e6cbe02c76ebef864b7bf9346e69f9155cb96575526fcf9b828009ba0afe9"
+        }
+      },
+      "failureCapsuleIds": [
+        "failure:7e1cda68438369a4018345434e83774f647366bdf627a35a5887d99234bbe41c",
+        "failure:f14600f7fe4764599d648dfb62db1fe1da69ddfada1e5b47d0538e4f8c4537eb"
+      ],
+      "integrityErrors": []
+    },
+    "plan": {
+      "goal": "Implement the complete README/public-test-derived asynchronous task-pool contract in src/task-pool.mjs with strict scope and evidence-backed verification.",
+      "interpretation": "Use one centralized engineering team and one bounded workspace-change task. The worker must inspect permitted workspace evidence, implement only evidenced behavior, run locally documented checks, and report unresolved gaps without inventing results.",
+      "requirements": [
+        {
+          "id": "REQ-01",
+          "text": "Derive API, lifecycle, concurrency, ordering, error, and interruption semantics from README.md, public tests, and existing src/task-pool.mjs."
+        },
+        {
+          "id": "REQ-02",
+          "text": "Implement the complete evidenced contract in src/task-pool.mjs without unsupported behavior inferred from convention."
+        },
+        {
+          "id": "REQ-03",
+          "text": "Identify and run the policy-pinned public-test and syntax-check commands from repository-local evidence, recording exact commands and observed results."
+        },
+        {
+          "id": "REQ-04",
+          "text": "Modify only src/task-pool.mjs; do not alter tests, package metadata, or other workspace files."
+        },
+        {
+          "id": "REQ-05",
+          "text": "Do not access the network, install dependencies, use subagents, read outside the workspace, weaken tests, or disable assertions."
+        },
+        {
+          "id": "REQ-06",
+          "text": "Verify the authorized write boundary using repository status or equivalent local diff evidence."
+        },
+        {
+          "id": "REQ-07",
+          "text": "Provide a concise implementation summary, exact executed-command list, observed results, and explicit verification gaps."
+        }
+      ],
+      "assumptions": [
+        "README.md and public tests, if present and readable in the workspace, are authoritative contract sources.",
+        "The exact public-test and syntax-check commands are unresolved until repository-local documentation or metadata is inspected.",
+        "Behavior absent from README.md, public tests, or existing local implementation context remains unresolved and must not be invented.",
+        "Manager, validator, protected-check, audit, and integration gates are host-owned after the worker handoff."
+      ],
+      "teams": [
+        {
+          "id": "task-pool",
+          "name": "Asynchronous Task Pool Delivery",
+          "mission": "Centralize contract discovery, bounded implementation, local verification, scope auditing, and traceable handoff for the production-grade asynchronous task pool.",
+          "department": "engineering",
+          "leadRole": "engineering_director",
+          "leadRank": "president",
+          "parentTeamId": null,
+          "requirementIds": [
+            "REQ-01",
+            "REQ-02",
+            "REQ-03",
+            "REQ-04",
+            "REQ-05",
+            "REQ-06",
+            "REQ-07"
+          ],
+          "synthesisCriteria": [
+            "Every implementation decision is traceable to README.md, public tests, or existing src/task-pool.mjs evidence.",
+            "Only src/task-pool.mjs is modified.",
+            "Exact test and syntax commands are identified from local evidence and their observed outcomes are reported.",
+            "Prohibited network, installation, subagent, outside-workspace, test-weakening, and disabled-check actions are absent.",
+            "Unresolved contract or verification gaps remain explicit."
+          ],
+          "priority": 1
+        }
+      ],
+      "tasks": [
+        {
+          "id": "implement-pool",
+          "title": "Inspect pinned workspace context and implement the complete evidenced task-pool contract while preserving no-network, no-installation, no-subagent, no-outside-workspace, no-test-weakening, and single-file scope demands",
+          "objective": "Read README.md, all relevant public tests, existing src/task-pool.mjs, and repository-local command evidence; author the complete bounded implementation manifest and implement every evidenced requirement directly in src/task-pool.mjs. Run only locally supported public-test and syntax checks, verify the write boundary, and report exact commands, results, and unresolved gaps. Do not claim any unobserved action or gate as successful.",
+          "kind": "implementation",
+          "executionMode": "workspace-change",
+          "requiredCapabilities": [
+            "workspace-read",
+            "workspace-search",
+            "workspace-write",
+            "command-execution"
+          ],
+          "department": "engineering",
+          "ownerRole": "software_engineer",
+          "teamId": "task-pool",
+          "assigneeRank": "staff",
+          "dependencies": [],
+          "requirementIds": [
+            "REQ-01",
+            "REQ-02",
+            "REQ-03",
+            "REQ-04",
+            "REQ-05",
+            "REQ-06",
+            "REQ-07"
+          ],
+          "deliverable": "A complete implementation in src/task-pool.mjs plus a concise traceable handoff containing the contract-to-code coverage, exact commands actually executed, observed results, authorized-file status/diff evidence, and explicit unresolved gaps. The handoff must preserve all unavailable-demand prohibitions: no network, dependency installation, subagents, outside-workspace reads, test weakening, disabled checks, or modifications outside src/task-pool.mjs.",
+          "acceptanceCriteria": [
+            "README.md, every relevant public test, and existing src/task-pool.mjs are inspected before implementation; the resulting implementation covers only evidenced API, lifecycle, concurrency, ordering, error, and interruption behavior.",
+            "Only src/task-pool.mjs is changed according to repository status or equivalent local diff evidence; tests and package metadata remain unchanged.",
+            "The exact repository-local public-test command and syntax-check command are identified and run, with observed output recorded; if either cannot be identified or executed, the gap is explicitly reported.",
+            "No network access, dependency installation, subagent invocation, outside-workspace read, test/assertion weakening, or disabled check is performed.",
+            "The final handoff includes a concise implementation summary and exact commands actually run, without invented sources, outputs, or verification claims."
+          ],
+          "risk": "high",
+          "priority": 1,
+          "depth": 0,
+          "maxAttempts": 2
+        }
+      ],
+      "finalInstructions": "Return only this structured plan. Preserve unresolved ambiguities and blockers; the host must perform post-worker manager, validator, protected-check, audit, and integration gates."
+    },
+    "error": "Coding task implement-pool is not accepted and cannot be integrated"
+  }
+}

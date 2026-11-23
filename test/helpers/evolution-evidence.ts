@@ -172,20 +172,21 @@ export async function createObjectiveEvidence(
   const manager = registry.agents
     .filter((agent) => agent.teamId === order.ownerTeam && agent.agentId !== record.assignedAgentId)
     .sort((left, right) => left.agentId.localeCompare(right.agentId))[0]!;
-  const blindReviewers = registry.agents
-    .filter((agent) => order.reviewerPool.includes(agent.teamId) && agent.agentId !== record.assignedAgentId)
-    .sort((left, right) => left.agentId.localeCompare(right.agentId))
-    .slice(0, 2);
-  if (!manager || blindReviewers.length !== 2) throw new Error("Objective evidence helper could not allocate independent reviewers");
+  const redTeamId = order.reviewerPool.find((teamId) => teamId.endsWith("/team:security-attack"));
+  const independentTeamId = order.reviewerPool.find((teamId) => teamId !== redTeamId);
+  const reviewerForTeam = (teamId: string | undefined) => registry.agents
+    .filter((agent) => agent.teamId === teamId && agent.agentId !== record.assignedAgentId)
+    .sort((left, right) => left.agentId.localeCompare(right.agentId))[0];
+  const redReviewer = reviewerForTeam(redTeamId);
+  const independentReviewer = reviewerForTeam(independentTeamId);
+  if (!manager || !redReviewer || !independentReviewer) {
+    throw new Error("Objective evidence helper could not allocate independent reviewers");
+  }
   const voteArtifacts: ArtifactRevision[] = [];
   const voteDefinitions = [
     { agentId: manager.agentId, teamId: manager.teamId, reviewerKind: "manager" as const, validatorId: "MANAGER" },
-    ...blindReviewers.map((reviewer, index) => ({
-      agentId: reviewer.agentId,
-      teamId: reviewer.teamId,
-      reviewerKind: "blind-validator" as const,
-      validatorId: `V${index + 1}`,
-    })),
+    { agentId: redReviewer.agentId, teamId: redReviewer.teamId, reviewerKind: "red-team" as const, validatorId: "V1" },
+    { agentId: independentReviewer.agentId, teamId: independentReviewer.teamId, reviewerKind: "blind-validator" as const, validatorId: "V2" },
   ];
   for (const [index, definition] of voteDefinitions.entries()) {
     const verdict = g3Passed ? "accept" as const : "reject" as const;
@@ -476,6 +477,7 @@ function oracleSuiteSummary(suite: OracleSuite, sealedAt: string) {
     kinds: [...new Set(suite.oracles.map((oracle) => oracle.kind))].sort(),
     hiddenCount: suite.oracles.filter((oracle) => oracle.kind === "hidden").length,
     sealedAt,
+    sealedSuite: structuredClone(suite),
   };
 }
 

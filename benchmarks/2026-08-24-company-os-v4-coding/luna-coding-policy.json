@@ -1,0 +1,75 @@
+{
+  "baseCommit": "8ef24a10550311e60658fcb36ba84cb12e09e64f",
+  "targetRef": "refs/heads/luna-candidate",
+  "commitMessage": "benchmark: implement CrashSafeLeaseLog with Luna Swarm",
+  "objective": "Implement the complete crash-safe bounded event log and fencing lease coordinator contract in src/crash-safe-lease-log.mjs.",
+  "requirementIds": [
+    "REQ-EVENT-CAS",
+    "REQ-LEASE-FENCING",
+    "REQ-CRASH-RESTORE"
+  ],
+  "acceptanceCriteria": [
+    {
+      "id": "AC-PUBLIC",
+      "requirementIds": ["REQ-EVENT-CAS", "REQ-LEASE-FENCING", "REQ-CRASH-RESTORE"],
+      "statement": "All policy-pinned public contract tests pass without modifying tests, documentation, or package metadata."
+    },
+    {
+      "id": "AC-SCOPE",
+      "requirementIds": ["REQ-EVENT-CAS", "REQ-LEASE-FENCING", "REQ-CRASH-RESTORE"],
+      "statement": "The accepted implementation changes only src/crash-safe-lease-log.mjs."
+    }
+  ],
+  "constraints": [
+    "No network access or dependency installation.",
+    "Do not weaken or modify tests, documentation, or package metadata.",
+    "The workspace-change workers must author competing complete implementation manifests.",
+    "The host freezes and evaluates only the selected accepted candidate."
+  ],
+  "contextReferences": [
+    {
+      "path": "README.md",
+      "sha256": "sha256:57253c64523d8f1c87217630a63b7029280d2a3aa864ec6a9f05a35b0db057b9",
+      "purpose": "Frozen implementation contract"
+    },
+    {
+      "path": "test/public/crash-safe-lease-log.public.test.mjs",
+      "sha256": "sha256:f834d3e181d33720b859f0f567154437cf2cc68cb6d1844169d39c0cf92f3019",
+      "purpose": "Frozen public acceptance tests"
+    },
+    {
+      "path": "test/public/type-contract.public.test.mjs",
+      "sha256": "sha256:823fca41f845e68761f0c39c816e4e6956947db2e81f7c5fe0f8644097590cc4",
+      "purpose": "Frozen public runtime type contract"
+    }
+  ],
+  "readScopes": [
+    "README.md",
+    "package.json",
+    "src/crash-safe-lease-log.mjs",
+    "test/public/crash-safe-lease-log.public.test.mjs",
+    "test/public/type-contract.public.test.mjs"
+  ],
+  "writeScopes": ["src/crash-safe-lease-log.mjs"],
+  "checks": [
+    {
+      "id": "public-contract",
+      "kind": "public",
+      "program": "node:test",
+      "testFiles": [
+        "test/public/crash-safe-lease-log.public.test.mjs",
+        "test/public/type-contract.public.test.mjs"
+      ]
+    }
+  ],
+  "limits": {
+    "maxFiles": 1,
+    "maxFileBytes": 131072,
+    "maxTotalBytes": 131072
+  },
+  "strategy": {
+    "mode": "repair",
+    "candidates": 3,
+    "maxSelectionRounds": 2
+  }
+}

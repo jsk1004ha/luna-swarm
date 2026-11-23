@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import {
   MockAgentBackend,
   demoHandler,
   demoPlan,
 } from "../../src/backend/mock-backend.js";
+import { HARNESS_POLICY_VERSION } from "../../src/capabilities.js";
 import { DEFAULT_CONFIG } from "../../src/config.js";
 import { ProcessInterruptedError } from "../../src/controls/index.js";
 import { recordsFromPlan, teamRecordsFromPlan } from "../../src/dag.js";
@@ -15,14 +18,37 @@ import { SwarmOrchestrator } from "../../src/orchestrator.js";
 import { BlackboardStore } from "../../src/harness-v2/blackboard.js";
 import { VerifiedKnowledgeCapsuleStore } from "../../src/harness-v2/knowledge-capsules.js";
 import { DecisionTraceStore, ObjectiveOutcomeReceiptStore } from "../../src/evolution/trace/index.js";
-import { organizationRegistryV2 } from "../../src/harness-v2/organization-registry.js";
+import { organizationRegistryCompanyOsV3, organizationRegistryV2 } from "../../src/harness-v2/organization-registry.js";
 import { forgeOracleSuite } from "../../src/harness-v2/oracle-forge.js";
+import { evaluateGateSet } from "../../src/harness-v2/gates.js";
 import { createWorkOrderRecord, taskResultArtifactId, workOrderFromTask } from "../../src/harness-v2/work-orders.js";
+import type { SourceIsolationReceipt } from "../../src/harness-v2/contracts.js";
 import type { MissionPreflightInput } from "../../src/harness-v2/preflight.js";
 import { companySnapshot } from "../../src/organization.js";
 import { AgentCallError, AgentGateway } from "../../src/runtime/gateway.js";
 import { AtomicRunStore } from "../../src/store.js";
-import type { AgentResult, RunState } from "../../src/types.js";
+import type { AgentResult, JsonValue, RunState } from "../../src/types.js";
+import { RED_TEAM_ATTACK_CRITERIA } from "../../src/adversarial-assurance/index.js";
+import type { AgentBackend, AgentRequest, AgentResponse } from "../../src/backend/agent-backend.js";
+import { canonicalSha256 } from "../../src/evolution/domain/canonical.js";
+import {
+  ResearchSnapshotStore,
+  RunResearchToolRuntime,
+  RunSearchDiscoveryToolRuntime,
+  createStaticSearchDiscoveryProvider,
+} from "../../src/research/index.js";
+
+const execFileAsync = promisify(execFile);
+
+async function initializeCleanGitWorkspace(workspace: string): Promise<void> {
+  await execFileAsync("git", ["-C", workspace, "init"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "config", "user.email", "luna-swarm@example.invalid"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "config", "user.name", "Luna Swarm Test"], { windowsHide: true });
+  await writeFile(join(workspace, ".gitignore"), ".luna-swarm/\n.state/\n", "utf8");
+  await writeFile(join(workspace, "tracked.txt"), "baseline\n", "utf8");
+  await execFileAsync("git", ["-C", workspace, "add", ".gitignore", "tracked.txt"], { windowsHide: true });
+  await execFileAsync("git", ["-C", workspace, "commit", "-m", "baseline"], { windowsHide: true });
+}
 
 function config() {
   return {
@@ -33,6 +59,24 @@ function config() {
     retryBaseMs: 1,
     retryMaxMs: 1,
     rateLimitCooldownMs: 1,
+  };
+}
+
+function currentHarnessState(cfg = config()): NonNullable<RunState["harness"]> {
+  return {
+    enabled: cfg.harnessEnabled,
+    learningEnabled: cfg.learningEnabled,
+    catalogSkills: 0,
+    selections: 0,
+    specialistIds: [],
+    skillIds: [],
+    skillUses: 0,
+    memoriesRecalled: 0,
+    learnedExperiences: 0,
+    policyVersion: HARNESS_POLICY_VERSION,
+    skillPortfolios: [],
+    skillPortfolioCount: 0,
+    rawSkillInstructionCharsAvoided: 0,
   };
 }
 
@@ -49,6 +93,7 @@ async function createdRunStore(
 test("start readiness is signalled only after persisted state and the run-start audit exist", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-orch-ready-"));
   try {
+    await initializeCleanGitWorkspace(workspace);
     const backend = new MockAgentBackend(demoHandler);
     const store = await createdRunStore(workspace, ".state", "run-ready");
     const gateway = new AgentGateway({ backend, config: config() });
@@ -57,7 +102,6 @@ test("start readiness is signalled only after persisted state and the run-start 
       store,
       config: config(),
       workspace,
-      sourceIdentity: "build:test-orchestrator-ready",
     });
     await assert.rejects(
       orchestrator.start("준비 순서 검증", undefined, async () => {
@@ -68,11 +112,42 @@ test("start readiness is signalled only after persisted state and the run-start 
         assert.equal(persisted.evolution?.mode, "pinned");
         assert.equal(persisted.evolution?.promotionEligible, true);
         assert.ok(Object.keys(persisted.evolution?.bundlePins ?? {}).length > 1);
+        await assert.rejects(() => gateway.run({
+          threadKey: "company-direct-call-without-authority",
+          role: "worker",
+          purpose: "direct-call",
+          workOrderId: "omitted-company-marker",
+          agentSlotId: "omitted-company-role",
+          prompt: "must not reach backend",
+          reasoningEffort: "low",
+        }), /requires exact Company authority/u);
         assert.equal(backend.calls.length, 0);
         throw new Error("stop-after-ready");
       }),
       /stop-after-ready/,
     );
+
+    const restoredBackend = new MockAgentBackend(demoHandler);
+    const restoredGateway = new AgentGateway({ backend: restoredBackend, config: config() });
+    const restored = new SwarmOrchestrator({
+      gateway: restoredGateway,
+      store,
+      config: config(),
+      workspace,
+    });
+    const terminalCompanyState = await store.load();
+    terminalCompanyState.status = "failed";
+    await restored.resume(terminalCompanyState);
+    await assert.rejects(() => restoredGateway.run({
+      threadKey: "restored-company-direct-call-without-authority",
+      role: "worker",
+      purpose: "direct-call",
+      workOrderId: "omitted-company-marker",
+      agentSlotId: "omitted-company-role",
+      prompt: "must not reach backend",
+      reasoningEffort: "low",
+    }), /requires exact Company authority/u);
+    assert.equal(restoredBackend.calls.length, 0);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -156,6 +231,119 @@ test("mission preflight corrects one semantically invalid structured response be
   }
 });
 
+test("mandatory Red Team breach forces Blue repair, fresh re-attack, and host Judge approval", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-red-loop-"));
+  const runId = "run-red-loop";
+  let firstT1Attack = true;
+  let t1Executions = 0;
+  try {
+    const backend = new MockAgentBackend(async (request) => {
+      if (request.purpose === "red_team_attack" && request.taskId === "T1" && firstT1Attack) {
+        firstT1Attack = false;
+        const data = request.data as { validatorId: string };
+        return {
+          validatorId: data.validatorId,
+          verdict: "revise",
+          criteria: RED_TEAM_ATTACK_CRITERIA.map((criterion, index) => ({
+            criterion,
+            passed: index !== 2,
+            note: index === 2
+              ? "untrusted input crosses the declared trust boundary"
+              : `attack completed: ${criterion}`,
+          })),
+          issues: ["Trust-boundary bypass must be repaired and regression-checked."],
+          confidence: 0.95,
+        };
+      }
+      if (request.purpose === "execute_task" && request.taskId === "T1") {
+        t1Executions += 1;
+        const output = await demoHandler(request) as AgentResult;
+        return t1Executions === 1
+          ? output
+          : { ...output, summary: `${output.summary} · Red Team finding repaired` };
+      }
+      return demoHandler(request);
+    });
+    const store = await createdRunStore(workspace, ".state", runId);
+    const gateway = new AgentGateway({ backend, config: config() });
+    const orchestrator = new SwarmOrchestrator({
+      gateway,
+      store,
+      config: config(),
+      workspace,
+      sourceIdentity: "build:test-red-loop",
+    });
+
+    const state = await orchestrator.start("일반 작업에도 Blue와 Red의 대립 검증을 적용한다");
+
+    assert.equal(state.status, "completed", state.error);
+    const task = state.tasks.T1!;
+    assert.equal(task.status, "accepted");
+    assert.equal(task.attempts, 2);
+    assert.equal(task.adversarial?.reviewRounds, 2);
+    assert.equal(task.adversarial?.latestPhase, "reattack");
+    assert.equal(task.adversarial?.latestVerdict, "accept");
+    assert.equal(task.adversarial?.latestFindingCount, 0);
+    assert.equal(task.adversarial?.reattackRequired, false);
+    assert.notEqual(task.adversarial?.redTeamTeamId, state.harnessV2?.workOrders.T1?.order.ownerTeam);
+    assert.match(task.adversarial?.redTeamTeamId ?? "", /\/team:security-attack$/);
+
+    const workerCalls = backend.calls.filter((call) => call.purpose === "execute_task" && call.taskId === "T1");
+    const redCalls = backend.calls.filter((call) =>
+      ["red_team_attack", "red_team_reattack"].includes(call.purpose) && call.taskId === "T1");
+    assert.equal(workerCalls.length, 2);
+    assert.deepEqual(redCalls.map((call) => call.purpose), ["red_team_attack", "red_team_reattack"]);
+    assert.notEqual(redCalls[0]?.agentSlotId, workerCalls[0]?.agentSlotId);
+    assert.notEqual(redCalls[0]?.threadKey, workerCalls[0]?.threadKey);
+    assert.match(workerCalls[1]?.prompt ?? "", /\[RED-TEAM\].*Trust-boundary bypass/s);
+
+    const blackboard = new BlackboardStore(store.runDirectory, state.runId);
+    const attackRefs = Object.values(state.harnessV2?.artifactHeads ?? {})
+      .filter((ref) => ref.artifactId.startsWith("red-attack-T1-"))
+      .sort((left, right) => left.artifactId.localeCompare(right.artifactId));
+    assert.equal(attackRefs.length, 2);
+    const attacks = await Promise.all(attackRefs.map((ref) => blackboard.read(ref)));
+    const first = attacks.find((artifact) => (artifact.content as { phase?: string }).phase === "attack")!;
+    const second = attacks.find((artifact) => (artifact.content as { phase?: string }).phase === "reattack")!;
+    assert.equal((first.content as { reviewedArtifact: { revision: number } }).reviewedArtifact.revision, 1);
+    assert.equal((second.content as { reviewedArtifact: { revision: number } }).reviewedArtifact.revision, 2);
+    assert.deepEqual(
+      (second.content as { priorAttackReport: { artifactId: string; revision: number; contentHash: string } }).priorAttackReport,
+      { artifactId: first.artifactId, revision: first.revision, contentHash: first.contentHash },
+    );
+    const decision = await blackboard.read({
+      artifactId: task.adversarial!.latestDecisionArtifactId,
+      revision: task.adversarial!.latestDecisionArtifactRevision,
+      contentHash: task.adversarial!.latestDecisionArtifactContentHash,
+    });
+    assert.equal(decision.createdBy.agentId, "system-gate:adversarial-judge");
+    assert.notEqual(decision.createdBy.teamId, task.adversarial?.redTeamTeamId);
+    const t3Order = state.harnessV2!.workOrders.T3!.order;
+    const t3InputRefs = t3Order.inputArtifactIds.map((artifactId) => {
+      const ref = state.harnessV2!.artifactHeads[artifactId];
+      assert.ok(ref, `T3 input ${artifactId} must have an immutable current head`);
+      return ref;
+    });
+    for (const ref of t3InputRefs) {
+      assert.equal(await blackboard.isStale(ref), false, `${ref.artifactId} must remain a current dependency after repair`);
+    }
+    const t3OutputRef = state.harnessV2!.artifactHeads[taskResultArtifactId("T3")]!;
+    assert.equal(await blackboard.isStale(t3OutputRef), false, "T3 output must not inherit stale historical repair evidence");
+
+    const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
+      .map((line) => JSON.parse(line) as { type: string; taskId?: string; status?: string });
+    const t1Events = events.filter((event) => event.taskId === "T1");
+    const indexOf = (type: string, status?: string) => t1Events.findIndex((event) =>
+      event.type === type && (status === undefined || event.status === status));
+    assert(indexOf("red_team_attack_started") >= 0);
+    assert(indexOf("blue_team_repair_started") > indexOf("red_team_attack_completed"));
+    assert(indexOf("red_team_reattack_started") > indexOf("blue_team_repair_completed"));
+    assert(indexOf("adversarial_judge_decided", "approve") > indexOf("red_team_reattack_completed"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("a non-Git workspace without build identity runs in observation-only mode", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-orch-unpinned-"));
   const previousGithubSha = process.env.GITHUB_SHA;
@@ -180,6 +368,36 @@ test("a non-Git workspace without build identity runs in observation-only mode",
   } finally {
     if (previousGithubSha === undefined) delete process.env.GITHUB_SHA;
     else process.env.GITHUB_SHA = previousGithubSha;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an unsupported local Git entry disables Evolution without blocking an ordinary run", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-local-source-observation-"));
+  try {
+    await initializeCleanGitWorkspace(workspace);
+    const nestedRepository = join(workspace, "benchmarks", "fixture");
+    await mkdir(nestedRepository, { recursive: true });
+    await execFileAsync("git", ["-C", nestedRepository, "init"], { windowsHide: true });
+    await writeFile(join(nestedRepository, "fixture.txt"), "untracked nested repository\n", "utf8");
+
+    const backend = new MockAgentBackend(demoHandler);
+    const store = await createdRunStore(workspace, ".state", "run-local-source-observation");
+    const gateway = new AgentGateway({ backend, config: config() });
+    const orchestrator = new SwarmOrchestrator({ gateway, store, config: config(), workspace });
+
+    await assert.rejects(
+      orchestrator.start("일반 실행은 계속", undefined, async () => {
+        const persisted = await store.load();
+        assert.equal(persisted.evolution?.mode, "legacy_unpinned");
+        assert.equal(persisted.evolution?.promotionEligible, false);
+        assert.match(persisted.evolution?.integrityErrors[0] ?? "", /Unsupported untracked source entry/u);
+        assert.equal(backend.calls.length, 0);
+        throw new Error("stop-after-local-source-observation-ready");
+      }),
+      /stop-after-local-source-observation-ready/,
+    );
+  } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
@@ -212,18 +430,21 @@ test("a malformed explicit source identity fails closed before creating run stat
 test("end-to-end DAG, blind quorum, and provenance gates complete", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-orch-"));
   try {
+    await initializeCleanGitWorkspace(workspace);
     const backend = new MockAgentBackend(async (request) => {
       if (request.purpose === "validate_task") {
         const data = request.data as { validatorId: string; task: { acceptanceCriteria: string[] } };
+        const minorityObjection = data.validatorId === "V3" &&
+          !(data.task as { id?: string }).id?.startsWith("final-quality-review-");
         return {
           validatorId: data.validatorId,
-          verdict: data.validatorId === "V3" ? "reject" : "accept",
+          verdict: minorityObjection ? "reject" : "accept",
           criteria: data.task.acceptanceCriteria.map((criterion) => ({
             criterion,
-            passed: data.validatorId !== "V3",
+            passed: !minorityObjection,
             note: "independent vote",
           })),
-          issues: data.validatorId === "V3" ? ["minority objection"] : [],
+          issues: minorityObjection ? ["minority objection"] : [],
           confidence: 0.8,
         };
       }
@@ -236,7 +457,6 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       store,
       config: config(),
       workspace,
-      sourceIdentity: "build:test-orchestrator-e2e",
     });
     const state = await orchestrator.start("테스트 목표");
     assert.equal(state.status, "completed", state.error);
@@ -254,24 +474,30 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     assert.equal(outcomeReceipts.length, 3);
     assert.ok(traces.every((trace) => trace.bundleHash.startsWith("sha256:") && trace.timings.modelTurns !== null));
     assert.ok(outcomeReceipts.every((receipt) => receipt.level === "L3" && receipt.promotionEligible));
-    assert.equal(state.harnessV2?.orgVersion, "lab-128@2");
-    assert.equal(state.harnessV2?.organizationHeadcount, 17);
+    assert.equal(state.harnessV2?.orgVersion, "company-os@3");
+    assert.equal(state.harnessV2?.organizationHeadcount, 128);
     assert.equal(state.harnessV2?.organizationReviewerSlots, 3);
-    assert.equal(state.harnessV2?.staffingPlan?.logicalAgentCount, 17);
+    assert.equal(state.harnessV2?.staffingPlan?.logicalAgentCount, 128);
     assert.equal(state.harnessV2?.staffingPlan?.reviewerSlots, 3);
     assert.equal(state.harnessV2?.staffingPlan?.revision, 1);
     assert.match(state.harnessV2?.staffingPlan?.planHash ?? "", /^sha256:[a-f0-9]{64}$/);
     assert.match(state.harnessV2?.staffingPlan?.registryHash ?? "", /^sha256:[a-f0-9]{64}$/);
+    const companyAgentIds = new Set(organizationRegistryCompanyOsV3().agents.map((agent) => agent.agentId));
     assert.ok(Object.values(state.harnessV2?.workOrders ?? {}).every((order) =>
-      /^luna-0(?:0[1-9]|1[0-7])$/.test(order.assignedAgentId) &&
-      order.reviewerAgentIds.every((agentId) => /^luna-0(?:0[1-9]|1[0-7])$/.test(agentId))));
+      companyAgentIds.has(order.assignedAgentId) &&
+      order.reviewerAgentIds.every((agentId) => companyAgentIds.has(agentId))));
     assert.ok(
-      Object.values(state.harnessV2?.workOrders ?? {}).every((order) => order.state === "ACCEPTED"),
+      Object.values(state.tasks).every((task) => state.harnessV2?.workOrders[task.id]?.state === "INTEGRATED") &&
+        Object.values(state.harnessV2?.workOrders ?? {}).some((order) => order.order.authorityKind === "command-bootstrap" && order.state === "INTEGRATED"),
       JSON.stringify(Object.fromEntries(Object.entries(state.harnessV2?.workOrders ?? {}).map(([id, order]) => [id, order.state]))),
     );
     assert.equal(state.harnessV2?.missionPreflight?.ready, true);
     assert.equal(state.harnessV2?.programKnowledge?.status, "ready");
-    assert.equal(Object.keys(state.harnessV2?.oracleSuites ?? {}).length, 3);
+    assert.equal(
+      Object.keys(state.harnessV2?.oracleSuites ?? {}).length,
+      5,
+      "department orders, Final Integration, and independent Final Quality must retain sealed Oracle suites",
+    );
     assert.ok(Object.values(state.harnessV2?.oracleSuites ?? {}).every((suite) =>
       suite.oracleCount >= 1 && suite.kinds.length >= 1));
     assert.equal(Object.keys(state.harnessV2?.experiments ?? {}).length, 2);
@@ -293,9 +519,79 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     const v2Artifacts = await Promise.all(
       Object.values(state.harnessV2?.artifactHeads ?? {}).map((ref) => blackboard.read(ref)),
     );
-    assert.equal(v2Artifacts.filter((artifact) => artifact.kind === "gate-receipt").length, 9);
+    const planningOrder = Object.values(state.harnessV2?.workOrders ?? {}).find((record) =>
+      record.order.authorityKind === "planning");
+    const finalIntegrationOrder = Object.values(state.harnessV2?.workOrders ?? {}).find((record) =>
+      record.order.authorityKind === "integration" &&
+      record.order.serviceIds?.includes("integration.executive-report"));
+    const finalQualityOrder = Object.values(state.harnessV2?.workOrders ?? {}).find((record) =>
+      record.order.authorityKind === "verification" &&
+      record.order.id.startsWith("final-quality-review-"));
+    assert.equal(planningOrder?.state, "INTEGRATED");
+    assert.equal(planningOrder?.lease, undefined, "terminal planning authority must release its lease");
+    assert.deepEqual(planningOrder?.order.requiredGateIds, ["G0"]);
+    assert.equal(finalIntegrationOrder?.state, "INTEGRATED");
+    assert.equal(finalIntegrationOrder?.lease, undefined, "terminal integration authority must release its lease");
+    assert.deepEqual(finalIntegrationOrder?.order.requiredGateIds, ["G0"]);
+    assert.ok(finalIntegrationOrder?.order.inputArtifactIds.length);
+    assert.ok(finalIntegrationOrder?.order.inputArtifactIds.every((artifactId) =>
+      artifactId.startsWith("accepted-result-") || artifactId.startsWith("handoff-")),
+    );
+    assert.ok(finalIntegrationOrder?.order.inputArtifactIds.every((artifactId) =>
+      state.harnessV2?.artifactHeads[artifactId] !== undefined),
+    );
+    assert.equal(finalQualityOrder?.state, "INTEGRATED");
+    assert.equal(finalQualityOrder?.lease, undefined, "terminal Final Quality authority must release its lease");
+    assert.deepEqual(finalQualityOrder?.order.requiredGateIds, ["G0", "G2", "G3"]);
+    assert.equal(finalQualityOrder?.reviewerAgentIds.length, 3);
+    const executiveRelease = v2Artifacts.find((artifact) =>
+      artifact.kind === "release" &&
+      (artifact.content as { kind?: string }).kind === "executive-release");
+    assert.ok(executiveRelease, "completed Company OS runs must publish an Executive Release artifact");
+    assert.equal(executiveRelease.createdBy.workOrderId, finalIntegrationOrder?.order.id);
+    assert.equal(executiveRelease.createdBy.runId, state.runId);
+    assert.equal(executiveRelease.createdBy.workOrderRevision, finalIntegrationOrder?.order.revision);
+    assert.equal(executiveRelease.createdBy.executionRevision, finalIntegrationOrder?.executionRevision);
+    assert.equal(executiveRelease.createdBy.authorityKind, "host-effect");
+    assert.ok(executiveRelease.createdBy.attemptId);
+    assert.ok((executiveRelease.createdBy.fencingToken ?? 0) > 0);
+    assert.equal(executiveRelease.verificationStatus, "accepted");
+    assert.ok(executiveRelease.inputs.some((ref) =>
+      v2Artifacts.some((artifact) => artifact.kind === "team-report" && artifact.artifactId === ref.artifactId)),
+    );
+    assert.ok(finalIntegrationOrder?.order.inputArtifactIds.every((artifactId) =>
+      executiveRelease.inputs.some((ref) => ref.artifactId === artifactId)),
+    );
+    const finalQualityDecision = v2Artifacts.find((artifact) =>
+      artifact.kind === "decision" &&
+      (artifact.content as { kind?: string }).kind === "final-quality-decision");
+    assert.ok(finalQualityDecision);
+    assert.equal(finalQualityDecision.createdBy.workOrderId, finalQualityOrder?.order.id);
+    assert.ok(executiveRelease.inputs.some((ref) => ref.artifactId === finalQualityDecision.artifactId));
+    assert.equal(v2Artifacts.filter((artifact) => artifact.kind === "gate-receipt").length, 14);
+    for (const controlOrder of [planningOrder, finalIntegrationOrder]) {
+      assert.ok(controlOrder);
+      const receipts = v2Artifacts.filter((artifact) => artifact.kind === "gate-receipt" &&
+        (artifact.content as { workOrderId?: string }).workOrderId === controlOrder.order.id);
+      assert.equal(receipts.length, 1, `control Work Order ${controlOrder.order.id} must have exactly one declared receipt`);
+      assert.equal((receipts[0]!.content as { gateId?: string }).gateId, "G0");
+      assert.equal((receipts[0]!.content as { passed?: boolean }).passed, true);
+      assert.equal(receipts[0]!.verificationStatus, "accepted");
+      assert.equal(receipts[0]!.inputs.length, 1, "control G0 must bind one immutable submitted output");
+      assert.ok(controlOrder.artifactIds.includes(receipts[0]!.artifactId));
+      const submittedOutput = await blackboard.read(receipts[0]!.inputs[0]!);
+      const missingReceiptEvaluation = await evaluateGateSet({
+        workOrder: controlOrder.order,
+        outputArtifacts: [submittedOutput],
+        receipts: [],
+        blackboard,
+        registry: organizationRegistryCompanyOsV3(),
+      });
+      assert.equal(missingReceiptEvaluation.passed, false);
+      assert.ok(missingReceiptEvaluation.blockers.includes("Required gate G0 has no receipt"));
+    }
     const teamReportArtifacts = v2Artifacts.filter((artifact) => artifact.kind === "team-report");
-    assert.equal(teamReportArtifacts.length, Object.keys(state.teams).length);
+    assert.equal(teamReportArtifacts.length, Object.keys(state.teams).length + 1);
     assert.ok(teamReportArtifacts.every((artifact) => artifact.inputs.length > 0));
     assert.equal(
       state.harnessV2?.messages.filter((message) => message.type === "TEAM_REPORT").length,
@@ -319,25 +615,46 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       typeof (artifact.content as { oracle?: { receiptHash?: string } }).oracle?.receiptHash === "string"));
     for (const receipt of g3Artifacts) {
       assert.equal(receipt.createdBy.agentId, "system-gate:g3");
-      assert.ok(receipt.inputs.length >= 3, "G3 must cite the manager and quorum vote artifacts");
-      const voteArtifacts = await Promise.all(receipt.inputs.map((ref) => blackboard.read(ref)));
+      const diversityRef = (receipt.content as { diversity?: { assessmentArtifact?: typeof receipt.inputs[number] } })
+        .diversity?.assessmentArtifact;
+      const isFinalQuality = (receipt.content as { workOrderId?: string }).workOrderId === finalQualityOrder?.order.id;
+      if (isFinalQuality) {
+        assert.equal(diversityRef, undefined, "Final Quality uses exact sealed method roles under the v2 quorum policy");
+        assert.equal(receipt.inputs.length, 4, "Final Quality G3 binds manager, Red Team, and two blind votes");
+        continue;
+      }
+      assert.ok(diversityRef, "G3 must bind the host-derived verification diversity assessment");
+      const voteRefs = receipt.inputs.filter((ref) => ref.artifactId !== diversityRef!.artifactId);
+      assert.ok(voteRefs.length >= 3, "G3 must cite the manager and quorum vote artifacts");
+      const voteArtifacts = await Promise.all(voteRefs.map((ref) => blackboard.read(ref)));
       assert.ok(voteArtifacts.every((artifact) => artifact.artifactId.startsWith("vote-")));
       assert.ok(voteArtifacts.every((artifact) =>
         artifact.createdBy.agentId === (artifact.content as { boundAgentId?: string }).boundAgentId));
+      const diversityArtifact = await blackboard.read(diversityRef!);
+      assert.equal(diversityArtifact.createdBy.agentId, "system-gate:verification-diversity");
+      assert.equal((diversityArtifact.content as { assessment?: { passed?: boolean } }).assessment?.passed, true);
     }
-    for (const call of backend.calls.filter((entry) => ["manager_review", "validate_task"].includes(entry.purpose))) {
+    for (const call of backend.calls.filter((entry) => ["manager_review", "validate_task", "red_team_attack", "red_team_reattack"].includes(entry.purpose))) {
       assert.ok(call.agentSlotId, `${call.purpose} must bind a fixed logical employee slot`);
       assert.equal(call.agentSlotId, call.roleContract?.agentId);
-      assert.equal(call.inputArtifactRefs?.length, 1);
+      assert.equal(call.inputArtifactRefs?.length, call.taskId ? 1 : 2);
       assert.ok(call.executionBundlePin, `${call.purpose} must carry the run-pinned Bundle`);
-      assert.ok(call.attemptIdentity, `${call.purpose} must carry the Work Order AttemptIdentity`);
-      assert.equal(call.executionBundlePin?.bundleId, call.attemptIdentity?.bundleId);
+      if (call.taskId) {
+        assert.ok(call.attemptIdentity, `${call.purpose} must carry the task Work Order AttemptIdentity`);
+        assert.equal(call.executionBundlePin?.bundleId, call.attemptIdentity?.bundleId);
+      } else {
+        assert.ok(call.companyAuthority, `${call.purpose} must carry the fenced Final Quality authority`);
+      }
       assert.ok(call.effectiveToolPolicy, `${call.purpose} must carry an enforceable runtime policy`);
       assert.deepEqual(call.effectiveToolPolicy?.writeScopes, []);
     }
     const t1Manager = backend.calls.find((entry) => entry.purpose === "manager_review" && entry.taskId === "T1");
-    const t1EvidenceAuditor = backend.calls.find((entry) =>
+    const legacyT1EvidenceAuditor = backend.calls.find((entry) =>
       entry.purpose === "validate_task" && entry.taskId === "T1" &&
+      (entry.data as { validatorId?: string }).validatorId === "V1");
+    assert.equal(legacyT1EvidenceAuditor, undefined, "V1 moved to the dedicated Red Team purpose");
+    const t1EvidenceAuditor = backend.calls.find((entry) =>
+      entry.purpose === "red_team_attack" && entry.taskId === "T1" &&
       (entry.data as { validatorId?: string }).validatorId === "V1");
     const t1RequirementsAuditor = backend.calls.find((entry) =>
       entry.purpose === "validate_task" && entry.taskId === "T1" &&
@@ -345,29 +662,29 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     assert.deepEqual(t1Manager?.effectiveToolPolicy?.allowedTools, [], "manager review must not repeat source reads");
     assert.deepEqual(
       t1EvidenceAuditor?.effectiveToolPolicy?.allowedTools,
-      ["read", "search"],
-      "the dedicated evidence auditor retains bounded source verification",
+      [],
+      "the Red Team remains artifact-only and cannot inherit workspace context",
     );
     assert.deepEqual(
       t1RequirementsAuditor?.effectiveToolPolicy?.allowedTools,
       [],
-      "requirements coverage is checked against the immutable result packet",
+      "without a Host Tool Broker the reviewer must not receive synthetic workspace authority",
     );
     assert.equal(
       (t1EvidenceAuditor?.data as { reviewEvidenceMode?: string }).reviewEvidenceMode,
-      "workspace-verified",
+      "artifact-only",
     );
     assert.equal(
       (t1RequirementsAuditor?.data as { reviewEvidenceMode?: string }).reviewEvidenceMode,
       "artifact-only",
     );
     assert.match(t1Manager?.prompt ?? "", /artifact-only accountability review/);
-    assert.match(t1RequirementsAuditor?.prompt ?? "", /artifact-only review lane/);
+    assert.doesNotMatch(t1RequirementsAuditor?.prompt ?? "", /bounded read\/search access for source verification/);
     assert.equal(
       [t1Manager, t1EvidenceAuditor, t1RequirementsAuditor]
         .filter((call) => (call?.effectiveToolPolicy?.allowedTools.length ?? 0) > 0).length,
-      1,
-      "only one of the three independent review lanes should reopen workspace evidence",
+      0,
+      "no review lane may fabricate workspace evidence authority without a Host Tool Broker",
     );
     for (const call of backend.calls.filter((entry) => entry.purpose === "execute_task")) {
       assert.ok(call.executionBundlePin, "workers must carry the run-pinned Bundle");
@@ -383,7 +700,8 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
         assert.equal(call.roleContract?.network, "allowlist", "runtime network policy cannot widen the role contract");
       }
     }
-    for (const call of backend.calls.filter((entry) => ["manager_review", "validate_task"].includes(entry.purpose))) {
+    for (const call of backend.calls.filter((entry) =>
+      Boolean(entry.taskId) && ["manager_review", "validate_task", "red_team_attack", "red_team_reattack"].includes(entry.purpose))) {
       const data = call.data as { oracleSuiteId?: string; oracleIds?: string[] };
       assert.ok(data.oracleSuiteId);
       assert.ok((data.oracleIds?.length ?? 0) >= 1);
@@ -400,7 +718,7 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     );
     assert.equal(
       state.harnessV2?.messages.filter((message) => message.type === "GATE_RECEIPT").length,
-      9,
+      14,
     );
     assert.ok(state.metrics.maxActiveCalls <= 4);
     for (const call of backend.calls) {
@@ -412,11 +730,8 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
         `${call.purpose} prompt must be rendered from the declared component hash`,
       );
     }
-    for (const purpose of ["team_synthesis", "critic_review"]) {
-      const calls = backend.calls.filter((call) => call.purpose === purpose);
-      assert.ok(calls.length > 0, `${purpose} must execute`);
-      assert.ok(calls.every((call) => call.executionBundlePin && call.executionPromptModule));
-    }
+    const criticCalls = backend.calls.filter((call) => call.purpose === "critic_review");
+    assert.ok(criticCalls.every((call) => call.executionBundlePin && call.executionPromptModule));
     assert.equal(backend.calls.filter((call) => call.purpose === "critic_review").length, 1);
     assert.equal(
       backend.calls.filter((call) => ["final", "final_repair"].includes(call.purpose)).length,
@@ -426,6 +741,7 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     assert.equal(
       backend.calls.some(
         (call) =>
+          Boolean(call.taskId) &&
           call.purpose === "validate_task" &&
           (call.data as { validatorId?: string }).validatorId === "V3",
       ),
@@ -433,9 +749,14 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
       "a unanimous minimum quorum should skip the remaining high-risk auditor",
     );
     assert.equal(
-      backend.calls.filter((call) => call.purpose === "validate_task").length,
+      backend.calls.filter((call) => Boolean(call.taskId) && ["validate_task", "red_team_attack"].includes(call.purpose)).length,
       6,
-      "adaptive quorum saves two of eight blind-auditor calls in the unanimous demo DAG",
+      "adaptive quorum preserves one mandatory Red Team attack while skipping unnecessary extra auditors",
+    );
+    assert.equal(
+      backend.calls.filter((call) => !call.taskId && ["validate_task", "red_team_attack"].includes(call.purpose)).length,
+      3,
+      "Final Quality always runs one Red Team and two sealed blind reviewers",
     );
     const workerPurposes = backend.calls
       .filter((call) => call.purpose === "execute_task")
@@ -443,33 +764,23 @@ test("end-to-end DAG, blind quorum, and provenance gates complete", async () => 
     assert.ok(workerPurposes.indexOf("T3") > workerPurposes.indexOf("T1"));
     assert.ok(workerPurposes.indexOf("T3") > workerPurposes.indexOf("T2"));
     const teamCalls = backend.calls.filter((call) => call.purpose === "team_synthesis");
-    assert.equal(teamCalls.length, 1, "three one-packet teams must use deterministic pass-through");
-    assert.equal(
-      (teamCalls.at(-1)?.data as { team: { id: string } }).team.id,
-      "TEAM-ROOT",
-    );
-    const rootInput = teamCalls.at(-1)?.data as {
-      packets: Array<{ sourceTaskIds: string[] }>;
-    };
-    assert.equal(rootInput.packets.length, 3);
-    assert.ok(rootInput.packets.every((packet) => packet.sourceTaskIds.length === 1));
+    assert.equal(teamCalls.length, 0, "complete conflict-free team unions must be host-canonical");
     assert.equal(state.metrics.modelCalls, backend.calls.length);
     assert.equal(
       state.metrics.modelCalls,
-      19,
-      "host-canonical synthesis/final paths save four of the prior 23 deterministic fixture calls",
+      22,
+      "host-canonical synthesis plus independent Final Quality uses four additional bounded review calls",
     );
-    assert.equal(
-      state.metrics.callBreakdown?.find((entry) => entry.purpose === "team_synthesis")?.calls,
-      1,
-    );
+    assert.equal(state.metrics.callBreakdown?.some((entry) => entry.purpose === "team_synthesis"), false);
     assert.equal(state.metrics.callBreakdown?.some((entry) => entry.purpose === "final"), false);
     const runtimeEvents = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
       .map((line) => JSON.parse(line) as { type: string; status?: string });
     assert.equal(
       runtimeEvents.filter((event) => event.type === "team_synthesis_elided").length,
-      3,
+      4,
     );
+    assert.ok(runtimeEvents.some((event) =>
+      event.type === "team_synthesis_elided" && event.status === "host_canonical_union"));
     assert.equal(
       runtimeEvents.filter((event) => event.type === "final_judge_elided").length,
       1,
@@ -499,13 +810,21 @@ test("flushMetrics persists detached calls that finish after the last orchestrat
     const completed = await orchestrator.start("late shadow metrics flush");
     assert.equal(completed.status, "completed", completed.error);
     const committedCalls = completed.metrics.modelCalls;
+    const lateAuthorityRequest = backend.calls.find((call) => {
+      const authority = call.companyAuthority;
+      if (!authority || (call.effectiveToolPolicy?.allowedTools.length ?? 0) > 0) return false;
+      const usedCalls = backend.calls.filter(
+        (candidate) => candidate.companyAuthority?.budgetHash === authority.budgetHash,
+      ).length;
+      return usedCalls < authority.budget.maxModelCalls;
+    });
+    assert.ok(lateAuthorityRequest, "fixture needs one exact Company authority with remaining model-call budget");
 
     await gateway.run({
+      ...lateAuthorityRequest,
       threadKey: "late-shadow-observation",
-      role: "worker",
       purpose: "late_shadow_observation",
       prompt: "observe candidate after the stable result is committed",
-      reasoningEffort: "low",
     });
     assert.equal(
       (await store.load()).metrics.modelCalls,
@@ -595,7 +914,7 @@ test("adaptive validation escalates to the remaining blind auditor only after a 
           validatorId: string;
           task: { id: string; acceptanceCriteria: string[] };
         };
-        const split = data.task.id === "T2" && data.validatorId === "V1";
+        const split = data.task.id === "T2" && data.validatorId === "V2";
         return {
           validatorId: data.validatorId,
           verdict: split ? "reject" : "accept",
@@ -617,6 +936,9 @@ test("adaptive validation escalates to the remaining blind auditor only after a 
     const state = await orchestrator.start("adaptive audit goal");
 
     assert.equal(state.status, "completed", state.error);
+    const t2RedTeam = backend.calls
+      .filter((call) => call.purpose === "red_team_attack" && call.taskId === "T2")
+      .map((call) => (call.data as { validatorId: string }).validatorId);
     const t2Auditors = backend.calls
       .filter(
         (call) =>
@@ -624,7 +946,8 @@ test("adaptive validation escalates to the remaining blind auditor only after a 
           (call.data as { task?: { id?: string } }).task?.id === "T2",
       )
       .map((call) => (call.data as { validatorId: string }).validatorId);
-    assert.deepEqual(t2Auditors, ["V1", "V2", "V3"]);
+    assert.deepEqual(t2RedTeam, ["V1"]);
+    assert.deepEqual(t2Auditors, ["V2", "V3"]);
     const t2Council = Object.values(state.harnessV2?.councils ?? {})
       .find((council) => council.agenda.councilId.includes("T2"));
     assert.equal(t2Council?.state, "CLOSED");
@@ -638,9 +961,10 @@ test("adaptive validation escalates to the remaining blind auditor only after a 
 test("validator infrastructure failure retries validation without rerunning the worker artifact", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-validation-retry-"));
   try {
+    await initializeCleanGitWorkspace(workspace);
     let failedT1Auditors = 0;
     const backend = new MockAgentBackend(async (request) => {
-      if (request.purpose === "validate_task" && request.taskId === "T1" && failedT1Auditors < 2) {
+      if (request.purpose === "validate_task" && request.taskId === "T1" && failedT1Auditors < 1) {
         failedT1Auditors += 1;
         throw new AgentCallError("validator transport unavailable", "permanent", 1);
       }
@@ -652,7 +976,6 @@ test("validator infrastructure failure retries validation without rerunning the 
       store,
       config: config(),
       workspace,
-      sourceIdentity: "build:test-validation-retry",
     }).start("validation retry preserves outputs");
 
     assert.equal(state.status, "completed", state.error);
@@ -665,7 +988,7 @@ test("validator infrastructure failure retries validation without rerunning the 
     assert.equal(state.harnessV2?.workOrders.T1?.executionAttempts, 1);
     assert.equal(state.harnessV2?.workOrders.T1?.validationAttempts, 2);
     const validationCalls = backend.calls.filter((call) =>
-      call.taskId === "T1" && ["manager_review", "validate_task"].includes(call.purpose));
+      call.taskId === "T1" && ["manager_review", "validate_task", "red_team_attack"].includes(call.purpose));
     assert.ok(validationCalls.length > 2);
     assert.equal(new Set(validationCalls.map((call) => call.executionBundlePin?.bundleHash)).size, 1);
     assert.equal(new Set(validationCalls.map((call) => call.executionPromptModule?.contentHash)).size, 1);
@@ -707,7 +1030,7 @@ test("planning committee tolerates a minority failure but enforces deterministic
   }
 });
 
-test("REAL read-only execution rejects impossible network, write, and command tasks before Work Orders", async () => {
+test("REAL host-brokered execution allows public research but rejects raw write and command tasks before department Work Orders", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-plan-capability-gate-"));
   try {
     const plan = demoPlan("runtime capability feasibility");
@@ -733,6 +1056,14 @@ test("REAL read-only execution rejects impossible network, write, and command ta
       return demoHandler(request);
     });
     const store = await createdRunStore(workspace, ".state", "run-plan-capability-gate");
+    const researchRuntime = await RunResearchToolRuntime.create({
+      workspaceRoot: workspace,
+      runDirectory: store.runDirectory,
+      runId: store.runId,
+      generation: "generation-plan-capability-gate",
+      stateDirectory: ".state",
+      policy: config().webResearch,
+    });
     const state = await new SwarmOrchestrator({
       gateway: new AgentGateway({ backend, config: config() }),
       store,
@@ -740,20 +1071,223 @@ test("REAL read-only execution rejects impossible network, write, and command ta
       workspace,
       sourceIdentity: "build:test-plan-capability-gate",
       hostToolRuntime: {} as never,
+      researchRuntime,
     }).start(plan.goal);
 
     assert.equal(state.status, "failed");
-    assert.match(state.error ?? "", /brokered workspace read\/search only/);
     assert.match(state.error ?? "", /T1 requires [^,]*command-execution/);
     assert.match(state.error ?? "", /T1 requires [^,]*workspace-write/);
-    assert.match(state.error ?? "", /T2 requires external-network/);
+    assert.doesNotMatch(state.error ?? "", /T2 requires external-network/);
     assert.equal(backend.calls.some((call) => call.purpose === "execute_task"), false);
-    assert.equal(Object.keys(state.harnessV2?.workOrders ?? {}).length, 0);
+    const workOrders = Object.values(state.harnessV2?.workOrders ?? {});
+    assert.deepEqual(
+      workOrders.map((record) => record.order.authorityKind).sort(),
+      ["command-bootstrap", "planning"],
+    );
     const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
       .map((line) => JSON.parse(line) as { type: string; message?: string });
-    assert.match(events.find((event) => event.type === "plan_capability_blocked")?.message ?? "", /T1/);
+    const blocked = events.find((event) => event.type === "plan_capability_blocked")?.message ?? "";
+    assert.match(blocked, /T1/);
+    assert.doesNotMatch(blocked, /T2/);
   } finally {
     await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("Company research Work Order runs discovery then immutable evidence and publishes a host-finalized Claim Graph", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-orch-company-research-"));
+  const runId = "run-company-research-two-stage";
+  const officialUrl = "https://official.test/report";
+  const academicUrl = "https://academic.test/study";
+  const counterUrl = "https://counter.test/failure";
+  const auditUrl = "https://audit.test/limitations";
+  try {
+    await initializeCleanGitWorkspace(workspace);
+    const stateDirectory = ".state";
+    const store = await createdRunStore(workspace, stateDirectory, runId);
+    const snapshots = new ResearchSnapshotStore(workspace, `${stateDirectory}/research/snapshots/sha256`);
+    const officialBody = "The protected quality score was 94 points.";
+    const academicBody = "The independent baseline was 71 points.";
+    const counterBody = "A failed release scored only 62 points.";
+    const auditBody = "The audit identified unresolved limitations.";
+    const official = await snapshots.publish({
+      schemaVersion: 1, sourceUrl: officialUrl, finalUrl: officialUrl, redirectChain: [],
+      fetchedAt: "2026-08-24T00:00:00.000Z", status: 200, mimeType: "text/plain",
+      bodyUtf8: officialBody, bodyByteLength: Buffer.byteLength(officialBody),
+      contentHash: canonicalSha256(officialBody), trust: "untrusted_external_content",
+    });
+    const academic = await snapshots.publish({
+      schemaVersion: 1, sourceUrl: academicUrl, finalUrl: academicUrl, redirectChain: [],
+      fetchedAt: "2026-08-24T00:00:00.000Z", status: 200, mimeType: "text/plain",
+      bodyUtf8: academicBody, bodyByteLength: Buffer.byteLength(academicBody),
+      contentHash: canonicalSha256(academicBody), trust: "untrusted_external_content",
+    });
+    const counter = await snapshots.publish({
+      schemaVersion: 1, sourceUrl: counterUrl, finalUrl: counterUrl, redirectChain: [],
+      fetchedAt: "2026-08-24T00:00:00.000Z", status: 200, mimeType: "text/plain",
+      bodyUtf8: counterBody, bodyByteLength: Buffer.byteLength(counterBody),
+      contentHash: canonicalSha256(counterBody), trust: "untrusted_external_content",
+    });
+    const audit = await snapshots.publish({
+      schemaVersion: 1, sourceUrl: auditUrl, finalUrl: auditUrl, redirectChain: [],
+      fetchedAt: "2026-08-24T00:00:00.000Z", status: 200, mimeType: "text/plain",
+      bodyUtf8: auditBody, bodyByteLength: Buffer.byteLength(auditBody),
+      contentHash: canonicalSha256(auditBody), trust: "untrusted_external_content",
+    });
+    const researchRuntime = await RunResearchToolRuntime.create({
+      workspaceRoot: workspace, runDirectory: store.runDirectory, runId,
+      generation: "generation-company-research", stateDirectory,
+      policy: {
+        allowedOrigins: ["https://official.test", "https://academic.test", "https://counter.test", "https://audit.test"],
+        maxCallsPerSession: 8, maxRedirects: 2, maxResponseBytes: 64 * 1_024,
+        maxDeadlineMs: 10_000, allowedMimeTypes: ["text/plain"],
+      },
+    });
+    const researchDiscoveryRuntime = await RunSearchDiscoveryToolRuntime.create({
+      runId, runDirectory: store.runDirectory,
+      provider: createStaticSearchDiscoveryProvider([
+        { query: "official protected quality", lane: "official", candidates: [{ url: officialUrl, title: "Official report" }] },
+        { query: "independent quality baseline", lane: "academic", candidates: [{ url: academicUrl, title: "Academic study" }] },
+        { query: "failed quality release", lane: "counterevidence", candidates: [{ url: counterUrl, title: "Failure report" }] },
+        { query: "quality limitations audit", lane: "counterevidence", candidates: [{ url: auditUrl, title: "Limitations audit" }] },
+      ]),
+      policy: { allowedDomains: ["official.test", "academic.test", "counter.test", "audit.test"], maxCandidatesPerQuery: 2, maxQueryLength: 500 },
+    });
+    const plan = demoPlan("외부 근거로 품질 점수를 검증한다");
+    const researchTask = plan.tasks.find((task) => task.id === "T1")!;
+    researchTask.title = "외부 품질 근거 검증";
+    researchTask.objective = "공식 및 독립 출처로 보호 품질 점수를 검증한다";
+    researchTask.executionMode = "external-research";
+    researchTask.requiredCapabilities = ["external-network"];
+    researchTask.maxAttempts = 1;
+    const base = new MockAgentBackend(async (request) => {
+      if (["candidate_plan", "architect_plan", "architect_repair"].includes(request.purpose)) return structuredClone(plan);
+      return demoHandler(request);
+    });
+    const childRequests: AgentRequest[] = [];
+    let synthesisRequest: AgentRequest | undefined;
+    const backend: AgentBackend = {
+      info: () => base.info(),
+      close: () => base.close(),
+      run: async (request: AgentRequest, signal?: AbortSignal): Promise<AgentResponse> => {
+        if (request.purpose === "synthesize_research_evidence_packets") {
+          synthesisRequest = request;
+          assert.equal(request.hostToolSession, undefined);
+          assert.equal(JSON.stringify(request.data).includes("hostToolReceipts"), false);
+          const result: AgentResult = {
+            taskId: "T1", summary: "독립 Evidence Packet 두 개를 종합했다.",
+            claims: [{ statement: officialBody, support: "accepted packet synthesis", requirementIds: ["R1"], evidenceRefs: [{ kind: "evidence", ordinal: 0 }] }],
+            evidence: ["accepted immutable evidence packets"], deliverables: [researchTask.deliverable],
+            checks: ["two child envelopes synthesized"], uncertainties: [], confidence: 0.9,
+          };
+          return { text: JSON.stringify(result), threadId: "parent-synthesis-thread", turnId: "parent-synthesis-turn", durationMs: 1 };
+        }
+        if (!request.purpose.startsWith("execute_research_child_")) return base.run(request, signal);
+        childRequests.push(request);
+        const session = request.hostToolSession;
+        assert.ok(session);
+        assert.deepEqual(session.tools.map((tool) => tool.name).sort(), ["search-discover", "web-fetch"]);
+        const isCounter = request.purpose.endsWith("counterevidence");
+        const cells = isCounter ? [
+          { cellId: "counter-failure", query: "failed quality release", lane: "counterevidence" as const, url: counterUrl, body: counterBody, snapshotHash: counter.snapshotHash },
+          { cellId: "counter-audit", query: "quality limitations audit", lane: "counterevidence" as const, url: auditUrl, body: auditBody, snapshotHash: audit.snapshotHash },
+        ] : [
+          { cellId: "official", query: "official protected quality", lane: "official" as const, url: officialUrl, body: officialBody, snapshotHash: official.snapshotHash },
+          { cellId: "academic", query: "independent quality baseline", lane: "academic" as const, url: academicUrl, body: academicBody, snapshotHash: academic.snapshotHash },
+        ];
+        const calls = [
+          ...cells.map((cell) => ({ tool: "search-discover" as const, arguments: { query: cell.query, lane: cell.lane, maxCandidates: 1 } })),
+          ...cells.map((cell) => ({ tool: "web-fetch" as const, arguments: { mode: "replay", snapshotHash: cell.snapshotHash } })),
+        ];
+        const receipts: JsonValue[] = [];
+        for (const [index, call] of calls.entries()) {
+          const invoked = await session.invoke({
+            threadId: "research-thread", turnId: "research-turn", callId: `research-call-${index}`,
+            tool: call.tool, arguments: call.arguments,
+          });
+          receipts.push(invoked.receipt as never);
+        }
+        const result: AgentResult = {
+          taskId: request.workOrderId!, summary: `${request.purpose} 자료를 검증했다.`,
+          claims: [{
+            statement: cells[0]!.body, support: "host verification pending",
+            requirementIds: ["R1"], evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
+          }],
+          evidence: ["host verification pending"], deliverables: [`accepted ${isCounter ? "counterevidence" : "official"} Evidence Packet`],
+          checks: ["two isolated source cells collected"], uncertainties: [], confidence: 0.9,
+          researchPlan: {
+            queries: cells.map((cell) => ({ cellId: cell.cellId, query: cell.query, lane: cell.lane, maxCandidates: 1, freshnessWindowDays: 365 })),
+            claims: [{
+              claimText: cells[0]!.body, modality: "fact",
+              citations: [{ sourceUrl: cells[0]!.url, quotes: [cells[0]!.body] }],
+              status: "supported", assumptions: [], falsifier: "A newer official report provides a different score.",
+            }],
+          },
+        };
+        return {
+          text: JSON.stringify(result), threadId: request.threadKey, turnId: `${request.threadKey}:turn`, durationMs: 1,
+          hostToolReceipts: receipts,
+        };
+      },
+    };
+    const cfg = {
+      ...config(),
+      webResearch: {
+        ...config().webResearch,
+        enabled: true,
+        allowedOrigins: ["https://official.test", "https://academic.test", "https://counter.test", "https://audit.test"],
+      },
+    };
+    const state = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }), store, config: cfg, workspace,
+      sourceIdentity: "build:test-company-research-two-stage", researchRuntime, researchDiscoveryRuntime,
+    }).start(plan.goal);
+
+    assert.equal(state.status, "completed", state.error);
+    assert.match(state.tasks.T1?.result?.evidence[0] ?? "", /accepted immutable evidence packets/);
+    assert.equal(childRequests.length, 2);
+    assert.equal(new Set(childRequests.map((request) => request.workOrderId)).size, 2);
+    assert.equal(new Set(childRequests.map((request) => request.agentSlotId)).size, 2);
+    assert.equal(new Set(childRequests.map((request) => request.threadKey)).size, 2);
+    assert.ok(synthesisRequest);
+    assert.notEqual(synthesisRequest.agentSlotId, state.harnessV2?.workOrders.T1?.assignedAgentId);
+    assert.equal(synthesisRequest.prompt.includes("receiptId"), false);
+    assert.equal(synthesisRequest.prompt.includes("bodyUtf8"), false);
+    assert.deepEqual(synthesisRequest.inputArtifactRefs?.map((ref) => ref.artifactId).sort(),
+      Object.values(state.harnessV2?.artifactHeads ?? {}).filter((ref) => ref.artifactId.includes("--evidence-packet")).map((ref) => ref.artifactId).sort());
+    const envelopeRef = state.tasks.T1?.researchEnvelopeRef;
+    assert.ok(envelopeRef);
+    const envelope = await new BlackboardStore(store.runDirectory).read(envelopeRef);
+    assert.equal(envelope.verificationStatus, "accepted");
+    assert.equal((envelope.content as { claimGraph: { claims: unknown[] } }).claimGraph.claims.length, 2);
+    assert.equal(JSON.stringify(envelope.content).includes("bodyUtf8"), false);
+    assert.equal(state.tasks.T1?.hostToolReceiptArtifactIds?.length ?? 0, 8);
+    const researchCell = Object.values(state.harnessV2?.missionCells ?? {})
+      .find((cell) => cell.workOrderIds.includes("T1"));
+    assert.ok(researchCell);
+    assert.equal(researchCell.workOrderIds.length, 3);
+    assert.ok(researchCell.admissionReceiptRef);
+    const admissionArtifact = await new BlackboardStore(store.runDirectory).read(researchCell.admissionReceiptRef);
+    const admission = admissionArtifact.content as unknown as { executionBindings: Array<{ workOrderId: string }> };
+    assert.deepEqual(admission.executionBindings.map((binding) => binding.workOrderId).sort(), researchCell.workOrderIds.slice().sort());
+    assert.equal(Object.values(state.harnessV2?.artifactHeads ?? {}).filter((ref) =>
+      ref.artifactId.startsWith("gate-T1--research-") && ref.artifactId.endsWith("-g0")).length, 2);
+    const isolationArtifact = await new BlackboardStore(store.runDirectory)
+      .readHead(`${researchCell.id}-T1-source-isolation`);
+    assert.equal(isolationArtifact.kind, "source-isolation");
+    assert.equal(isolationArtifact.verificationStatus, "accepted");
+    const isolationReceipt = isolationArtifact.content as unknown as SourceIsolationReceipt;
+    assert.equal(isolationReceipt.overlapNumerator, 0);
+    assert.equal(isolationReceipt.overlapDenominator, 4);
+    assert.equal(isolationReceipt.overlapRate, 0);
+    assert.equal(isolationReceipt.eligibleForIndependentQuorum, true);
+    assert.equal(isolationReceipt.eligibleSourceFamilyHashes.length, 4);
+    assert.equal(isolationReceipt.submittedArtifactRevisionRefs.length, 12);
+    assert.ok(isolationReceipt.submittedArtifactRevisionRefs.some((ref) =>
+      ref.artifactId === envelopeRef.artifactId && ref.contentHash === envelopeRef.contentHash));
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
@@ -816,6 +1350,7 @@ test("REAL resume rechecks persisted capability demand before migration or execu
       tasks: recordsFromPlan(plan),
       threadIds: {},
       metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
+      harness: currentHarnessState(cfg),
     };
     const store = await createdRunStore(workspace, ".state", initial.runId);
     await store.save(initial);
@@ -1043,9 +1578,16 @@ test("invalid worker evidence references are repaired exactly without repeating 
     assert.match(repair.prompt, /Claim 0 for T3 has invalid evidence references/);
     assert.match(repair.prompt, /invalid claim index: 0, 1/);
     assert.equal(repair.taskId, undefined);
-    assert.equal(repair.workOrderId, undefined);
-    assert.equal(repair.roleContract, undefined);
-    assert.equal(repair.effectiveToolPolicy, undefined);
+    assert.equal(repair.workOrderId, "T3");
+    assert.equal(repair.agentSlotId, state.harnessV2?.workOrders.T3?.assignedAgentId);
+    assert.equal(repair.roleContract?.agentId, repair.agentSlotId);
+    assert.deepEqual(repair.effectiveToolPolicy, {
+      allowedTools: [],
+      network: "off",
+      allowedDomains: [],
+      readScopes: [],
+      writeScopes: [],
+    });
     assert.equal(repair.hostToolSession, undefined);
     assert.deepEqual(state.tasks.T3?.result?.claims[0]?.evidenceRefs, [
       { kind: "evidence", ordinal: 0 },
@@ -1111,7 +1653,7 @@ test("incomplete evidence-reference repair is rejected before a clean task retry
   }
 });
 
-test("team synthesis releases a ready parent without waiting for a slow sibling subtree", async () => {
+test("conflict-free team unions do not introduce reducer latency across sibling subtrees", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-event-driven-synthesis-"));
   try {
     const plan = demoPlan("event-driven team synthesis");
@@ -1154,21 +1696,11 @@ test("team synthesis releases a ready parent without waiting for a slow sibling 
       },
     );
 
-    let slowLeafFinishedAt = Number.POSITIVE_INFINITY;
-    let readyParentStartedAt = Number.POSITIVE_INFINITY;
     const backend = new MockAgentBackend(async (request) => {
       if (["candidate_plan", "architect_plan", "architect_repair"].includes(request.purpose)) {
         return plan;
       }
-      if (request.purpose === "team_synthesis") {
-        const teamId = (request.data as { team: { id: string } }).team.id;
-        if (teamId === "TEAM-RISK-LEAF") {
-          await new Promise((resolve) => setTimeout(resolve, 1_500));
-          slowLeafFinishedAt = Date.now();
-        } else if (teamId === "TEAM-INTEL") {
-          readyParentStartedAt = Date.now();
-        }
-      }
+      if (request.purpose === "team_synthesis") throw new Error("conflict-free reducer must be elided");
       return demoHandler(request);
     });
     const cfg = config();
@@ -1181,10 +1713,8 @@ test("team synthesis releases a ready parent without waiting for a slow sibling 
     }).start(plan.goal);
 
     assert.equal(state.status, "completed", state.error);
-    assert.ok(
-      readyParentStartedAt < slowLeafFinishedAt,
-      `ready parent started at ${readyParentStartedAt}, but slow sibling leaf finished at ${slowLeafFinishedAt}`,
-    );
+    assert.equal(backend.calls.some((call) => call.purpose === "team_synthesis"), false);
+    assert.ok(Object.values(state.teams).every((team) => team.status === "accepted"));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1193,6 +1723,7 @@ test("team synthesis releases a ready parent without waiting for a slow sibling 
 test("missing accepted work produces partial output without false requirement coverage", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-manager-"));
   try {
+    await initializeCleanGitWorkspace(workspace);
     const backend = new MockAgentBackend(async (request) => {
       if (request.purpose === "manager_review") {
         const data = request.data as {
@@ -1223,7 +1754,6 @@ test("missing accepted work produces partial output without false requirement co
       store,
       config: cfg,
       workspace,
-      sourceIdentity: "build:test-manager-negative-trace",
     });
     const state = await orchestrator.start("manager gate goal");
     assert.equal(state.status, "partial", state.error);
@@ -1237,6 +1767,29 @@ test("missing accepted work produces partial output without false requirement co
       coverage.supportingClaimIds.length === 0 && coverage.supportingEvidenceIds.length === 0,
     ));
     assert.match(state.final.answer, /BLOCKED — this is a partial evidence report/);
+    const finalIntegrationOrder = Object.values(state.harnessV2?.workOrders ?? {}).find((record) =>
+      record.order.authorityKind === "integration" &&
+      record.order.serviceIds?.includes("integration.executive-report"));
+    assert.equal(finalIntegrationOrder?.state, "INTEGRATED");
+    assert.equal(finalIntegrationOrder?.lease, undefined);
+    assert.ok(finalIntegrationOrder?.order.inputArtifactIds.every((artifactId) =>
+      artifactId.startsWith("accepted-result-") || artifactId.startsWith("handoff-")),
+    );
+    const blackboard = new BlackboardStore(store.runDirectory, state.runId);
+    const releaseRef = Object.values(state.harnessV2?.artifactHeads ?? {}).find((ref) =>
+      ref.artifactId.startsWith("executive-release-"));
+    assert.ok(releaseRef, "partial runs must still publish a traceable NO_GO Executive Release");
+    const release = await blackboard.read(releaseRef);
+    assert.equal(
+      release.verificationStatus,
+      "accepted",
+      "artifact verification records whether the NO_GO report itself is valid, not whether product release is approved",
+    );
+    assert.equal((release.content as { releaseDecision?: string }).releaseDecision, "NO_GO");
+    assert.ok((release.content as { blockers?: string[] }).blockers?.length);
+    assert.equal(release.createdBy.workOrderId, finalIntegrationOrder?.order.id);
+    assert.ok(release.createdBy.attemptId);
+    assert.ok((release.createdBy.fencingToken ?? 0) > 0);
     const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
       .map((line) => JSON.parse(line) as { type: string; taskId?: string; message?: string });
     assert.equal(events.filter((event) => event.type === "task_rework" && event.taskId === "T1").length, 1);
@@ -1299,12 +1852,22 @@ test("zero accepted tasks surface the causal root failures instead of a generic 
     assert.equal(events.some((event) => event.type === "task_rework"), false);
     assert.equal(events.some((event) => event.type === "evolution_trace_failed"), false);
     assert.match(events.find((event) => event.type === "run_failed")?.message ?? "", /T1 \(핵심 조사\)/);
+    const finalIntegrationOrder = Object.values(state.harnessV2?.workOrders ?? {}).find((record) =>
+      record.order.authorityKind === "integration" &&
+      record.order.serviceIds?.includes("integration.executive-report"));
+    assert.equal(finalIntegrationOrder?.state, "FAILED");
+    assert.equal(finalIntegrationOrder?.lease, undefined, "failed runs must not leave Final Integration authority live");
+    assert.equal(
+      Object.keys(state.harnessV2?.artifactHeads ?? {}).some((artifactId) => artifactId.startsWith("executive-release-")),
+      false,
+      "zero-accepted-task failures must not fabricate an Executive Release",
+    );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
-test("deterministic synthesis replaces untrusted multi-packet reducer unions without a repair turn", async () => {
+test("deterministic synthesis elides untrusted multi-packet reducer unions without a repair turn", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-repair-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1312,17 +1875,6 @@ test("deterministic synthesis replaces untrusted multi-packet reducer unions wit
         const invalid = demoPlan("repair goal");
         invalid.teams[1]!.leadRank = "vice_chair";
         return invalid;
-      }
-      if (request.purpose === "team_synthesis") {
-        const data = request.data as {
-          attempt: number;
-          team: { id: string };
-        };
-        if (data.team.id === "TEAM-ROOT" && data.attempt === 0) {
-          const packet = await demoHandler(request) as { sourceTaskIds: string[] };
-          packet.sourceTaskIds = [...packet.sourceTaskIds, packet.sourceTaskIds[0]!];
-          return packet;
-        }
       }
       return demoHandler(request);
     });
@@ -1339,34 +1891,17 @@ test("deterministic synthesis replaces untrusted multi-packet reducer unions wit
           call.purpose === "team_synthesis" &&
           (call.data as { team: { id: string } }).team.id === "TEAM-ROOT",
       ).length,
-      1,
+      0,
     );
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
 });
 
-test("deterministic synthesis removes an invented multi-packet reducer claim", async () => {
+test("deterministic synthesis never requests an invented multi-packet reducer claim", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-invented-reducer-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
-      if (
-        request.purpose === "team_synthesis" &&
-        (request.data as { team: { id: string }; attempt: number }).team.id === "TEAM-ROOT" &&
-        (request.data as { attempt: number }).attempt === 0
-      ) {
-        const original = await demoHandler(request);
-        const packet = structuredClone(original) as {
-          claims: Array<{ statement: string; support: string; requirementIds: string[]; evidenceRefs: Array<{ kind: "evidence"; ordinal: number }> }>;
-        };
-        packet.claims.push({
-          statement: "invented reducer claim",
-          support: "no trusted leaf",
-          requirementIds: ["R2"],
-          evidenceRefs: [{ kind: "evidence", ordinal: 0 }],
-        });
-        return packet;
-      }
       return demoHandler(request);
     });
     const cfg = config();
@@ -1379,7 +1914,7 @@ test("deterministic synthesis removes an invented multi-packet reducer claim", a
     assert.equal(backend.calls.filter((call) =>
       call.purpose === "team_synthesis" &&
       (call.data as { team: { id: string } }).team.id === "TEAM-ROOT",
-    ).length, 1);
+    ).length, 0);
     assert.equal(
       JSON.stringify({
         supportedClaims: state.final?.supportedClaims,
@@ -1395,7 +1930,7 @@ test("deterministic synthesis removes an invented multi-packet reducer claim", a
   }
 });
 
-test("a reducer failure falls back to an immutable deterministic team packet", async () => {
+test("a complete conflict-free union does not depend on reducer availability", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-reducer-fallback-"));
   try {
     const backend = new MockAgentBackend(async (request) => {
@@ -1421,8 +1956,9 @@ test("a reducer failure falls back to an immutable deterministic team packet", a
     assert.deepEqual(state.teams["TEAM-ROOT"]?.packet?.sourceTaskIds, ["T1", "T2", "T3"]);
     const events = (await readFile(store.eventsPath, "utf8")).trim().split("\n")
       .map((line) => JSON.parse(line) as { type: string; status?: string });
+    assert.equal(backend.calls.some((call) => call.purpose === "team_synthesis"), false);
     assert.ok(events.some((event) =>
-      event.type === "team_synthesis_fallback" && event.status === "deterministic_fallback"));
+      event.type === "team_synthesis_elided" && event.status === "host_canonical_union"));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1765,6 +2301,7 @@ test("legacy resume fails closed when an accepted result has no verifiable v2 pr
       tasks,
       threadIds: {},
       metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
+      harness: currentHarnessState(cfg),
     };
     const registry = organizationRegistryV2();
     const persistedOrder = workOrderFromTask(tasks.T2!, { missionId: `mission:${initial.runId}`, registry });
@@ -1799,6 +2336,71 @@ test("legacy resume fails closed when an accepted result has no verifiable v2 pr
   }
 });
 
+test("Company Final Integration authority is interrupted and re-fenced before resume", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-final-integration-resume-"));
+  try {
+    await initializeCleanGitWorkspace(workspace);
+    const cfg = config();
+    const store = await createdRunStore(workspace, ".state", "run-final-integration-resume");
+    const controller = new AbortController();
+    let interruptedCritic = false;
+    const interruptedBackend = new MockAgentBackend(async (request) => {
+      if (request.purpose === "critic_review" && !interruptedCritic) {
+        interruptedCritic = true;
+        controller.abort(new ProcessInterruptedError("SIGINT"));
+        return new Error("simulated process interruption during final critic");
+      }
+      return demoHandler(request);
+    });
+    const interrupted = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend: interruptedBackend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+    }).start("final integration resume fencing", controller.signal);
+
+    assert.equal(interrupted.status, "interrupted");
+    const interruptedFinal = Object.values(interrupted.harnessV2?.workOrders ?? {}).find((record) =>
+      record.order.authorityKind === "integration" &&
+      record.order.serviceIds?.includes("integration.executive-report"));
+    assert.equal(
+      interruptedFinal?.state,
+      "INTERRUPTED",
+      "process interruption must revoke EXECUTING Final Integration authority before persistence",
+    );
+    assert.ok(interruptedFinal?.lease, "the interrupted lease identity must remain available for fencing advancement");
+    const interruptedLease = structuredClone(interruptedFinal.lease);
+
+    const resumedBackend = new MockAgentBackend(demoHandler);
+    const resumed = await new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend: resumedBackend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+    }).resume(await store.load());
+
+    assert.equal(resumed.status, "completed", resumed.error);
+    const resumedFinal = Object.values(resumed.harnessV2?.workOrders ?? {}).find((record) =>
+      record.order.authorityKind === "integration" &&
+      record.order.serviceIds?.includes("integration.executive-report"));
+    assert.equal(resumedFinal?.state, "INTEGRATED");
+    assert.equal(resumedFinal?.lease, undefined);
+    const blackboard = new BlackboardStore(store.runDirectory, resumed.runId);
+    const releaseRef = Object.values(resumed.harnessV2?.artifactHeads ?? {}).find((ref) =>
+      ref.artifactId.startsWith("executive-release-"));
+    assert.ok(releaseRef);
+    const release = await blackboard.read(releaseRef);
+    assert.equal(release.createdBy.workOrderId, resumedFinal?.order.id);
+    assert.notEqual(release.createdBy.attemptId, interruptedLease.leaseId);
+    assert.ok(
+      (release.createdBy.fencingToken ?? 0) > interruptedLease.fencingToken,
+      "resumed publication must advance the fencing token instead of reusing stale authority",
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("process interruption is resumable while explicit cancellation remains terminal", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "luna-interrupted-resume-"));
   try {
@@ -1827,6 +2429,7 @@ test("process interruption is resumable while explicit cancellation remains term
       tasks,
       threadIds: {},
       metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
+      harness: currentHarnessState(cfg),
     };
     const registry = organizationRegistryV2();
     initial.harnessV2 = {
@@ -1908,6 +2511,72 @@ test("process interruption is resumable while explicit cancellation remains term
     }).resume(await cancelledStore.load());
     assert.equal(unchanged.status, "cancelled");
     assert.equal(cancelledBackend.calls.length, 0);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an exhausted execution budget fails only the task before lease acquisition", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-exhausted-task-budget-"));
+  try {
+    const cfg = config();
+    const plan = demoPlan("exhausted task budget goal");
+    const task = recordsFromPlan(plan).T1!;
+    task.status = "ready";
+    const registry = organizationRegistryV2();
+    const order = workOrderFromTask(task, { missionId: "mission:run-exhausted-task-budget", registry });
+    const workOrder = createWorkOrderRecord(order, "READY", new Date().toISOString(), registry);
+    workOrder.executionAttempts = workOrder.order.maxExecutionAttempts;
+    const initial: RunState = {
+      schemaVersion: 1,
+      revision: 0,
+      runId: "run-exhausted-task-budget",
+      status: "running",
+      goal: "exhausted task budget goal",
+      workspace,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      config: cfg,
+      organization: companySnapshot(),
+      plan,
+      teams: teamRecordsFromPlan(plan),
+      tasks: { T1: task },
+      threadIds: {},
+      metrics: { modelCalls: 0, retries: 0, rateLimitEvents: 0, maxActiveCalls: 0 },
+      harness: currentHarnessState(cfg),
+      harnessV2: {
+        orgVersion: "lab-128@2",
+        workOrders: { T1: workOrder },
+        artifactHeads: {},
+        councils: {},
+        missionCells: {},
+        messages: [],
+        oracleSuites: {},
+        experiments: {},
+        knowledgeCapsules: {},
+      },
+    };
+    const store = await createdRunStore(workspace, ".state", initial.runId);
+    await store.save(initial);
+    const backend = new MockAgentBackend(demoHandler);
+    const orchestrator = new SwarmOrchestrator({
+      gateway: new AgentGateway({ backend, config: cfg }),
+      store,
+      config: cfg,
+      workspace,
+    }) as unknown as {
+      state: RunState;
+      executeTask(taskId: string): Promise<void>;
+    };
+    orchestrator.state = await store.load();
+
+    await orchestrator.executeTask("T1");
+
+    const persisted = await store.load();
+    assert.equal(persisted.tasks.T1?.status, "failed");
+    assert.equal(persisted.tasks.T1?.error, "Execution attempt budget is exhausted");
+    assert.equal(persisted.harnessV2?.workOrders.T1?.state, "FAILED");
+    assert.equal(backend.calls.length, 0);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

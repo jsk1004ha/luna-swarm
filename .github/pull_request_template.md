@@ -10,10 +10,18 @@ Explain the implementation and important alternatives considered.
 
 List exact commands and results. Include regression tests, fixtures, benchmark receipts, or screenshots where relevant.
 
+- [ ] `npm run lint`
 - [ ] `npm run check`
 - [ ] `npm test`
 - [ ] `npm run build`
 - [ ] Additional focused validation is described below.
+
+## Safety boundaries
+
+- [ ] Host capability scopes remain enforced
+- [ ] Work Order / artifact / receipt provenance remains intact
+- [ ] Coding changes still pass protected checks, independent audit, and Single Committer
+- [ ] Evolution promotion remains manual and rollback-safe
 
 ## Risk review
 

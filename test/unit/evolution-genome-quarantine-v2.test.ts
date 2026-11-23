@@ -17,6 +17,7 @@ import {
   GenomeQuarantinedError,
   GenomeQuarantineStore,
 } from "../../src/evolution/registry/quarantine-store.js";
+import { StablePointerStore } from "../../src/evolution/registry/stable-pointer-store.js";
 
 const GATE_A = canonicalSha256("gate-a");
 const GATE_B = canonicalSha256("gate-b");
@@ -167,6 +168,112 @@ test("global and workload quarantine are revisioned, content-addressed, and fail
     GenomeQuarantinedError,
   );
   await quarantine.assertPinAllowed({ genomeId: scopedGenome.genomeId, genomeHash: scopedHash, workloadClass: "research" });
+});
+
+test("Stable Pointer promotion rejects a bundle whose immutable genome is quarantined", async (t) => {
+  const { workspace, bundles, genomes, quarantine } = await fixture(t);
+  const workloadClass = "engineering.bugfix";
+  const stored = await genomes.publish(createOrganizationGenome(genome("promotion-quarantine-genome")));
+  const genomeHash = organizationGenomeHash(stored);
+  const candidate = createExecutionBundle({
+    bundleId: "bundle-quarantined-genome",
+    genomeId: stored.genomeId,
+    parentBundleIds: [],
+    sourceCommit: "source-identity",
+    modelConfigHash: canonicalSha256("model"),
+    componentHashes: { genome: genomeHash },
+    schemaVersions: { genome: 1, bundle: 1 },
+    workloadClasses: [workloadClass],
+    createdAt: "2026-08-13T00:00:00.000Z",
+    status: "stable",
+  });
+  await bundles.publish(candidate);
+  await quarantine.quarantine({
+    genomeId: stored.genomeId,
+    genomeHash,
+    scope: { type: "workload", workloadClass },
+    expectedRevision: 0,
+    reason: "candidate regression",
+    quarantinedAt: "2026-08-13T01:00:00.000Z",
+  });
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore: bundles,
+    quarantineStore: quarantine,
+    bootstrapAuthority: { bundleId: candidate.bundleId, bundleHash: candidate.bundleHash },
+  });
+
+  await assert.rejects(
+    () => pointers.promote({
+      workloadClass,
+      bundleId: candidate.bundleId,
+      expectedGeneration: null,
+      mode: "manual",
+      actor: "system-bootstrap",
+      reason: "must not activate quarantined genome",
+      bootstrap: true,
+    }),
+    GenomeQuarantinedError,
+  );
+  assert.equal(await pointers.get(workloadClass), null);
+});
+
+test("promotion and quarantine racing serializes into reject-before-activation or emergency stop-after-activation", async (t) => {
+  const { workspace, bundles, genomes, quarantine } = await fixture(t);
+  const workloadClass = "engineering.bugfix";
+  const stored = await genomes.publish(createOrganizationGenome(genome("promotion-race-genome")));
+  const genomeHash = organizationGenomeHash(stored);
+  const candidate = createExecutionBundle({
+    bundleId: "bundle-promotion-race",
+    genomeId: stored.genomeId,
+    parentBundleIds: [],
+    sourceCommit: "source-identity",
+    modelConfigHash: canonicalSha256("model"),
+    componentHashes: { genome: genomeHash },
+    schemaVersions: { genome: 1, bundle: 1 },
+    workloadClasses: [workloadClass],
+    createdAt: "2026-08-13T00:00:00.000Z",
+    status: "stable",
+  });
+  await bundles.publish(candidate);
+  const pointers = new StablePointerStore(workspace, {
+    bundleStore: bundles,
+    quarantineStore: quarantine,
+    bootstrapAuthority: { bundleId: candidate.bundleId, bundleHash: candidate.bundleHash },
+  });
+
+  const results = await Promise.allSettled([
+    pointers.promote({
+      workloadClass,
+      bundleId: candidate.bundleId,
+      expectedGeneration: null,
+      mode: "manual",
+      actor: "system-bootstrap",
+      reason: "race activation",
+      bootstrap: true,
+    }),
+    quarantine.quarantine({
+      genomeId: stored.genomeId,
+      genomeHash,
+      scope: { type: "workload", workloadClass },
+      expectedRevision: 0,
+      reason: "race quarantine",
+      quarantinedAt: "2026-08-13T01:00:00.000Z",
+    }),
+  ]);
+  assert.ok(results.filter((result) => result.status === "fulfilled").length >= 1);
+  const active = await pointers.get(workloadClass);
+  if (active) {
+    await assert.rejects(
+      () => quarantine.assertPinAllowed({ genomeId: stored.genomeId, genomeHash, workloadClass }),
+      GenomeQuarantinedError,
+      "a quarantine serialized after activation must stop future pins",
+    );
+  } else {
+    await assert.rejects(
+      () => quarantine.assertPinAllowed({ genomeId: stored.genomeId, genomeHash, workloadClass }),
+      GenomeQuarantinedError,
+    );
+  }
 });
 
 test("concurrent quarantine writers enforce revision CAS", async (t) => {

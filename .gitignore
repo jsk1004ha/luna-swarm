@@ -19,3 +19,4 @@ coverage/
 progress.md
 *.log
 .DS_Store
+.venv-artifacts/

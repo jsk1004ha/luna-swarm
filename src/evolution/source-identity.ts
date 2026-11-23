@@ -114,10 +114,23 @@ export async function resolveEvolutionSourceIdentity(
 ): Promise<SourceIdentityResolution> {
   try {
     const identity = await resolveLocalSourceIdentity(workspace, explicitSource);
+    if (/^git:[a-f0-9]{40,64}:dirty:[a-f0-9]{64}$/.test(identity)) {
+      return {
+        mode: "observation_only",
+        reason: "Dirty Git worktrees are development observations and cannot authorize Evolution baseline changes",
+      };
+    }
+    const origin = identity.startsWith("git:") ? "git" : explicitOrigin(explicitSource);
+    if (origin !== "git") {
+      return {
+        mode: "observation_only",
+        reason: "Non-Git Evolution baselines require a persisted signed release-lineage authority; plain config and environment identities are observation-only",
+      };
+    }
     return {
       mode: "verified",
       identity,
-      origin: identity.startsWith("git:") ? "git" : explicitOrigin(explicitSource),
+      origin,
     };
   } catch (error) {
     if (!(error instanceof SourceIdentityUnavailableError)) throw error;

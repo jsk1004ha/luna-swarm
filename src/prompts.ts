@@ -97,6 +97,9 @@ export function workerPrompt(
   task: TaskRecord,
   dependencyResults: AgentResult[],
 ): string {
+  const executionInstructions = task.executionMode === "external-research"
+    ? "\n\nEXTERNAL-RESEARCH EVIDENCE CONTRACT:\nUse the host web-fetch tool for every dynamic web source used in a claim. Preserve the returned sourceUrl, finalUrl, snapshotHash, and contentHash together in the evidence entry, plus a short directly supporting excerpt or an explicit verification-needed limitation. A URL by itself is not verified evidence. Never claim a fetch or immutable snapshot that the tool did not return."
+    : "";
   return `Execute exactly one swarm task.\n\nOVERALL GOAL:\n${goal}\n\nTASK CONTRACT:\n${JSON.stringify({
     id: task.id,
     title: task.title,
@@ -107,7 +110,66 @@ export function workerPrompt(
     acceptanceCriteria: task.acceptanceCriteria,
     requirementIds: task.requirementIds,
     feedback: task.feedback,
-  })}\n\nACCEPTED DEPENDENCY RESULTS:\n${JSON.stringify(dependencyResults)}\n\nDEPENDENCY PROVENANCE BOUNDARY:\nAccepted dependency results are immutable host-verified artifacts that already passed their own G0/G2/G3 and independent review. A reasoning-only synthesis task may rely on and preserve their claims, evidence descriptions, file names, and limitations without reopening original files. Label inherited evidence as dependency evidence; never claim that this task directly read a file or ran a tool it was not authorized to use.\n\nProduce a self-contained result. The first item in deliverables must be the TASK CONTRACT deliverable string copied exactly, byte for byte; put concrete produced details in later deliverable items. Distinguish evidence from inference. State checks actually performed and remaining uncertainty. Every TASK CONTRACT requirementId must appear in at least one claim; when evidence is insufficient, use a traceable claim that explicitly records the unsupported or unverified status instead of omitting the requirement. Every claim must list only task requirementIds it directly supports and cite one or more actual evidence/check entries by zero-based {kind, ordinal}. Before returning, verify every evidence ordinal is within the current result arrays: evidence ordinals must be 0 <= ordinal < evidence.length and check ordinals must be 0 <= ordinal < checks.length. Do not claim work that was not performed. Return only JSON.`;
+  })}\n\nACCEPTED DEPENDENCY RESULTS:\n${JSON.stringify(dependencyResults)}\n\nDEPENDENCY PROVENANCE BOUNDARY:\nAccepted dependency results are immutable host-verified artifacts that already passed their own G0/G2/G3 and independent review. A reasoning-only synthesis task may rely on and preserve their claims, evidence descriptions, file names, and limitations without reopening original files. Label inherited evidence as dependency evidence; never claim that this task directly read a file or ran a tool it was not authorized to use.${executionInstructions}\n\nProduce a self-contained result. The first item in deliverables must be the TASK CONTRACT deliverable string copied exactly, byte for byte; put concrete produced details in later deliverable items. Distinguish evidence from inference. State checks actually performed and remaining uncertainty. Every TASK CONTRACT requirementId must appear in at least one claim; when evidence is insufficient, use a traceable claim that explicitly records the unsupported or unverified status instead of omitting the requirement. Every claim must list only task requirementIds it directly supports and cite one or more actual evidence/check entries by zero-based {kind, ordinal}. Before returning, verify every evidence ordinal is within the current result arrays: evidence ordinals must be 0 <= ordinal < evidence.length and check ordinals must be 0 <= ordinal < checks.length. Do not claim work that was not performed. Return only JSON.`;
+}
+
+function executionModeReviewBoundary(task: TaskRecord): string {
+  if (task.executionMode === "workspace-inspection") {
+    return "\n\nEXECUTION-MODE REVIEW BOUNDARY:\nThis task was authorized only for workspace read/search. Judge the completeness and accuracy of its static inspection. Do not require shell commands, tests, browser execution, observed HTTP/WebSocket responses, runtime reproduction, writes, or performance measurements. Record those as downstream command-verification or workspace-change work when useful, not as a defect in this read-only artifact. Explicitly labelled unverified runtime behavior is a valid limitation, not a fabricated claim.";
+  }
+  if (task.executionMode === "external-research") {
+    return "\n\nEXECUTION-MODE REVIEW BOUNDARY:\nThis task was authorized only for host-mediated web-fetch. Host-authenticated receipt artifacts and immutable snapshot/content hashes are the provenance authority. Require each relied-on dynamic source to preserve the returned hashes and a directly supporting excerpt or an explicit verification-needed limitation. Do not require workspace reads, shell commands, local tests, browser automation, or writes from this task.";
+  }
+  return "";
+}
+
+export function codingWorkerInstructions(contract: unknown): string {
+  return `HOST-OWNED BOUNDED CODING CONTRACT:\n${JSON.stringify(contract)}\n\n` +
+    "For this workspace-change task, author every requested file byte in " +
+    "implementationManifest.changes[].contentUtf8. The host alone applies, tests, audits, and commits the " +
+    "accepted manifest. You never directly write, test, execute, or commit it, so never claim that you did. " +
+    "Paths must be repository-relative, unique, within writeScopes, and must never target .git or .luna-swarm. " +
+    "baseCommit must exactly match the host contract. Return the strict coding-result JSON schema.";
+}
+
+export function artifactWorkerInstructions(contract: unknown): string {
+  return `HOST-OWNED BOUNDED ARTIFACT CONTRACT:\n${JSON.stringify(contract)}\n\n` +
+    "For this artifact-production task, author only the declarative artifactManifest. The host alone " +
+    "validates, renders, stores, previews, and structurally checks the requested files after semantic acceptance. " +
+    "You have no workspace-write, command, raw SVG/HTML/script, macro, formula, external-link, or binary authority. " +
+    "Use semantic headings, explicit units and sources, accessible chart descriptions, and the exact locale/timezone " +
+    "in the host contract. Never claim that a file was rendered or validated before the host receipt exists. " +
+    "Return the strict artifact-result JSON schema.";
+}
+
+export function redTeamPrompt(
+  goal: string,
+  task: TaskRecord,
+  result: AgentResult,
+  validatorId: string,
+  phase: "attack" | "reattack",
+  previousFindingFeedback: string[],
+): string {
+  const phaseInstructions = phase === "attack"
+    ? "This is the first attack on this artifact revision. Establish concrete failure conditions before deciding whether it survives.\n\nHOST/WORKER RESPONSIBILITY BOUNDARY:\nG0/G2/G3 receipts, Oracle observations and receipts, reviewer votes, Red Team attack artifacts, and Judge records are host-created after the worker submits this result. Never demand those host artifacts from Blue Team or treat their pre-review absence as a weakness."
+    : "This is a fresh re-attack after Blue Team repair. Re-test every prior RED-TEAM finding against the new artifact, then attempt at least one nearby bypass or regression. Never trust a claimed fix without attacking it again.\n\nHOST/WORKER RESPONSIBILITY BOUNDARY:\nG0/G2/G3 receipts, Oracle observations and receipts, reviewer votes, Red Team attack artifacts, and Judge records are host-created after the worker submits this result. Never demand those host artifacts from Blue Team or treat their pre-review absence as a weakness.";
+  let codingBoundary = task.executionMode === "workspace-change"
+    ? "The implementationManifest is proposed code, not yet applied. Attack its exact bytes, interfaces, state transitions, error handling, trust boundaries, concurrency, recovery, compatibility, and test adequacy. Host-owned protected checks and Single Committer integration happen only after this adversarial gate; do not invent their results."
+    : "Attack the result's claims, calculations, assumptions, edge cases, adversarial inputs, dependency provenance, failure recovery, and decision consequences. Unsupported certainty and a missing counterexample search are defects.";
+  if (task.executionMode === "artifact-production") {
+    codingBoundary += " The artifactManifest is a declarative source, not a rendered file. Attack information hierarchy, data/source/unit correctness, reading order, accessibility descriptions, chart semantics, overflow risk, locale assumptions, and output-to-source mapping. Host rendering and validation happen only after acceptance; do not invent their results.";
+  }
+  codingBoundary += executionModeReviewBoundary(task);
+  return `Act as the independent Red Team. Your only job is to break, falsify, or force revision of the Blue Team artifact before release. You are not its collaborator, editor, or morale reviewer.\n\n${phaseInstructions}\n\nGOAL:\n${goal}\n\nTASK CONTRACT:\n${JSON.stringify({
+    id: task.id,
+    objective: task.objective,
+    executionMode: task.executionMode,
+    requiredCapabilities: task.requiredCapabilities,
+    deliverable: task.deliverable,
+    acceptanceCriteria: task.acceptanceCriteria,
+    requirementIds: task.requirementIds,
+    risk: task.risk,
+  })}\n\nBLUE TEAM ARTIFACT:\n${JSON.stringify(result)}\n\nPRIOR RED-TEAM FINDINGS:\n${JSON.stringify(previousFindingFeedback)}\n\nATTACK AUTHORITY:\nThe host has already bounded the target, files, tools, network, side effects, and Work Order. Within that exact boundary, do not soften analysis because an attack is uncomfortable, impolite, reputationally costly, or resembles malicious thinking. Use the strongest plausible attacker and failure model. Do not expand scope, target a third party, request credentials, create persistence, evade monitoring, cause denial of service, or claim an exploit/test that was not actually observed. These are host authority limits, not reasons to be lenient in-scope.\n\n${codingBoundary}\n\nMANDATORY ATTACK MATRIX:\nReturn exactly these five criteria, once each, using the exact criterion strings below. passed=true means the artifact survived that attack class; passed=false means you found a concrete failure condition. Every note must describe what you attacked and what was observed.\n- requirements-falsification\n- adversarial-input-and-state\n- trust-boundary-and-abuse\n- evidence-contradiction\n- regression-and-bypass\n\nVERDICT RULE:\naccept only if all five attacks survived and issues is empty. revise or reject requires at least one failed attack and at least one concrete issue that Blue Team can reproduce or address. Never lower severity or accept because other reviewers may outvote you. Your validatorId must be exactly ${validatorId}. Return only JSON.`;
 }
 
 export function validatorPrompt(
@@ -118,16 +180,26 @@ export function validatorPrompt(
   auditLens: string,
   workspaceEvidenceAccess: boolean = true,
 ): string {
-  const toolBoundary = workspaceEvidenceAccess
+  let toolBoundary = workspaceEvidenceAccess
     ? "You have bounded read/search access for source verification. Use it only for a material evidence question, inspect a given path at most once, and reuse every earlier tool result in this turn."
     : "This is an artifact-only review lane. The immutable proposed result and task contract are your complete evidence boundary; no workspace tools are provided. Do not attempt to reopen files or penalize the worker merely because this lane is intentionally tool-free.";
+  const codingBoundary = task.executionMode === "workspace-change"
+    ? "\n\nWORKSPACE-CHANGE REVIEW ORDER:\nThe proposed implementationManifest is the worker-authored coding artifact. By design, the host applies it and runs protected checks, audit, diff verification, and Single Committer integration only after this semantic review accepts it. Do not require or penalize the absence of post-acceptance application, repository-status, test, syntax, audit-receipt, or commit evidence in the worker result. Review the exact manifest bytes statically against the pinned contract and available evidence. Accept a semantically complete and credible manifest that truthfully marks host-owned checks pending; the later protected host checks remain an independent veto. Revise or reject only for a concrete code, contract, evidence, or scope defect visible at this review stage."
+    : "";
+  const artifactBoundary = task.executionMode === "artifact-production"
+    ? "\n\nARTIFACT-PRODUCTION REVIEW ORDER:\nThe artifactManifest is the worker-authored semantic source. Host rendering, file storage, previews, and structural receipts occur only after semantic acceptance. Do not require those post-acceptance receipts now. Independently review data/source/unit accuracy, information hierarchy, reading order, text alternatives, chart semantics, locale/timezone, and bounded output intent; host rendering remains a later veto."
+    : "";
+  toolBoundary += artifactBoundary;
+  toolBoundary += executionModeReviewBoundary(task);
   return `Blindly validate a worker result. You have not seen other validators' votes.\n\nAUDIT LENS:\n${auditLens}\n\nREVIEW AUTHORITY:\n${toolBoundary}\n\nGOAL:\n${goal}\n\nTASK:\n${JSON.stringify({
     id: task.id,
     objective: task.objective,
+    executionMode: task.executionMode,
+    requiredCapabilities: task.requiredCapabilities,
     deliverable: task.deliverable,
     acceptanceCriteria: task.acceptanceCriteria,
     requirementIds: task.requirementIds,
-  })}\n\nPROPOSED RESULT:\n${JSON.stringify(result)}\n\nHOST/WORKER RESPONSIBILITY BOUNDARY:\nG0/G2/G3 receipts, Oracle observations and receipts, reviewer votes, and Council records are host-created after the worker submits this result. Never require the worker result to contain or claim those system artifacts. Judge the submitted result's semantic completeness and evidence only; deterministic host gates are evaluated independently. Evaluate only the requirements listed in TASK.requirementIds. Never require or reward adding a mission requirement outside that task-scoped allowlist; uncovered mission requirements belong to their assigned tasks or the final gap report. Accepted dependency results are immutable host-verified inputs. For a reasoning-only synthesis task, preserving their claims, evidence descriptions, file names, and explicit limitations is valid provenance. Never require the current worker to reopen original files or use tools excluded by its executionMode, and never call inherited evidence fabricated merely because the current worker did not repeat the source task. Reject only a false claim of direct inspection or a loss/misstatement of dependency provenance.\n\nYour validatorId must be exactly ${validatorId}. Vote accept only when every material criterion is supported by the worker result itself. Use revise for repairable semantic gaps and reject for a fundamentally wrong result. Return only JSON.`;
+  })}\n\nPROPOSED RESULT:\n${JSON.stringify(result)}\n\nHOST/WORKER RESPONSIBILITY BOUNDARY:\nG0/G2/G3 receipts, Oracle observations and receipts, reviewer votes, and Council records are host-created after the worker submits this result. Never require the worker result to contain or claim those system artifacts. Judge the submitted result's semantic completeness and evidence only; deterministic host gates are evaluated independently. Evaluate only the requirements listed in TASK.requirementIds. Never require or reward adding a mission requirement outside that task-scoped allowlist; uncovered mission requirements belong to their assigned tasks or the final gap report. Accepted dependency results are immutable host-verified inputs. For a reasoning-only synthesis task, preserving their claims, evidence descriptions, file names, and explicit limitations is valid provenance. Never require the current worker to reopen original files or use tools excluded by its executionMode, and never call inherited evidence fabricated merely because the current worker did not repeat the source task. Reject only a false claim of direct inspection or a loss/misstatement of dependency provenance.${codingBoundary}\n\nYour validatorId must be exactly ${validatorId}. Vote accept only when every material criterion is supported by the worker result itself. Use revise for repairable semantic gaps and reject for a fundamentally wrong result. Return only JSON.`;
 }
 
 export function managerPrompt(
@@ -136,6 +208,13 @@ export function managerPrompt(
   result: AgentResult,
   managerId: string,
 ): string {
+  let codingBoundary = task.executionMode === "workspace-change"
+    ? "\n\nWORKSPACE-CHANGE REVIEW ORDER:\nThe implementationManifest is the direct report's complete worker-authored coding artifact. The host applies it and runs protected checks, audit, diff verification, and Single Committer integration only after manager and independent semantic acceptance. Do not require or penalize missing post-acceptance application, repository-status, test, syntax, audit-receipt, or commit evidence. Assess the exact manifest bytes, scope, traceability, and truthful limitations now. Accept a semantically complete and credible manifest with host-owned checks explicitly pending; later protected checks independently veto unsafe or incorrect integration."
+    : "";
+  if (task.executionMode === "artifact-production") {
+    codingBoundary += "\n\nARTIFACT-PRODUCTION REVIEW ORDER:\nThe artifactManifest is the direct report's semantic source. Host rendering, binary storage, previews, and structural receipts occur only after manager and independent semantic acceptance. Review source/data/unit accuracy, information hierarchy, reading order, text alternatives, chart semantics, locale/timezone, and bounded output intent now. Do not treat missing post-acceptance render receipts as a worker defect; the later host renderer remains an independent veto.";
+  }
+  codingBoundary += executionModeReviewBoundary(task);
   return `Review a direct report's result as the accountable department manager. You have not seen the independent auditors' votes.\n\nREVIEW AUTHORITY:\nThis is an artifact-only accountability review. The immutable direct-report result and task contract are your complete evidence boundary; no workspace tools are provided. Do not reopen files or duplicate the independent evidence auditor's source inspection.\n\nGOAL:\n${goal}\n\nTASK CONTRACT:\n${JSON.stringify({
     id: task.id,
     department: task.department,
@@ -143,10 +222,12 @@ export function managerPrompt(
     teamId: task.teamId,
     assigneeRank: `${RANK_LABELS[task.assigneeRank]} (${task.assigneeRank})`,
     objective: task.objective,
+    executionMode: task.executionMode,
+    requiredCapabilities: task.requiredCapabilities,
     deliverable: task.deliverable,
     acceptanceCriteria: task.acceptanceCriteria,
     requirementIds: task.requirementIds,
-  })}\n\nDIRECT REPORT'S RESULT:\n${JSON.stringify(result)}\n\nHOST/WORKER RESPONSIBILITY BOUNDARY:\nG0/G2/G3 receipts, Oracle observations and receipts, reviewer votes, and Council records are host-created after the direct report submits this result. Never require the direct report to attach or claim those system artifacts. Review semantic completeness and evidence in the submitted result; deterministic host gates are evaluated independently. Evaluate only the requirements listed in TASK CONTRACT.requirementIds. Never require or reward adding a mission requirement outside that task-scoped allowlist; uncovered mission requirements belong to their assigned tasks or the final gap report. Accepted dependency results are immutable host-verified inputs. For a reasoning-only synthesis task, preserving their claims, evidence descriptions, file names, and explicit limitations is valid provenance. Never require the current worker to reopen original files or use tools excluded by its executionMode, and never call inherited evidence fabricated merely because the current worker did not repeat the source task. Reject only a false claim of direct inspection or a loss/misstatement of dependency provenance.\n\nYour validatorId must be exactly ${managerId}. Accept only if the departmental deliverable is complete enough to send to independent audit. Return only JSON.`;
+  })}\n\nDIRECT REPORT'S RESULT:\n${JSON.stringify(result)}\n\nHOST/WORKER RESPONSIBILITY BOUNDARY:\nG0/G2/G3 receipts, Oracle observations and receipts, reviewer votes, and Council records are host-created after the direct report submits this result. Never require the direct report to attach or claim those system artifacts. Review semantic completeness and evidence in the submitted result; deterministic host gates are evaluated independently. Evaluate only the requirements listed in TASK CONTRACT.requirementIds. Never require or reward adding a mission requirement outside that task-scoped allowlist; uncovered mission requirements belong to their assigned tasks or the final gap report. Accepted dependency results are immutable host-verified inputs. For a reasoning-only synthesis task, preserving their claims, evidence descriptions, file names, and explicit limitations is valid provenance. Never require the current worker to reopen original files or use tools excluded by its executionMode, and never call inherited evidence fabricated merely because the current worker did not repeat the source task. Reject only a false claim of direct inspection or a loss/misstatement of dependency provenance.${codingBoundary}\n\nYour validatorId must be exactly ${managerId}. Accept only if the departmental deliverable is complete enough to send to independent audit. Return only JSON.`;
 }
 
 export function reducerPrompt(packets: SynthesisPacket[], sourceTaskIds: string[]): string {
@@ -198,7 +279,7 @@ export function finalCriticPrompt(
   failedTasks: Array<{ id: string; status: string; error?: string }>,
   validatorId: string,
 ): string {
-  return `Independently red-team the verified root synthesis before the executive judge writes a final answer. You have not seen a final draft.\n\nGOAL:\n${goal}\n\nREQUIREMENTS:\n${JSON.stringify(requirements)}\n\nROOT SYNTHESIS:\n${JSON.stringify(root)}\n\nUNSUCCESSFUL TASKS:\n${JSON.stringify(failedTasks)}\n\nHOST-VERIFIED PROVENANCE BOUNDARY:\nThe root is an immutable reduction of accepted leaf artifacts whose G0/G2/G3 receipts, Oracle observations, and independent reviewer decisions were already verified by the host. You do not have a raw workspace tool in this final review. Do not fail or reject merely because you cannot reopen the original files; instead assess the supplied claim/evidence lineage and require any remaining provenance limitation to stay explicit.\n\nYour validatorId must be exactly ${validatorId}. Evaluate requirement coverage, provenance limits, unresolved conflicts, unsupported certainty, costly failure modes, and whether gaps must remain explicit. Accept means no material final-answer change is needed. Revise means the executive judge can repair framing, caveats, traceable specificity, or next actions using the verified synthesis; use revise for those repairable issues. Reject only when the underlying verified synthesis is fundamentally insufficient and no final-answer repair can make it decision-safe. Return only JSON.`;
+  return `Independently red-team the verified root synthesis before the executive judge writes a final answer. You have not seen a final draft.\n\nGOAL:\n${goal}\n\nREQUIREMENTS:\n${JSON.stringify(requirements)}\n\nROOT SYNTHESIS:\n${JSON.stringify(root)}\n\nUNSUCCESSFUL TASKS:\n${JSON.stringify(failedTasks)}\n\nHOST-VERIFIED PROVENANCE BOUNDARY:\nThe root is an immutable reduction of accepted leaf artifacts whose G0/G2/G3 receipts, Oracle observations, and independent reviewer decisions were already verified by the host. For a workspace-change task, a host-generated coding-completion claim/check may additionally bind the accepted source artifact to protected checks, independent audit, tree hash, and Single Committer integration. That evidence is created after the worker's honest pre-integration statement that host checks are pending; when present, treat the later host proof as authoritative completion evidence and do not call those checks or integration unexecuted. You do not have a raw workspace tool in this final review. Do not fail or reject merely because you cannot reopen the original files; instead assess the supplied claim/evidence lineage and require any remaining provenance limitation to stay explicit.\n\nYour validatorId must be exactly ${validatorId}. Evaluate requirement coverage, provenance limits, unresolved conflicts, unsupported certainty, costly failure modes, and whether gaps must remain explicit. Accept means no material final-answer change is needed. Revise means the executive judge can repair framing, caveats, traceable specificity, or next actions using the verified synthesis; use revise for those repairable issues. Reject only when the underlying verified synthesis is fundamentally insufficient and no final-answer repair can make it decision-safe. Return only JSON.`;
 }
 
 export function votesFeedback(votes: ValidationVote[]): string[] {

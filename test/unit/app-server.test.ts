@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
@@ -141,6 +141,38 @@ test("internal swarm threads are ephemeral and tagged by default while persisten
   }
 });
 
+test("workspace-local image inputs reach Luna as actual bounded multimodal items", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "luna-local-image-"));
+  const preview = join(workspace, "preview.png");
+  const outside = join(tmpdir(), `luna-outside-${Date.now()}.png`);
+  await writeFile(preview, Buffer.from("89504e470d0a1a0a", "hex"));
+  await writeFile(outside, Buffer.from("89504e470d0a1a0a", "hex"));
+  const instance = new CodexAppServerBackend({
+    workspace,
+    codexPath: process.execPath,
+    codexArgs: [fakeCodex],
+    config: DEFAULT_CONFIG,
+  });
+  try {
+    const response = await instance.run({
+      ...request("local-image", "echo-turn-input"),
+      localImagePaths: [preview],
+    });
+    assert.deepEqual(JSON.parse(response.text), [
+      { type: "text", text: "echo-turn-input", text_elements: [] },
+      { type: "localImage", path: preview, detail: "original" },
+    ]);
+    await assert.rejects(
+      instance.run({ ...request("outside-image", "echo-turn-input"), localImagePaths: [outside] }),
+      /escapes the active workspace/u,
+    );
+  } finally {
+    await instance.close();
+    await rm(workspace, { recursive: true, force: true });
+    await rm(outside, { force: true });
+  }
+});
+
 test("App Server raw response usage is summed exactly for one logical turn", async () => {
   const instance = backend();
   try {
@@ -154,6 +186,112 @@ test("App Server raw response usage is summed exactly for one logical turn", asy
       reasoningOutputTokens: 15,
     });
     assert.equal(response.tokenUsageComplete, true);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("exact turn usage receipt closes metering when an upstream raw receipt omits usage", async () => {
+  const instance = backend();
+  try {
+    const response = await instance.run(request("turn-token-usage", "emit-thread-token-usage"));
+    assert.deepEqual(response.tokenUsage, {
+      totalTokens: 80,
+      inputTokens: 55,
+      cachedInputTokens: 15,
+      cacheWriteInputTokens: 0,
+      outputTokens: 25,
+      reasoningOutputTokens: 8,
+    });
+    assert.equal(response.tokenUsageComplete, true);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("conflicting exact token receipts remain unmetered instead of selecting a convenient total", async () => {
+  const instance = backend();
+  try {
+    const response = await instance.run(request("conflicting-token-usage", "emit-conflicting-token-usage"));
+    assert.deepEqual(response.tokenUsage, {
+      totalTokens: 41,
+      inputTokens: 30,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 10,
+      reasoningOutputTokens: 3,
+    });
+    assert.equal(response.tokenUsageComplete, false);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("early raw response usage is turn-filtered before immutable response deduplication", async () => {
+  const instance = backend();
+  try {
+    const response = await instance.run(request("token-usage-race", "emit-token-usage-race"));
+    assert.equal(response.text, "done");
+    assert.deepEqual(response.tokenUsage, {
+      totalTokens: 100,
+      inputTokens: 70,
+      cachedInputTokens: 20,
+      cacheWriteInputTokens: 5,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+    });
+    assert.equal(response.tokenUsageComplete, false);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("all early turn notifications are deferred, exact-turn filtered, and memory bounded", async () => {
+  const instance = backend();
+  try {
+    const response = await instance.run(request("early-turn-events", "emit-early-turn-events"));
+    assert.equal(response.text, "early-correct");
+    await assert.rejects(
+      () => instance.run(request("early-turn-overflow", "emit-early-overflow")),
+      /early turn-notification limit/,
+    );
+  } finally {
+    await instance.close();
+  }
+});
+
+test("failed and aborted turns preserve observed partial token usage", async () => {
+  const instance = backend();
+  const expected = {
+    totalTokens: 25,
+    inputTokens: 18,
+    cachedInputTokens: 4,
+    cacheWriteInputTokens: 1,
+    outputTokens: 7,
+    reasoningOutputTokens: 2,
+  };
+  try {
+    const failed = await instance.run(request("token-usage-failed", "emit-token-usage-failed")).then(
+      () => undefined,
+      (error: unknown) => error as Error & { tokenUsage?: unknown; tokenUsageComplete?: boolean },
+    );
+    assert.ok(failed);
+    assert.match(failed.message, /fixture failure/);
+    assert.deepEqual(failed.tokenUsage, expected);
+    assert.equal(failed.tokenUsageComplete, true);
+
+    const controller = new AbortController();
+    const pending = instance.run(request("token-usage-abort", "emit-token-usage-abort"), controller.signal);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    controller.abort();
+    const aborted = await pending.then(
+      () => undefined,
+      (error: unknown) => error as Error & { tokenUsage?: unknown; tokenUsageComplete?: boolean },
+    );
+    assert.ok(aborted);
+    assert.equal(aborted.name, "AbortError");
+    assert.deepEqual(aborted.tokenUsage, expected);
+    assert.equal(aborted.tokenUsageComplete, true);
   } finally {
     await instance.close();
   }
@@ -184,6 +322,48 @@ test("dynamic read calls reach the host session and return immutable receipts", 
     assert.equal(Object.isFrozen(response.hostToolReceipts), true);
     assert.equal(Object.isFrozen(response.hostToolReceipts?.[0]), true);
     assert.equal((instance as unknown as { activeHostTools: Map<string, unknown> }).activeHostTools.size, 0);
+  } finally {
+    await instance.close();
+  }
+});
+
+test("allowlisted web-fetch stays host-mediated while the App Server sandbox network remains off", async () => {
+  const instance = backend(false);
+  let invoked = 0;
+  const researchSession = {
+    tools: [{
+      type: "function" as const,
+      name: "web-fetch",
+      description: "replay immutable research evidence",
+      inputSchema: { type: "object" },
+    }],
+    invoke: async (call: { tool: string; arguments: unknown }) => {
+      invoked += 1;
+      assert.equal(call.tool, "web-fetch");
+      assert.deepEqual(call.arguments, { mode: "replay", snapshotHash: `sha256:${"a".repeat(64)}` });
+      return {
+        content: { trust: "untrusted_external_content", body: "official evidence" },
+        receipt: { kind: "web-research", receiptId: "wrr-test" },
+      };
+    },
+  };
+  try {
+    const response = await instance.run({
+      ...request("dynamic-web-fetch", "dynamic-tool-web-fetch"),
+      workOrderId: "WO-dynamic-web-fetch",
+      roleContract: readOnlyRole,
+      effectiveToolPolicy: {
+        allowedTools: ["web-fetch"],
+        network: "allowlist",
+        allowedDomains: ["github.com"],
+        readScopes: [],
+        writeScopes: [],
+      },
+      hostToolSession: researchSession,
+    });
+    assert.equal(invoked, 1);
+    assert.match(response.text, /untrusted_external_content/);
+    assert.deepEqual(response.hostToolReceipts, [{ kind: "web-research", receiptId: "wrr-test" }]);
   } finally {
     await instance.close();
   }

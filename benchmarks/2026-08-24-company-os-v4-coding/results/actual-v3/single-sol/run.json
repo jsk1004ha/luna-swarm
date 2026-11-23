@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 2,
+  "comparisonId": "actual-v3",
+  "diagnosticSeed": "smoke-1",
+  "arm": "single-sol",
+  "system": "single-codex-sol-session",
+  "model": "gpt-5.6-sol",
+  "baseCommit": "8ef24a10550311e60658fcb36ba84cb12e09e64f",
+  "candidateRef": "refs/heads/single-sol-candidate",
+  "candidateCommit": "91e894433c875c664c454b1b18d8e33d53c9065c",
+  "startedAt": "2026-08-23T19:22:50.871Z",
+  "wallMs": 457314,
+  "timeBudgetMs": 3600000,
+  "exitCode": 0,
+  "timedOut": false,
+  "changedPaths": [
+    "src/crash-safe-lease-log.mjs"
+  ],
+  "completion": {
+    "complete": true,
+    "status": "candidate-frozen",
+    "completedAt": "2026-08-23T19:30:28.191Z",
+    "attemptCount": 1,
+    "attempts": [
+      {
+        "index": 1,
+        "mode": "initial",
+        "startedAt": "2026-08-23T19:22:51.035Z",
+        "completedAt": "2026-08-23T19:30:27.114Z",
+        "wallMs": 456018,
+        "exitCode": 0,
+        "timedOut": false,
+        "completionStatus": "completed",
+        "metrics": {
+          "sessionCount": 1,
+          "subagentSignals": 0,
+          "networkToolSignals": 0,
+          "modelCalls": 1,
+          "eventCount": 1,
+          "tokenUsage": {
+            "totalTokens": 43861,
+            "inputTokens": 27533,
+            "cachedInputTokens": 27392,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 16328,
+            "reasoningOutputTokens": 8195
+          },
+          "tokenMeteredCalls": 1,
+          "tokenUnmeteredCalls": 0,
+          "tokenUsageComplete": true,
+          "costUsd": null,
+          "costReportedCalls": 0,
+          "costUnreportedCalls": 1,
+          "costComplete": false
+        },
+        "manifestSha256": "sha256:997121d76122683707d496801dcf25bce8000a1f27b333f3b5e4224436688a28",
+        "sourceSha256": "sha256:73b226fb7637f275d2652d8e57e9151dcb6384e6ca5d886fe32676b6b7ade497",
+        "sourceBytes": 29357,
+        "publicTestsExitCode": 0,
+        "publicTestsTimedOut": false,
+        "publicTestsTrajectorySha256": "sha256:47ab08a65066dab43014efd80637f0422d2374e74ff94ea923789de016801ecc"
+      }
+    ]
+  },
+  "frozenInputs": {
+    "missionSha256": "sha256:3c6ddc44078f783a99ca54c0e3e3ab3f361dbff26b359dce054c4a76ca7d733b",
+    "fixtureBundleSha256": "sha256:8af456d4a71aa12a0edc4d4cc70a12c92a882525d2f69d28f287ff7a734d864a",
+    "contractSha256": "sha256:57253c64523d8f1c87217630a63b7029280d2a3aa864ec6a9f05a35b0db057b9",
+    "packageSha256": "sha256:dc47a053e585155207b3b1a7bfa8db2893bc5ee5985ea9fe8cd02b7c93a22b3a",
+    "publicTestsSha256": [
+      "sha256:f834d3e181d33720b859f0f567154437cf2cc68cb6d1844169d39c0cf92f3019",
+      "sha256:823fca41f845e68761f0c39c816e4e6956947db2e81f7c5fe0f8644097590cc4"
+    ],
+    "hiddenSuiteSha256": "sha256:f904888908b67d007e435b2465dc22b1e1ba8cb2f36f66e22be09bbbe6a3239d",
+    "configSha256": null,
+    "codingPolicySha256": null
+  },
+  "candidate": {
+    "patchSha256": "sha256:f3150f0fb3e013b2009f6ea3e39e2e7ceff2c13625a4f490e773c055640a1707",
+    "sourceSha256": "sha256:73b226fb7637f275d2652d8e57e9151dcb6384e6ca5d886fe32676b6b7ade497",
+    "bundleSha256": "sha256:71e2d4202644ed10c0969761e3369965d695f8651181295145be1d9429ff19ab"
+  },
+  "isolation": "remote-less-disposable-clone; hidden suite absent from candidate workspace/context; model read-only and tool-less; host writes only exact structured sourcePath; no network authorized",
+  "qualityEvaluated": false,
+  "promotionEligible": false,
+  "metrics": {
+    "sessionCount": 1,
+    "subagentSignals": 0,
+    "networkToolSignals": 0,
+    "modelCalls": 1,
+    "eventCount": 1,
+    "tokenUsage": {
+      "totalTokens": 43861,
+      "inputTokens": 27533,
+      "cachedInputTokens": 27392,
+      "cacheWriteInputTokens": 0,
+      "outputTokens": 16328,
+      "reasoningOutputTokens": 8195
+    },
+    "tokenMeteredCalls": 1,
+    "tokenUnmeteredCalls": 0,
+    "costUsd": null,
+    "costReportedCalls": 0,
+    "costUnreportedCalls": 1,
+    "tokenUsageComplete": true,
+    "costComplete": false
+  },
+  "telemetryComplete": true,
+  "directProtocol": "company-os-v4/direct-full-source@1"
+}
