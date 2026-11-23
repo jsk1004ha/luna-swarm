@@ -1,0 +1,59 @@
+name: Luna OSS Readiness
+description: Audit repository artifacts required for healthy open-source maintenance without sending source code to a network service.
+author: jsk1004ha
+branding:
+  icon: check-circle
+  color: purple
+inputs:
+  root:
+    description: Repository-relative directory to audit.
+    required: false
+    default: .
+  fail-under:
+    description: Fail with exit code 2 when the readiness score is below this integer threshold.
+    required: false
+    default: "80"
+  report-path:
+    description: Repository-relative or absolute Markdown report path.
+    required: false
+    default: oss-readiness-report.md
+outputs:
+  score:
+    description: Normalized readiness score from 0 to 100.
+    value: ${{ steps.audit.outputs.score }}
+  status:
+    description: One of ready, needs-work, or blocked.
+    value: ${{ steps.audit.outputs.status }}
+  report-path:
+    description: Absolute path to the generated report.
+    value: ${{ steps.audit.outputs.report_path }}
+runs:
+  using: composite
+  steps:
+    - id: audit
+      shell: bash
+      env:
+        LUNA_OSS_ROOT: ${{ inputs.root }}
+        LUNA_OSS_FAIL_UNDER: ${{ inputs.fail-under }}
+        LUNA_OSS_REPORT_PATH: ${{ inputs.report-path }}
+      run: |
+        set -u
+        root="$LUNA_OSS_ROOT"
+        report="$LUNA_OSS_REPORT_PATH"
+        if [[ "$root" != /* ]]; then root="$GITHUB_WORKSPACE/$root"; fi
+        if [[ "$report" != /* ]]; then report="$GITHUB_WORKSPACE/$report"; fi
+
+        set +e
+        node "$GITHUB_ACTION_PATH/../../../scripts/oss-readiness.mjs" \
+          --root "$root" \
+          --format markdown \
+          --output "$report" \
+          --fail-under "$LUNA_OSS_FAIL_UNDER" \
+          --github-output "$GITHUB_OUTPUT"
+        exit_code=$?
+        set -e
+
+        if [[ -f "$report" ]]; then
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit "$exit_code"

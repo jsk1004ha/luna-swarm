@@ -7,12 +7,12 @@
     "url": "git+https://github.com/jsk1004ha/luna-swarm.git"
   },
   "type": "module",
-  "private": true,
   "workspaces": [
     "ui"
   ],
   "bin": {
-    "luna-swarm": "./dist/src/cli.js"
+    "luna-swarm": "./dist/src/cli.js",
+    "luna-oss-readiness": "./scripts/oss-readiness.mjs"
   },
   "files": [
     "dist/src/",
@@ -20,7 +20,14 @@
     "DESIGN.md",
     "SECURITY.md",
     "docs/",
-    "examples/"
+    "examples/",
+    "scripts/oss-readiness.mjs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "GOVERNANCE.md",
+    "CODE_OF_CONDUCT.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && npm run build:ui",
@@ -30,7 +37,7 @@
     "dev": "tsx src/cli.ts",
     "dev:ui": "npm run dev --workspace=luna-swarm-ui",
     "start": "node dist/src/cli.js",
-    "test": "npm run test:server && npm run test:ui",
+    "test": "npm run test:server && npm run test:ui && npm run test:oss",
     "test:server": "node scripts/test-server.mjs all",
     "test:server:fast": "node scripts/test-server.mjs fast",
     "test:server:serial": "node scripts/test-server.mjs serial",
@@ -38,7 +45,9 @@
     "test:ui": "npm test --workspace=luna-swarm-ui",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"ui/src/**/*.{ts,tsx}\" && node scripts/check-import-cycles.mjs",
     "check": "tsc -p tsconfig.json --noEmit && npm run check --workspace=luna-swarm-ui",
-    "ui": "tsx src/cli.ts ui"
+    "ui": "tsx src/cli.ts ui",
+    "oss-readiness": "node scripts/oss-readiness.mjs --root .",
+    "test:oss": "node --test scripts/oss-readiness.test.mjs"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
@@ -49,14 +58,30 @@
     "pdfkit": "0.19.1",
     "typescript": "^5.9.0",
     "ws": "8.21.3",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/pdfkit": "0.17.6",
     "@types/ws": "8.18.1",
-    "eslint": "10.8.1",
+    "eslint": "10.15.0",
     "tsx": "^4.20.0",
-    "typescript-eslint": "8.67.0"
+    "typescript-eslint": "8.73.0"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/jsk1004ha/luna-swarm#readme",
+  "bugs": {
+    "url": "https://github.com/jsk1004ha/luna-swarm/issues"
+  },
+  "keywords": [
+    "ai-agents",
+    "codex",
+    "github-actions",
+    "multi-agent-system",
+    "orchestration",
+    "oss-maintenance"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }

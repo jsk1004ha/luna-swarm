@@ -1,0 +1,47 @@
+name: Feature request
+description: Propose a focused capability or workflow improvement.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete user or maintainer problem, not only the desired implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Define inputs, outputs, authority boundaries, failure behavior, and compatibility expectations.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: Explain tests, fixtures, benchmarks, or operational evidence that would demonstrate success.
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Safety, cost, and maintenance risks
+      description: Include credential, permission, concurrency, persistence, and backward-compatibility risks where relevant.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and documentation.
+          required: true
+        - label: I am willing to help validate or implement this proposal.
+          required: false

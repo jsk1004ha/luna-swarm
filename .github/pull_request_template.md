@@ -1,6 +1,20 @@
-## Outcome
+## Problem and impact
 
-<!-- What user-visible or invariant-level result does this change provide? -->
+Describe the defect, limitation, or maintainer need this change addresses.
+
+## Approach
+
+Explain the implementation and important alternatives considered.
+
+## Validation
+
+List exact commands and results. Include regression tests, fixtures, benchmark receipts, or screenshots where relevant.
+
+- [ ] `npm run lint`
+- [ ] `npm run check`
+- [ ] `npm test`
+- [ ] `npm run build`
+- [ ] Additional focused validation is described below.
 
 ## Safety boundaries
 
@@ -9,13 +23,19 @@
 - [ ] Coding changes still pass protected checks, independent audit, and Single Committer
 - [ ] Evolution promotion remains manual and rollback-safe
 
-## Verification
+## Risk review
 
-- [ ] `npm run lint`
-- [ ] `npm run check`
-- [ ] Relevant targeted tests
-- [ ] `npm run build`
+- [ ] Authority, credential, host-tool, and safety boundaries are unchanged or explicitly reviewed.
+- [ ] Persistence and backward compatibility are unchanged or migration behavior is documented.
+- [ ] Performance and cost claims have reproducible evidence.
+- [ ] Logs, fixtures, and screenshots contain no credentials or private data.
 
-## Remaining risks
+## Documentation and release notes
 
-<!-- Crash points, platform differences, compatibility, or follow-up work. -->
+- [ ] User-facing documentation is updated where needed.
+- [ ] `CHANGELOG.md` is updated for a notable change.
+- [ ] No documentation or release-note change is required, with the reason stated below.
+
+## Related issue
+
+Closes or advances:
